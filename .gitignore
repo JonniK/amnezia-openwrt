@@ -1,0 +1,9 @@
+# AWG import (secrets): everything under local/ except tracked readmes
+local/*
+!local/README.md
+!local/README.ru.md
+
+# OpenWrt snapshots — see openwrt-backups/.gitignore
+
+# Uncomment to keep the large JSON out of the repo
+# amnezia_sites_ru_geoip.json

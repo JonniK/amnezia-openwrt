@@ -1,0 +1,4 @@
+# Local OpenWrt snapshots (UCI, VPN keys, DHCP, LAN) — not for git.
+# Whole trees like after-amnezia/ are ignored; only this file is tracked.
+*
+!.gitignore
