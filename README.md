@@ -18,7 +18,7 @@ Scripts and notes for deploying **AmneziaWG 2.0** on **OpenWrt** with **policy-b
 4. **Router snapshots under `openwrt-backups/`** (local only, see `openwrt-backups/.gitignore`):  
    Examples: `clean-after-reset`, `before-amnezia`, `after-amnezia`—whatever labels you choose when running `openwrt-backup.sh`.
 
-5. **`amnezia_sites_ru_geoip.json`** — large CIDR JSON (optional “RU direct” source). Current shell scripts use **ipdeny** instead.
+5. **`amnezia_sites_ru_geoip.json`** — JSON snapshot of **[ipdeny `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)** (same CIDRs, converted to `{hostname,ip}` records). Current shell scripts still fetch **`ru.zone`** on the router instead. **Details / refresh:** [docs/amnezia_sites_ru_geoip.md](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md).
 
 6. **Amnezia client export** (`vpn://…`) — for the Amnezia desktop app only, not for router UCI.
 
@@ -33,7 +33,8 @@ Scripts and notes for deploying **AmneziaWG 2.0** on **OpenWrt** with **policy-b
 | `openwrt-restore.sh` | Restore by label; `--uci-only` for configs only. Prompts unless `OPENWRT_RESTORE_YES=1`. |
 | `openwrt-emergency-internet.sh` | Strip VPN/PBR, reset typical WAN DHCP + LAN `192.168.1.1/24`. |
 | `openwrt-backups/<label>/` | Extracted backup: `config/`, `meta/`, `README.txt` with restore hints. |
-| `amnezia_sites_ru_geoip.json` | Optional CIDR list (not used by current sh scripts). |
+| `amnezia_sites_ru_geoip.json` | Optional CIDR list (not used by current sh scripts). [Docs](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) |
+| `docs/amnezia_sites_ru_geoip*.md` | Provenance & how to refresh `amnezia_sites_ru_geoip.json`. |
 | [CHEATSHEET.md](CHEATSHEET.md) | Command table · [Шпаргалка (RU)](CHEATSHEET.ru.md) |
 | `local/README.md` | Default import location (`local/awg.conf`, not in git). [Русский](local/README.ru.md) |
 | `.gitignore` | Ignores `local/*` except `local/README*.md`; see `openwrt-backups/.gitignore` for snapshots. |
@@ -92,7 +93,7 @@ Test a **non‑**Russian destination; some CDNs map oddly. Check `ifstatus awg1`
 ipdeny updates over time; CDN edge cases exist. On the router: `/etc/init.d/pbr restart` ( `ru-direct.sh` refreshes `ru.zone` when needed).
 
 **Use `amnezia_sites_ru_geoip.json` instead of ipdeny?**  
-Current sh scripts **do not** wire it in—you’d need a custom generator / nft rules.
+Current sh scripts **do not** wire it in—you’d need a custom generator / nft rules. The JSON is already derived from the same **[`ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)** list; see [docs/amnezia_sites_ru_geoip.md](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) to regenerate it.
 
 **LAN is not `192.168.1.0/24` or I have a guest network.**  
 Change the subnet in `99-lan-vpn.sh` and PBR `src_addr` / nft `ip saddr` in all involved scripts, then redeploy or edit UCI / `/etc/pbr.d` manually.
