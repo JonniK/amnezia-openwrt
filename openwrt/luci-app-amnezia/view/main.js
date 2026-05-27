@@ -15,6 +15,12 @@ var pollFn = null;
 // mid-uci-commit re-enables the button and a second click stacks restarts.
 var applyInFlight = false;
 
+// Debounce: pbr's async interface trigger (fired by ifup/ifdown awg1) can
+// briefly leave /var/run/pbr.nft mid-rewrite, so one transient unhealthy
+// poll right after a tunnel toggle is normal. Require 2 consecutive bad
+// polls before flipping the UI to red.
+var pbrBadCount = 0;
+
 // Signature of the most recently rendered candidate list. paintApply() skips
 // rebuilding the <select> when the signature is unchanged -- otherwise an
 // open dropdown would be closed by the browser on every 5s poll.
@@ -76,6 +82,11 @@ function parseRuStamp(text) {
 }
 
 function parseZapret(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function parsePbr(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
@@ -152,6 +163,44 @@ function paintTunnel(s) {
 		btn.disabled = false;
 	}
 	if (raw) raw.textContent = s.raw;
+}
+
+function paintPbr(s) {
+	var dot = document.getElementById('pbr-dot');
+	var label = document.getElementById('pbr-label');
+	var detail = document.getElementById('pbr-detail');
+	var btn = document.getElementById('pbr-reload-btn');
+
+	if (!s) {
+		if (dot) dot.style.background = '#888';
+		if (label) label.textContent = _('pbr: unknown');
+		if (detail) detail.textContent = '';
+		if (btn) btn.className = 'btn cbi-button-action';
+		return;
+	}
+
+	if (s.healthy) { pbrBadCount = 0; } else { pbrBadCount++; }
+	var displayBad = pbrBadCount >= 2;
+
+	var colour = !displayBad ? '#3c763d'
+		: (s.running ? '#f0ad4e' : '#a94442');
+	if (dot) dot.style.background = colour;
+
+	var bits = [];
+	bits.push(s.running ? _('running') : _('stopped'));
+	bits.push(s.nft_ok ? _('nft ok') : _('nft BAD'));
+	bits.push(_('ipdeny ') + s.ipdeny_count);
+	if (s.recent_failure) bits.push(_('recent FAILED TO START'));
+	if (label) label.textContent = bits.join(' / ');
+
+	if (detail) detail.textContent = s.nft_error || '';
+
+	// Reload button: action style by default, negative once we've actually
+	// confirmed multiple bad polls (debounced) so a 5s transient during
+	// awg-toggle's ifup/ifdown doesn't flash the button red.
+	if (btn) {
+		btn.className = 'btn ' + (displayBad ? 'cbi-button-negative' : 'cbi-button-action');
+	}
 }
 
 function paintZapret(s, errMsg) {
@@ -349,6 +398,32 @@ function paintRuStamp(stamp) {
 }
 
 return view.extend({
+	handlePbrReload: function(ev) {
+		var btn = document.getElementById('pbr-reload-btn');
+		if (btn) { btn.disabled = true; btn.textContent = _('Reloading...'); }
+		return fs.exec('/usr/bin/pbr-reload').then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				(res.code === 0) ? 'info' : 'warning');
+			if (btn) { btn.disabled = false; btn.textContent = _('Reload PBR'); }
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('PBR reload failed: ') + err), 'danger');
+			var b = document.getElementById('pbr-reload-btn');
+			if (b) { b.disabled = false; b.textContent = _('Reload PBR'); }
+		});
+	},
+
+	handleRefresh: function(ev) {
+		var btn = document.getElementById('manual-refresh-btn');
+		if (btn) { btn.disabled = true; }
+		return this.refresh().then(function() {
+			if (btn) btn.disabled = false;
+		}, function() {
+			if (btn) btn.disabled = false;
+		});
+	},
+
 	handleToggle: function(ev) {
 		var btn = document.getElementById('awg-toggle-btn');
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Working...'); }
@@ -531,7 +606,10 @@ return view.extend({
 			var cand = parseCandidates((res[1] && res[1].stdout) || '');
 			paintApply(st, cand);
 		});
-		return Promise.all([p1, p2, p3, p4, p5]);
+		var p6 = L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }).then(function(res) {
+			paintPbr(parsePbr((res && res.stdout) || ''));
+		});
+		return Promise.all([p1, p2, p3, p4, p5, p6]);
 	},
 
 	load: function() {
@@ -542,7 +620,8 @@ return view.extend({
 			L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
-			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' })
+			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
+			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' })
 		]);
 	},
 
@@ -554,6 +633,7 @@ return view.extend({
 		var bcLog = (data && data[4] && data[4].stdout) || '';
 		var applySt = parseApplyState((data && data[5] && data[5].stdout) || '');
 		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
+		var pbr = parsePbr((data && data[7] && data[7].stdout) || '');
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
@@ -586,6 +666,31 @@ return view.extend({
 								'class': 'btn ' + (initial.up ? 'cbi-button-negative' : 'cbi-button-positive'),
 								'click': ui.createHandlerFn(this, 'handleToggle')
 							}, initial.up ? _('Turn OFF') : _('Turn ON'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('PBR')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('span', {
+								'id': 'pbr-dot',
+								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:' +
+									(pbr && pbr.healthy ? '#3c763d' : (pbr && pbr.running ? '#f0ad4e' : '#a94442')) +
+									';margin-right:8px;vertical-align:middle;'
+							}),
+							E('span', { 'id': 'pbr-label' }, pbr
+								? ((pbr.running ? _('running') : _('stopped')) + ' / ' +
+								   (pbr.nft_ok ? _('nft ok') : _('nft BAD')) + ' / ' +
+								   _('ipdeny ') + pbr.ipdeny_count +
+								   (pbr.recent_failure ? (' / ' + _('recent FAILED TO START')) : ''))
+								: _('pbr: unknown')),
+							E('button', {
+								'id': 'pbr-reload-btn',
+								'style': 'margin-left:12px;',
+								'class': 'btn ' + (pbr && pbr.healthy ? 'cbi-button-action' : 'cbi-button-negative'),
+								'click': ui.createHandlerFn(this, 'handlePbrReload')
+							}, _('Reload PBR')),
+							E('div', { 'id': 'pbr-detail', 'style': 'margin-top:4px;color:#a94442;font-size:11px;' },
+								(pbr && pbr.nft_error) ? pbr.nft_error : '')
 						])
 					])
 				])
@@ -780,7 +885,16 @@ return view.extend({
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('Live status')),
+				E('div', { 'style': 'display:flex;align-items:center;justify-content:space-between;' }, [
+					E('h3', { 'style': 'margin:0;' }, _('Live status')),
+					E('button', {
+						'id': 'manual-refresh-btn',
+						'class': 'btn cbi-button-action',
+						'style': 'margin-left:12px;',
+						'title': _('Force an immediate poll instead of waiting for the 5s tick'),
+						'click': ui.createHandlerFn(this, 'handleRefresh')
+					}, _('Refresh status'))
+				]),
 				E('div', { 'class': 'cbi-section-node' }, [
 					E('pre', {
 						'id': 'awg-status-raw',

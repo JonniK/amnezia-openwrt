@@ -1,6 +1,14 @@
 #!/bin/sh
-# Toggle AmneziaWG (awg1) + PBR together.
-# Installed as /usr/bin/awg-toggle; invoked from LuCI Custom Commands.
+# Toggle AmneziaWG (awg1). Installed as /usr/bin/awg-toggle, invoked from
+# the LuCI Amnezia view.
+#
+# We deliberately do NOT touch /etc/init.d/pbr here. pbr 1.2.2 monitors awg1
+# via interface triggers and reconfigures routes on its own when the iface
+# goes up/down. Calling `pbr stop`+`pbr start` around ifup/ifdown leaves fw4
+# in a half-built state -- the next `pbr start` then fails with
+# "Installing fw4 nft file [✗]" and the ipdeny set stays empty until a
+# manual `pbr reload`. If pbr is somehow already broken, the LuCI Tunnel
+# panel exposes a separate "Reload PBR" button.
 set -u
 IFACE=awg1
 
@@ -9,7 +17,6 @@ is_up() {
 }
 
 if is_up; then
-	/etc/init.d/pbr stop 2>/dev/null || true
 	ifdown "$IFACE" 2>/dev/null || true
 	echo "AmneziaWG: OFF"
 else
@@ -21,14 +28,9 @@ else
 		sleep 1
 	done
 	if is_up; then
-		/etc/init.d/pbr start 2>/dev/null || true
 		echo "AmneziaWG: ON"
 	else
-		# Tunnel failed to come up: ensure PBR is stopped so LAN falls back to direct WAN
-		# (otherwise stale pbr rules targeting dead awg1 would blackhole traffic).
-		/etc/init.d/pbr stop 2>/dev/null || true
 		echo "AmneziaWG: FAILED to come up (peer unreachable? check /etc/config/network)"
-		echo "PBR stopped; traffic falls back to direct WAN."
 	fi
 fi
 

@@ -59,7 +59,7 @@ CHK
 
 start_remote_deploy() {
   echo "=== Upload deploy script + AWG config + PBR helpers ==="
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/install-zapret.sh; do
+  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/install-zapret.sh; do
     cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   ssh_run "cat > /tmp/openwrt-deploy-body.sh && chmod +x /tmp/openwrt-deploy-body.sh" <<'REMOTE_BODY'
@@ -327,7 +327,9 @@ need_wan
 need_dns
 nslookup -type=A mail.ru 127.0.0.1 >/dev/null 2>&1 || log "WARN: mail.ru lookup failed (may need time)"
 
-_ipdeny=$(nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null | grep -c '/' || echo 0)
+_ipdeny=$(nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null \
+  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l)
+_ipdeny=$(printf '%s' "$_ipdeny" | tr -d ' ')
 log "ipdeny entries: $_ipdeny"
 [ "$_ipdeny" -gt 100 ] || fail "ipdeny set too small ($_ipdeny)"
 

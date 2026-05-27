@@ -6,12 +6,26 @@
 set -eu
 
 SRC="${SRC:-/tmp/awg-toggle.sh}"
+PBR_STATUS_SRC="${PBR_STATUS_SRC:-/tmp/pbr-status.sh}"
+PBR_RELOAD_SRC="${PBR_RELOAD_SRC:-/tmp/pbr-reload.sh}"
 DST=/usr/bin/awg-toggle
 STATUS=/usr/bin/awg-status
+PBR_STATUS_DST=/usr/bin/pbr-status
+PBR_RELOAD_DST=/usr/bin/pbr-reload
 
 [ -f "$SRC" ] || { echo "missing $SRC"; exit 1; }
 cp "$SRC" "$DST"
 chmod 0755 "$DST"
+
+# Optional PBR helpers (the LuCI Amnezia view uses them, the older Custom
+# Commands UI does not -- skip silently if they were not uploaded so this
+# installer is back-compatible with older deploy script variants).
+if [ -f "$PBR_STATUS_SRC" ]; then
+	cp "$PBR_STATUS_SRC" "$PBR_STATUS_DST" && chmod 0755 "$PBR_STATUS_DST"
+fi
+if [ -f "$PBR_RELOAD_SRC" ]; then
+	cp "$PBR_RELOAD_SRC" "$PBR_RELOAD_DST" && chmod 0755 "$PBR_RELOAD_DST"
+fi
 
 cat > "$STATUS" <<'STATUS_EOF'
 #!/bin/sh
