@@ -8,8 +8,11 @@ CONF_LOCAL="${CONF_LOCAL:-$SCRIPT_DIR/local/awg.conf}"
 
 [ -f "$CONF_LOCAL" ] || { echo "Missing $CONF_LOCAL (see local/README.md or set CONF_LOCAL)"; exit 1; }
 
-echo "1) Upload config..."
+echo "1) Upload config + PBR helpers..."
 cat "$CONF_LOCAL" | ssh "$SSH_HOST" 'cat > /tmp/awg-setup.conf'
+for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh; do
+  cat "$SCRIPT_DIR/$_f" | ssh "$SSH_HOST" "cat > /tmp/$(basename "$_f")"
+done
 
 echo "2) Install packages + configure on router..."
 ssh "$SSH_HOST" 'sh -s' <<'REMOTE'
@@ -39,6 +42,9 @@ fi
 
 opkg install pbr luci-app-pbr 2>/dev/null || true
 opkg install resolveip ip-full 2>/dev/null || true
+
+# dnsmasq-full: safe install (see openwrt/install-dnsmasq-full.sh)
+sh /tmp/install-dnsmasq-full.sh 2>/dev/null || true
 
 # --- Parse .conf ---
 get() {
@@ -125,82 +131,58 @@ if ! uci show firewall | grep -q "${ZONE}-lan"; then
 fi
 uci commit firewall
 
-# Bring up VPN BEFORE PBR
-/etc/init.d/firewall restart
-/etc/init.d/network restart
+# fw4 fragment: IPv4 set filled by dnsmasq for *.ru (survives fw4 reload)
+mkdir -p /etc/nftables.d
+cat > /etc/nftables.d/15-pbr-ru-tld4.nft <<'NFTFRAG'
+	set pbr_ru_tld4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+	}
+NFTFRAG
+
+# dnsmasq: put resolved *.ru addresses into pbr_ru_tld4 (OpenWrt 24+ config ipset stanza)
+sh /tmp/configure-dnsmasq-ru-nftset.sh 2>/dev/null || true
+
+# Bring up VPN BEFORE PBR (no full network restart — keeps SSH/WAN stable)
+/etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart
+sleep 2
+ifup "$IFACE" 2>/dev/null || ifup "$IFACE"
 sleep 5
-ifup "$IFACE" 2>/dev/null || true
-sleep 3
 
 # --- PBR: RU -> WAN (ipdeny), rest of LAN -> VPN ---
 mkdir -p /etc/pbr.d
-cat > /etc/pbr.d/ru-direct.sh <<'RUSCRIPT'
-#!/bin/sh
-TARGET_URL='https://www.ipdeny.com/ipblocks/data/countries/ru.zone'
-TARGET_FILE='/var/pbr_ru.zone'
-TARGET_TABLE='inet fw4'
-TARGET_INTERFACE='wan'
-NFTSET="pbr_${TARGET_INTERFACE}_4_dst_ip_user"
-BATCH=300
-_ret=0
-mkdir -p "${TARGET_FILE%/*}"
-[ -s "$TARGET_FILE" ] || wget -q -O "$TARGET_FILE" "$TARGET_URL" || return 1
-nft "flush element $TARGET_TABLE $NFTSET" 2>/dev/null || true
-batch=""; count=0
-while IFS= read -r cidr; do
-  [ -z "$cidr" ] && continue
-  case "$cidr" in \#*) continue ;; esac
-  if [ -z "$batch" ]; then batch="$cidr"; else batch="$batch, $cidr"; fi
-  count=$((count + 1))
-  if [ "$count" -ge "$BATCH" ]; then
-    nft "add element $TARGET_TABLE $NFTSET { $batch }" 2>/dev/null || _ret=1
-    batch=""; count=0
-  fi
-done < "$TARGET_FILE"
-[ -n "$batch" ] && nft "add element $TARGET_TABLE $NFTSET { $batch }" 2>/dev/null || _ret=1
-return $_ret
-RUSCRIPT
+cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
 chmod 755 /etc/pbr.d/ru-direct.sh
-
-cat > /etc/pbr.d/99-lan-vpn.sh <<'LANSCRIPT'
-#!/bin/sh
-# LAN: RU -> WAN (skip mark), everything else -> VPN
-nft add rule inet fw4 pbr_prerouting ip saddr { 192.168.1.0/24 } ip daddr @pbr_wan_4_dst_ip_user return comment "ru_direct_skip"
-nft add rule inet fw4 pbr_prerouting ip saddr { 192.168.1.0/24 } goto pbr_mark_0x020000 comment "lan_via_vpn"
-return 0
-LANSCRIPT
+LAN="$(ip -4 route show table main | awk '/dev br-lan proto kernel/{print $1; exit}')"
+[ -n "$LAN" ] || LAN="192.168.1.0/24"
+sed "s|__LAN__|$LAN|g" /tmp/99-lan-vpn-full.sh > /etc/pbr.d/99-lan-vpn.sh
 chmod 755 /etc/pbr.d/99-lan-vpn.sh
 
+# /etc/pbr.d/* is auto-loaded by PBR — do NOT add uci include entries (duplicates rules).
 while uci -q delete pbr.@policy[0]; do :; done
 idx=0
 while uci -q get pbr.@include[$idx] >/dev/null 2>&1; do
   path="$(uci -q get pbr.@include[$idx].path || true)"
-  if [ "$path" = '/etc/pbr.d/ru-direct.sh' ]; then
-    uci delete pbr.@include[$idx]
-  else
-    idx=$((idx + 1))
-  fi
+  case "$path" in
+    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete pbr.@include[$idx] ;;
+    *) idx=$((idx + 1)) ;;
+  esac
 done
 
 uci set pbr.config.enabled='1'
 uci set pbr.config.strict_enforcement='0'
 uci set pbr.config.resolver_set='none'
-while uci -q del_list pbr.config.supported_interface 2>/dev/null; do :; done
+uci -q delete pbr.config.supported_interface 2>/dev/null || true
 uci add_list pbr.config.supported_interface='awg1'
-
-uci add pbr include
-uci set pbr.@include[-1].path='/etc/pbr.d/ru-direct.sh'
-uci set pbr.@include[-1].enabled='1'
-
-uci add pbr include
-uci set pbr.@include[-1].path='/etc/pbr.d/99-lan-vpn.sh'
-uci set pbr.@include[-1].enabled='1'
-
 uci commit pbr
 
 /etc/init.d/pbr enable
 /etc/init.d/pbr restart
 sleep 5
+
+/etc/init.d/dnsmasq restart 2>/dev/null || true
+sleep 2
 
 echo "========== STATUS =========="
 echo -n "awg1 up: "
@@ -212,8 +194,10 @@ echo -n "awg ping: "
 ping -c 1 -W 3 -I "$IFACE" 1.1.1.1 >/dev/null && echo OK || echo FAIL
 echo "pbr:"
 /etc/init.d/pbr status 2>&1 | head -15
-echo "ru set size:"
+echo "ru set size (ipdeny):"
 nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null | grep -c '/' || true
+echo "ru tld set (dnsmasq .ru):"
+nft list set inet fw4 pbr_ru_tld4 2>/dev/null | grep -c '/' || true
 REMOTE
 
 echo "Done. From a LAN client: curl ifconfig.me (expect VPN IP for non-RU destinations)."

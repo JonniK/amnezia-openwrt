@@ -7,7 +7,7 @@ Scripts and notes for deploying **AmneziaWG 2.0** on **OpenWrt** with **policy-b
 ## What this does
 
 1. **Split routing (“RU direct, rest via VPN”)**  
-   Russian IPv4 ranges are loaded from [ipdeny `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone) into the PBR nftables set `pbr_wan_4_dst_ip_user`. For clients in **`192.168.1.0/24`**, non‑RU destinations are steered through **`awg1`**.
+   Russian IPv4 ranges are loaded from [ipdeny `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone) into the PBR nftables set `pbr_wan_4_dst_ip_user`. When **`dnsmasq-full`** is present, resolved **`*.ru`** IPv4 addresses are also stored in **`pbr_ru_tld4`** (dhcp `nftset` + `/etc/nftables.d/15-pbr-ru-tld4.nft`). For clients in **`192.168.1.0/24`**, traffic to either set stays on **WAN**; other destinations use **`awg1`**. More detail: [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md).
 
 2. **AmneziaWG in UCI**  
    Interface **`awg1`**, firewall zone **`awg1`**, LAN → VPN forwarding, peer with **`route_allowed_ips=0`** so the tunnel does **not** install a full default route—PBR chooses paths.
@@ -35,6 +35,7 @@ Scripts and notes for deploying **AmneziaWG 2.0** on **OpenWrt** with **policy-b
 | `openwrt-backups/<label>/` | Extracted backup: `config/`, `meta/`, `README.txt` with restore hints. |
 | `amnezia_sites_ru_geoip.json` | Optional CIDR list (not used by current sh scripts). [Docs](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) |
 | `docs/amnezia_sites_ru_geoip*.md` | Provenance & how to refresh `amnezia_sites_ru_geoip.json`. |
+| [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md) · [RU](docs/ru-tld-bypass.ru.md) | `.ru` DNS → nftset bypass and DNS tuning notes. |
 | [CHEATSHEET.md](CHEATSHEET.md) | Command table · [Шпаргалка (RU)](CHEATSHEET.ru.md) |
 | `local/README.md` | Default import location (`local/awg.conf`, not in git). [Русский](local/README.ru.md) |
 | `.gitignore` | Ignores `local/*` except `local/README*.md`; see `openwrt-backups/.gitignore` for snapshots. |
@@ -77,7 +78,7 @@ See **[CHEATSHEET.md](CHEATSHEET.md)** · [RU](CHEATSHEET.ru.md).
 ## FAQ
 
 **Difference between `setup-amnezia-full.sh` and `setup-openwrt-awg-pbr.sh`?**  
-`full` downloads AmneziaWG `.ipk` from GitHub for pinned **`VER`/`ARCH`/`TS`**, uploads the import, parses on the router from **`/tmp/awg-setup.conf`**, adds `99-lan-vpn.sh`, restarts in a fixed order. `setup-openwrt-awg-pbr.sh` parses `.conf` **on your machine** and passes values in a heredoc; it does **not** install AWG packages—you must have them already.
+`full` downloads AmneziaWG `.ipk` from GitHub for pinned **`VER`/`ARCH`/`TS`**, uploads the import, parses on the router from **`/tmp/awg-setup.conf`**, writes **`99-lan-vpn.sh`** + **`.ru` nftset** bits, restarts in a fixed order. `setup-openwrt-awg-pbr.sh` parses `.conf` **on your machine** and passes values over SSH; it does **not** install AWG packages—you must have them already. **Split-tunnel nft** (ipdeny + `99-lan-vpn` + dnsmasq `.ru`) is the same idea in both.
 
 **`Missing …` (no import file).**  
 Fix **`CONF_LOCAL`** or create **`local/awg.conf`** (see `local/README.md` / `local/README.ru.md`). Example:  
@@ -90,7 +91,7 @@ Usually **`ARCH`** or **`TS`** mismatch vs [awg-openwrt releases](https://github
 Test a **non‑**Russian destination; some CDNs map oddly. Check `ifstatus awg1`, PBR status, client in **`192.168.1.0/24`**. On the router, read the script footer (`awg ping`, `pbr`).
 
 **RU sites via VPN or odd routing.**  
-ipdeny updates over time; CDN edge cases exist. On the router: `/etc/init.d/pbr restart` ( `ru-direct.sh` refreshes `ru.zone` when needed).
+ipdeny updates over time; CDN edge cases exist. The **`.ru` nftset** helps once the router’s dnsmasq has resolved the name. On the router: `/etc/init.d/pbr restart` ( `ru-direct.sh` refreshes `ru.zone` when needed); **`/etc/init.d/dnsmasq restart`** after dhcp `nftset` changes. Slow DNS: [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md).
 
 **Use `amnezia_sites_ru_geoip.json` instead of ipdeny?**  
 Current sh scripts **do not** wire it in—you’d need a custom generator / nft rules. The JSON is already derived from the same **[`ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)** list; see [docs/amnezia_sites_ru_geoip.md](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) to regenerate it.

@@ -23,3 +23,4 @@ Run from the **repository root** (or set `BACKUP_ROOT` / `CONF_LOCAL` explicitly
 | Emergency: strip VPN/PBR | `./openwrt-emergency-internet.sh` |
 | “Outside RU” check from a client | `curl -4 ifconfig.me` or another non‑RU service |
 | Check on router (over SSH) | `ifstatus awg1; /etc/init.d/pbr status` |
+| Inspect RU bypass sets (router) | `nft list set inet fw4 pbr_wan_4_dst_ip_user \| head; nft list set inet fw4 pbr_ru_tld4 \| head` |

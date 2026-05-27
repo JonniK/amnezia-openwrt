@@ -23,3 +23,4 @@
 | Авария: убрать VPN/PBR | `./openwrt-emergency-internet.sh` |
 | Проверка «вне РФ» с клиента | `curl -4 ifconfig.me` или открыть зарубежный сервис |
 | Проверка на роутере (после SSH) | `ifstatus awg1; /etc/init.d/pbr status` |
+| Множества обхода RU (роутер) | `nft list set inet fw4 pbr_wan_4_dst_ip_user \| head; nft list set inet fw4 pbr_ru_tld4 \| head` |

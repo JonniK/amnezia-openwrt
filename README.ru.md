@@ -7,7 +7,7 @@
 ## Что здесь сделано
 
 1. **Маршрутизация «RU напрямую, всё остальное через VPN»**  
-   Список подсетей РФ подгружается с [ipdeny.com `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone) и заливается в nftables-множество PBR (`pbr_wan_4_dst_ip_user`). Для клиентов `192.168.1.0/24` правила отправляют нероссийские назначения через интерфейс `awg1`.
+   Список подсетей РФ подгружается с [ipdeny.com `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone) в множество PBR `pbr_wan_4_dst_ip_user`. Если установлен **`dnsmasq-full`**, IPv4-адреса из **`*.ru`** (по ответам DNS) попадают в **`pbr_ru_tld4`** (UCI `nftset` + `/etc/nftables.d/15-pbr-ru-tld4.nft`). Для клиентов `192.168.1.0/24` трафик в оба множества идёт в **WAN**, остальное — через **`awg1`**. Подробнее: [docs/ru-tld-bypass.ru.md](docs/ru-tld-bypass.ru.md).
 
 2. **Интеграция AmneziaWG в UCI**  
    Интерфейс `awg1`, зона файрвола `awg1`, форвардинг LAN → VPN, peer с `route_allowed_ips=0`, чтобы **не** тянуть default route целиком в WG — маршруты задаёт PBR.
@@ -36,6 +36,7 @@
 | `openwrt-backups/<label>/` | Распакованный бэкап: `config/`, `meta/`, в корне `README.txt` с командами восстановления. |
 | `amnezia_sites_ru_geoip.json` | Список CIDR для обхода через WAN (запасной вариант, не используется текущими sh-скриптами). [Док](docs/amnezia_sites_ru_geoip.ru.md) · [EN](docs/amnezia_sites_ru_geoip.md) |
 | `docs/amnezia_sites_ru_geoip*.md` | Откуда взялся `amnezia_sites_ru_geoip.json` и как обновлять. |
+| [docs/ru-tld-bypass.ru.md](docs/ru-tld-bypass.ru.md) · [EN](docs/ru-tld-bypass.md) | Обход по зоне `.ru` через DNS→nftset и заметки про скорость DNS. |
 | [CHEATSHEET.md](CHEATSHEET.md) · [CHEATSHEET.ru.md](CHEATSHEET.ru.md) | Шпаргалка команд |
 | `.gitignore` | В корне: `local/*` (импорт с ключами), плюс ссылка на правила в `openwrt-backups/.gitignore`. |
 
@@ -85,7 +86,7 @@
 ## FAQ
 
 **В чём разница между `setup-amnezia-full.sh` и `setup-openwrt-awg-pbr.sh`?**  
-`full` сам качает с GitHub IPK AmneziaWG под зашитые `VER`/`ARCH`/`TS`, парсит конфиг **на роутере** после заливки во **`/tmp/awg-setup.conf`**, добавляет include `99-lan-vpn.sh` и чуть иной порядок рестартов. `setup-openwrt-awg-pbr.sh` парсит `.conf` **на вашей машине** и передаёт значения в heredoc; пакеты AWG на роутере он не ставит — их нужно уже иметь или доставить отдельно.
+`full` сам качает с GitHub IPK AmneziaWG под зашитые `VER`/`ARCH`/`TS`, парсит конфиг **на роутере** после заливки во **`/tmp/awg-setup.conf`**, пишет **`99-lan-vpn.sh`** и настройки **`.ru` nftset**, перезапускает сервисы. `setup-openwrt-awg-pbr.sh` парсит `.conf` **на вашей машине** и передаёт значения по SSH; пакеты AWG на роутере он не ставит — их нужно уже иметь или доставить отдельно. Логика **split-tunnel** (ipdeny + `99-lan-vpn` + dnsmasq для `.ru`) в обоих сценариях совпадает.
 
 **Сообщение `Missing …` (нет файла импорта).**  
 Проверьте путь `CONF_LOCAL` или положите конфиг в **`local/awg.conf`** (см. `local/README.ru.md`). Пример:  
@@ -98,7 +99,7 @@
 Убедитесь, что тест идёт на **не**-российский ресурс (часть «видимого» интернета может считаться RU по списку). Проверьте `ifstatus awg1`, статус PBR, что клиент в `192.168.1.0/24`. На роутере: смотрите вывод скрипта в конце (`awg ping`, `pbr`).
 
 **Российские сайты открываются через VPN или наоборот — странно.**  
-Списки ipdeny обновляются периодически; возможны пограничные случаи CDN. Имеет смысл перезапустить PBR после обновления зоны: на роутере `/etc/init.d/pbr restart` (скрипт `ru-direct.sh` подтянет `ru.zone` при необходимости).
+Списки ipdeny обновляются; возможны пограничные случаи CDN. Множество **`.ru` по DNS** помогает после того, как dnsmasq на роутере ответил на имя. На роутере: `/etc/init.d/pbr restart` (скрипт `ru-direct.sh` подтянет `ru.zone` при необходимости); при смене `nftset` в dhcp — **`/etc/init.d/dnsmasq restart`**. Медленный DNS: [docs/ru-tld-bypass.ru.md](docs/ru-tld-bypass.ru.md).
 
 **Можно ли использовать `amnezia_sites_ru_geoip.json` вместо ipdeny?**  
 Текущие sh-скрипты его **не** подключают — нужен свой генератор / nft. JSON уже получен из того же **[`ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)**; как пересобрать: [docs/amnezia_sites_ru_geoip.ru.md](docs/amnezia_sites_ru_geoip.ru.md) · [EN](docs/amnezia_sites_ru_geoip.md).

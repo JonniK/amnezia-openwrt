@@ -28,6 +28,12 @@ while uci -q delete network.@wireguard_awg1[0]; do :; done
 uci -q delete network.awg1 2>/dev/null || true
 rm -f /etc/config/pbr /etc/config/podkop
 rm -rf /etc/pbr.d
+rm -f /etc/nftables.d/15-pbr-ru-tld4.nft
+sh /tmp/remove-dnsmasq-ru-nftset.sh 2>/dev/null || {
+  uci -q del_list dhcp.@dnsmasq[0].nftset='/.ru/4#inet#fw4#pbr_ru_tld4' 2>/dev/null || true
+  uci -q delete dhcp.pbr_ru_tld 2>/dev/null || true
+  uci commit dhcp 2>/dev/null || true
+}
 
 # Remove orphan firewall zones for VPN
 for z in awg1 awg awg0; do

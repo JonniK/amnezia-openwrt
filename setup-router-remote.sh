@@ -4,6 +4,9 @@ set -eu
 
 CONF=/tmp/awg-setup.conf
 [ -f "$CONF" ] || { echo "missing $CONF"; exit 1; }
+for _f in ru-direct.sh 99-lan-vpn-full.sh install-dnsmasq-full.sh configure-dnsmasq-ru-nftset.sh; do
+  [ -f "/tmp/$_f" ] || { echo "missing /tmp/$_f — upload from openwrt/"; exit 1; }
+done
 
 IFACE=awg1
 CFG=amneziawg_awg1
@@ -36,6 +39,22 @@ PEER_PORT="${PEER_EP##*:}"
 [ -n "$IF_PRIV" ] && [ -n "$PEER_PUB" ] && [ -n "$PEER_EP" ] || {
   echo "parse failed"; exit 1
 }
+
+# dnsmasq-full: nftset /.ru/ -> pbr_ru_tld4
+if ! opkg list-installed | grep -q '^dnsmasq-full '; then
+  opkg update >/dev/null 2>&1 || opkg update || true
+  if opkg list | grep -q '^dnsmasq-full '; then
+    if ! opkg install dnsmasq-full 2>/dev/null; then
+      if opkg list-installed | grep -q '^dnsmasq '; then
+        opkg remove dnsmasq && { opkg install dnsmasq-full || opkg install dnsmasq; }
+      else
+        opkg install dnsmasq-full
+      fi
+    fi
+  else
+    echo "NOTE: dnsmasq-full not in opkg lists — .ru nftset skipped." >&2
+  fi
+fi
 
 uci -q delete network.${IFACE} 2>/dev/null || true
 while uci -q delete network.@${CFG}[0]; do :; done
@@ -95,69 +114,55 @@ if ! uci show firewall | grep -q "${ZONE}-lan"; then
 fi
 uci commit firewall
 
-# PBR Russia bypass via ipdeny (lighter than 900KB JSON)
-mkdir -p /etc/pbr.d
-cat > /etc/pbr.d/ru-direct.sh <<'RUSCRIPT'
-#!/bin/sh
-TARGET_URL='https://www.ipdeny.com/ipblocks/data/countries/ru.zone'
-TARGET_FILE='/var/pbr_ru.zone'
-TARGET_TABLE='inet fw4'
-TARGET_INTERFACE='wan'
-NFTSET="pbr_${TARGET_INTERFACE}_4_dst_ip_user"
-BATCH=400
-_ret=0
-mkdir -p "${TARGET_FILE%/*}"
-[ -s "$TARGET_FILE" ] || wget -q -O "$TARGET_FILE" "$TARGET_URL" || return 1
-nft "flush element $TARGET_TABLE $NFTSET" 2>/dev/null || true
-batch=""; count=0
-while IFS= read -r cidr; do
-  [ -z "$cidr" ] && continue
-  case "$cidr" in \#*) continue ;; esac
-  if [ -z "$batch" ]; then batch="$cidr"; else batch="$batch, $cidr"; fi
-  count=$((count + 1))
-  if [ "$count" -ge "$BATCH" ]; then
-    nft "add element $TARGET_TABLE $NFTSET { $batch }" || _ret=1
-    batch=""; count=0
-  fi
-done < "$TARGET_FILE"
-[ -n "$batch" ] && nft "add element $TARGET_TABLE $NFTSET { $batch }" || _ret=1
-return $_ret
-RUSCRIPT
-chmod 755 /etc/pbr.d/ru-direct.sh
+mkdir -p /etc/nftables.d
+cat > /etc/nftables.d/15-pbr-ru-tld4.nft <<'NFTFRAG'
+	set pbr_ru_tld4 {
+		type ipv4_addr
+		flags interval
+		auto-merge
+	}
+NFTFRAG
 
+sh /tmp/install-dnsmasq-full.sh 2>/dev/null || true
+
+sh /tmp/configure-dnsmasq-ru-nftset.sh 2>/dev/null || true
+
+# PBR: RU subnets (ipdeny) + *.ru via dnsmasq nftset; LAN -> VPN via raw nft
+mkdir -p /etc/pbr.d
+cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
+chmod 755 /etc/pbr.d/ru-direct.sh
+LAN="$(ip -4 route show table main | awk '/dev br-lan proto kernel/{print $1; exit}')"
+[ -n "$LAN" ] || LAN="192.168.1.0/24"
+sed "s|__LAN__|$LAN|g" /tmp/99-lan-vpn-full.sh > /etc/pbr.d/99-lan-vpn.sh
+chmod 755 /etc/pbr.d/99-lan-vpn.sh
+
+# /etc/pbr.d/* auto-loaded — remove stale uci includes only
 while uci -q delete pbr.@policy[0]; do :; done
 idx=0
 while uci -q get pbr.@include[$idx] >/dev/null 2>&1; do
   path="$(uci -q get pbr.@include[$idx].path || true)"
-  if [ "$path" = '/etc/pbr.d/ru-direct.sh' ]; then
-    uci delete pbr.@include[$idx]
-  else
-    idx=$((idx + 1))
-  fi
+  case "$path" in
+    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete pbr.@include[$idx] ;;
+    *) idx=$((idx + 1)) ;;
+  esac
 done
 
 uci set pbr.config.enabled='1'
 uci set pbr.config.strict_enforcement='0'
-while uci -q del_list pbr.config.supported_interface 2>/dev/null; do :; done
+uci set pbr.config.resolver_set='none'
+uci -q delete pbr.config.supported_interface 2>/dev/null || true
 uci add_list pbr.config.supported_interface='awg1'
-
-uci add pbr include
-uci set pbr.@include[-1].path='/etc/pbr.d/ru-direct.sh'
-uci set pbr.@include[-1].enabled='1'
-
-uci add pbr policy
-uci set pbr.@policy[-1].name='lan_via_vpn'
-uci set pbr.@policy[-1].interface='awg1'
-uci set pbr.@policy[-1].src_addr='192.168.1.0/24'
-uci set pbr.@policy[-1].dest_addr='0.0.0.0/0'
-
 uci commit pbr
 
-/etc/init.d/firewall restart
+/etc/init.d/firewall reload 2>/dev/null || /etc/init.d/firewall restart
+sleep 2
 ifdown "$IFACE" 2>/dev/null || true
 ifup "$IFACE"
 /etc/init.d/pbr enable
 /etc/init.d/pbr restart
+
+/etc/init.d/dnsmasq restart 2>/dev/null || true
+sleep 2
 
 sleep 4
 echo "=== awg1 ==="
@@ -165,4 +170,5 @@ ifstatus "$IFACE" | jsonfilter -e '@.up' 2>/dev/null || ifstatus "$IFACE" | head
 ip link show "$IFACE" 2>/dev/null || true
 echo "=== pbr ==="
 /etc/init.d/pbr status 2>&1 | head -20
-nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null | head -8
+echo "ru ipdeny:"; nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null | grep -c '/' || true
+echo "ru .ru nftset:"; nft list set inet fw4 pbr_ru_tld4 2>/dev/null | grep -c '/' || true
