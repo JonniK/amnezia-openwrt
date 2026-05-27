@@ -23,15 +23,21 @@ TOGGLE_SRC="${TOGGLE_SRC:-/tmp/zapret-toggle.sh}"
 STATUS_SRC="${STATUS_SRC:-/tmp/zapret-status.sh}"
 BLOCKCHECK_SRC="${BLOCKCHECK_SRC:-/tmp/zapret-blockcheck.sh}"
 APPLY_SRC="${APPLY_SRC:-/tmp/zapret-apply.sh}"
+PROBE_SRC="${PROBE_SRC:-/tmp/zapret-probe.sh}"
+SEED_SRC="${SEED_SRC:-/tmp/seed-must-tunnel.list}"
 TOGGLE_DST=/usr/bin/zapret-toggle
 STATUS_DST=/usr/bin/zapret-status
 BLOCKCHECK_DST=/usr/bin/zapret-blockcheck
 APPLY_DST=/usr/bin/zapret-apply
+PROBE_DST=/usr/bin/zapret-probe
+SEED_DST=/etc/awg/seed-must-tunnel.list
 
 [ -f "$TOGGLE_SRC" ]     || { echo "missing $TOGGLE_SRC"; exit 1; }
 [ -f "$STATUS_SRC" ]     || { echo "missing $STATUS_SRC"; exit 1; }
 [ -f "$BLOCKCHECK_SRC" ] || { echo "missing $BLOCKCHECK_SRC"; exit 1; }
 [ -f "$APPLY_SRC" ]      || { echo "missing $APPLY_SRC"; exit 1; }
+[ -f "$PROBE_SRC" ]      || { echo "missing $PROBE_SRC"; exit 1; }
+[ -f "$SEED_SRC" ]       || { echo "missing $SEED_SRC"; exit 1; }
 
 if opkg list-installed 2>/dev/null | grep -q '^zapret '; then
 	echo "install-zapret: zapret already installed, skipping package install"
@@ -89,13 +95,19 @@ cp "$TOGGLE_SRC"     "$TOGGLE_DST"
 cp "$STATUS_SRC"     "$STATUS_DST"
 cp "$BLOCKCHECK_SRC" "$BLOCKCHECK_DST"
 cp "$APPLY_SRC"      "$APPLY_DST"
-chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST" "$APPLY_DST"
+cp "$PROBE_SRC"      "$PROBE_DST"
+chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST" "$APPLY_DST" "$PROBE_DST"
+# Reference seed list -- read-only data, lives under /etc/awg next to ru.cidr.
+cp "$SEED_SRC"       "$SEED_DST"
+chmod 0644 "$SEED_DST"
 
 echo "install-zapret: wrappers placed:"
 echo "  $TOGGLE_DST"
 echo "  $STATUS_DST"
 echo "  $BLOCKCHECK_DST"
 echo "  $APPLY_DST"
+echo "  $PROBE_DST"
+echo "  $SEED_DST"
 
 if /etc/init.d/zapret enabled 2>/dev/null; then
 	echo "install-zapret: zapret service is ENABLED"

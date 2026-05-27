@@ -59,7 +59,7 @@ CHK
 
 start_remote_deploy() {
   echo "=== Upload deploy script + AWG config + PBR helpers ==="
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/install-zapret.sh; do
+  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh; do
     cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   ssh_run "cat > /tmp/openwrt-deploy-body.sh && chmod +x /tmp/openwrt-deploy-body.sh" <<'REMOTE_BODY'

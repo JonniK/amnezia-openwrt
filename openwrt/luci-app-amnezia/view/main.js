@@ -21,6 +21,11 @@ var applyInFlight = false;
 // polls before flipping the UI to red.
 var pbrBadCount = 0;
 
+// Block re-entrant probes: the seed-list rows and the standalone Probe
+// button both call handleProbe; without this, clicking two rows quickly
+// (or row + button) would race two execs both writing to #probe-result.
+var probeInFlight = false;
+
 // Signature of the most recently rendered candidate list. paintApply() skips
 // rebuilding the <select> when the signature is unchanged -- otherwise an
 // open dropdown would be closed by the browser on every 5s poll.
@@ -89,6 +94,24 @@ function parseZapret(text) {
 function parsePbr(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function parseProbe(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+// Split the seed-must-tunnel.list file (one domain per line, # comments) into
+// an array of strings.
+function parseSeedList(text) {
+	if (!text) return [];
+	var out = [];
+	var lines = text.split('\n');
+	for (var i = 0; i < lines.length; i++) {
+		var s = lines[i].replace(/#.*$/, '').trim();
+		if (s) out.push(s);
+	}
+	return out;
 }
 
 function parseBlockcheck(text) {
@@ -375,7 +398,7 @@ function paintApply(state, candidates) {
 						'data-domain': c.domain || '',
 						'data-recommended': isRec ? 'true' : 'false',
 						'title': isRec ? _('blockcheck\'s first working strategy in this class') : '',
-						'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;' +
+						'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;word-break:break-all;' +
 							(isRec ? 'background:#fffbe6;border-left:3px solid #f0ad4e;' : '')
 					}, [
 						(function(c, was) {
@@ -498,6 +521,71 @@ return view.extend({
 			ui.addNotification(null, E('p', {}, _('Toggle failed: ') + err), 'danger');
 			var b = document.getElementById('awg-toggle-btn');
 			if (b) { delete b.dataset.busy; b.disabled = false; }
+		});
+	},
+
+	handleProbe: function(ev, domainOverride) {
+		if (probeInFlight) {
+			ui.addNotification(null, E('p', {}, _('A probe is already running -- wait for it to finish')), 'info');
+			return Promise.resolve();
+		}
+		var input = document.getElementById('probe-domain');
+		var domain = domainOverride || (input && input.value || '').trim();
+		if (!domain) {
+			ui.addNotification(null, E('p', {}, _('Enter a domain first')), 'warning');
+			return Promise.resolve();
+		}
+		if (!/^[A-Za-z0-9.\-_]{2,253}$/.test(domain)) {
+			ui.addNotification(null, E('p', {}, _('Invalid domain: ') + domain), 'warning');
+			return Promise.resolve();
+		}
+		probeInFlight = true;
+		var btn = document.getElementById('probe-btn');
+		var resultEl = document.getElementById('probe-result');
+		if (btn) { btn.disabled = true; btn.textContent = _('Probing...'); }
+		if (resultEl) {
+			resultEl.style.color = '#666';
+			resultEl.textContent = _('Probing ') + domain + '...';
+		}
+		return fs.exec('/usr/bin/zapret-probe', [domain]).then(function(res) {
+			probeInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Probe'); }
+			var parsed = parseProbe(res && res.stdout);
+			if (!parsed) {
+				if (resultEl) {
+					resultEl.style.color = '#a94442';
+					resultEl.textContent = _('Probe failed: ') + ((res && res.stderr) || _('no output'));
+				}
+				return;
+			}
+			if (resultEl) {
+				var colour;
+				switch (parsed.verdict) {
+					case 'direct_ok':            colour = '#3c763d'; break;
+					case 'direct_geoblocked':    colour = '#a94442'; break;
+					case 'direct_dpi_blocked':   colour = '#f0ad4e'; break;
+					case 'direct_blocked':       colour = '#a94442'; break;
+					case 'direct_unreachable':   colour = '#888';    break;
+					default:                     colour = '#666';
+				}
+				resultEl.style.color = colour;
+				resultEl.innerHTML = '';
+				resultEl.appendChild(E('strong', {}, parsed.verdict));
+				resultEl.appendChild(document.createTextNode(' — ' + parsed.reason));
+				resultEl.appendChild(E('br'));
+				resultEl.appendChild(E('span', { 'style': 'color:#444;font-size:11px;' }, parsed.recommendation));
+				resultEl.appendChild(E('br'));
+				resultEl.appendChild(E('span', { 'style': 'color:#888;font-size:11px;font-family:monospace;' },
+					'status=' + parsed.status + ' time=' + parsed.time_total + 's' +
+					(parsed.redirects ? ' redirects=' + parsed.redirects : '')));
+			}
+		}).catch(function(err) {
+			probeInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Probe'); }
+			if (resultEl) {
+				resultEl.style.color = '#a94442';
+				resultEl.textContent = _('Probe failed: ') + err;
+			}
 		});
 	},
 
@@ -727,7 +815,8 @@ return view.extend({
 			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
-			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' })
+			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }),
+			L.resolveDefault(fs.read('/etc/awg/seed-must-tunnel.list'), '')
 		]);
 	},
 
@@ -740,6 +829,7 @@ return view.extend({
 		var applySt = parseApplyState((data && data[5] && data[5].stdout) || '');
 		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
 		var pbr = parsePbr((data && data[7] && data[7].stdout) || '');
+		var seedList = parseSeedList((data && data[8]) || '');
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
@@ -863,7 +953,7 @@ return view.extend({
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('code', {
 								'id': 'zapret-strategy',
-								'style': 'font-size:11px;word-break:break-all;'
+								'style': 'display:block;font-size:11px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;max-width:100%;'
 							}, zap && zap.strategy ? zap.strategy : '')
 						])
 					]),
@@ -878,6 +968,60 @@ return view.extend({
 							}, zap && zap.installed ? (zap.enabled ? _('Turn OFF') : _('Turn ON')) : _('N/A'))
 						])
 					])
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Domain probe')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Tests how a domain behaves on direct WAN (no tunnel) and returns a verdict: direct works, geo/anti-VPN blocked, DPI blocked, or unreachable. Use it to decide whether a domain needs the AWG tunnel.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Domain')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'probe-domain',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:340px;margin-right:8px;',
+								'placeholder': 'chatgpt.com'
+							}),
+							E('button', {
+								'id': 'probe-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(this, 'handleProbe')
+							}, _('Probe'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Result')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'id': 'probe-result', 'style': 'min-height:1.5em;color:#666;' },
+								_('No probe run yet'))
+						])
+					]),
+					seedList.length ? E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Reference list')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'style': 'font-size:11px;color:#666;margin-bottom:6px;' },
+								_('Known geo-block / anti-VPN sites. Click a row to probe it.')),
+							(function(self) {
+								var box = E('div', {
+									'style': 'max-height:200px;overflow-y:auto;border:1px solid #ddd;padding:6px;background:#fafafa;'
+								});
+								for (var i = 0; i < seedList.length; i++) {
+									(function(dom) {
+										box.appendChild(E('div', {
+											'style': 'font-family:monospace;font-size:11px;padding:2px 4px;cursor:pointer;color:#08c;',
+											'title': _('Probe ') + dom,
+											'click': ui.createHandlerFn(self, 'handleProbe', dom)
+										}, dom));
+									})(seedList[i]);
+								}
+								return box;
+							})(this)
+						])
+					]) : ''
 				])
 			]),
 
@@ -927,7 +1071,7 @@ return view.extend({
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('pre', {
 								'id': 'bc-log',
-								'style': 'background:#1e1e1e;color:#d4d4d4;padding:8px;margin:0;max-height:320px;overflow:auto;font-size:11px;white-space:pre;'
+								'style': 'background:#1e1e1e;color:#d4d4d4;padding:8px;margin:0;max-height:320px;overflow-y:auto;overflow-x:hidden;font-size:11px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;width:100%;'
 							}, bcLog || _('(no log yet)'))
 						])
 					]),
@@ -942,7 +1086,7 @@ return view.extend({
 							(function(self) {
 								var listEl = E('div', {
 									'id': 'apply-list',
-									'style': 'max-height:280px;overflow-y:auto;border:1px solid #ddd;padding:6px;margin-bottom:8px;background:#fafafa;'
+									'style': 'max-height:280px;overflow-y:auto;overflow-x:hidden;border:1px solid #ddd;padding:6px;margin-bottom:8px;background:#fafafa;box-sizing:border-box;width:100%;'
 								});
 								if (!applyCands.length) {
 									listEl.appendChild(E('div', { 'style': 'color:#888;font-style:italic;' },
@@ -957,7 +1101,7 @@ return view.extend({
 											'data-domain': c.domain || '',
 											'data-recommended': isRec ? 'true' : 'false',
 											'title': isRec ? _('blockcheck\'s first working strategy in this class') : '',
-											'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;' +
+											'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;word-break:break-all;' +
 												(isRec ? 'background:#fffbe6;border-left:3px solid #f0ad4e;' : '')
 										}, [
 											E('input', { 'type': 'checkbox', 'value': c.strategy, 'style': 'margin-top:3px;flex-shrink:0;' }),
@@ -1004,7 +1148,7 @@ return view.extend({
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('code', {
 								'id': 'apply-current',
-								'style': 'display:block;background:#f5f5f5;padding:6px;font-size:11px;word-break:break-all;'
+								'style': 'display:block;background:#f5f5f5;padding:6px;font-size:11px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;max-width:100%;'
 							}, (applySt && applySt.current) || _('(NFQWS_OPT empty)'))
 						])
 					])
@@ -1025,7 +1169,7 @@ return view.extend({
 				E('div', { 'class': 'cbi-section-node' }, [
 					E('pre', {
 						'id': 'awg-status-raw',
-						'style': 'background:#f5f5f5;padding:8px;margin:0;max-height:240px;overflow:auto;font-size:12px;'
+						'style': 'background:#f5f5f5;padding:8px;margin:0;max-height:240px;overflow-y:auto;overflow-x:hidden;font-size:12px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;width:100%;'
 					}, initial.raw)
 				])
 			])
