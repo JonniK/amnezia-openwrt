@@ -87,11 +87,19 @@ case "$cmd" in
 			# entire blockcheck run (10-30 min) and concurrent starts misreport
 			# as flock contention instead of "already running".
 			exec 9<&-
+			# Line-buffer stdout/stderr so the LuCI log tail updates in real
+			# time. Without stdbuf, curl writes via libc which fully buffers
+			# when redirected to a file, and the log appears in 4 KiB bursts.
+			if command -v stdbuf >/dev/null 2>&1; then
+				_launch="stdbuf -oL -eL sh"
+			else
+				_launch="sh"
+			fi
 			DOMAINS="$domain" \
 			IPVS=4 \
 			ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=1 \
 			REPEATS=1 PARALLEL=0 SCANLEVEL=standard \
-			sh "$SCRIPT" >>"$LOGFILE" 2>&1 </dev/null &
+			$_launch "$SCRIPT" >>"$LOGFILE" 2>&1 </dev/null &
 			bc_pid=$!
 			echo "$bc_pid" > "$PIDFILE"
 			wait "$bc_pid"

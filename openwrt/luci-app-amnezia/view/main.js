@@ -323,7 +323,7 @@ function paintApply(state, candidates) {
 			} else {
 				for (var i = 0; i < candidates.length; i++) {
 					var c = candidates[i];
-					var label = '[ipv' + c.ipv + ' ' + c.scope + ' / ' + c.family + '] ' + c.strategy;
+					var label = '[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] ' + c.strategy;
 					if (label.length > 140) label = label.substring(0, 137) + '...';
 					var o = document.createElement('option');
 					o.textContent = label;
@@ -846,7 +846,7 @@ return view.extend({
 								} else {
 									for (var i = 0; i < applyCands.length; i++) {
 										var c = applyCands[i];
-										var label = '[ipv' + c.ipv + ' ' + c.scope + ' / ' + c.family + '] ' + c.strategy;
+										var label = '[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] ' + c.strategy;
 										if (label.length > 140) label = label.substring(0, 137) + '...';
 										var op = document.createElement('option');
 										op.textContent = label;

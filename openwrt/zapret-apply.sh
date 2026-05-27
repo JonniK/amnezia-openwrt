@@ -44,15 +44,26 @@ case "$cmd" in
 	parse)
 		[ -f "$LOGFILE" ] || { exit 0; }
 		# Upstream log format (blockcheck.sh L1243):
-		#   !!!!! <tool>: working strategy found for ipv<N> <scope> <family> : <strategy> !!!!!
+		#   !!!!! <TEST>: working strategy found for ipv<N> <DOMAIN> : <TOOL> <STRATEGY> !!!!!
 		# Example:
-		#   !!!!! nfqws: working strategy found for ipv4 https-tls12 fakedsplit : --dpi-desync=fakedsplit ... !!!!!
-		# Strategy text never contains " or \ in practice -- the upstream code
-		# composes from a finite set of --dpi-desync-* flags with safe values.
-		# We filter on tool=nfqws: NFQWS_OPT is the only thing this script
+		#   !!!!! curl_test_https_tls13: working strategy found for ipv4 youtube.com : nfqws --dpi-desync=multidisorder --dpi-desync-split-pos=2 !!!!!
+		#
+		# After the run completes, blockcheck also emits a clean SUMMARY block
+		# with the deduplicated set, one entry per line:
+		#   <TEST> ipv<N> <DOMAIN> : <TOOL> <STRATEGY>
+		# We harvest both -- the live !!!!! markers give early visibility during
+		# a long run, the SUMMARY gives the final authoritative set; sort -u
+		# dedups across them.
+		#
+		# We filter on tool=nfqws: NFQWS_OPT is the only key this script
 		# writes, and tpws strategies (different flag set) would corrupt it.
-		sed -nE 's/^!!!!! nfqws: working strategy found for ipv([0-9]+) ([^ ]+) ([^ :]+) : (.*) !!!!!$/{"tool":"nfqws","ipv":\1,"scope":"\2","family":"\3","strategy":"\4"}/p' "$LOGFILE" \
-			| sort -u
+		# Strategy text in practice contains no " or \ -- the upstream composes
+		# from a finite set of --dpi-desync-* flags.
+		{
+			sed -nE 's/^!!!!! ([^:]+): working strategy found for ipv([0-9]+) ([^ ]+) : nfqws (.*) !!!!!$/{"tool":"nfqws","ipv":\2,"scope":"\1","domain":"\3","strategy":"\4"}/p' "$LOGFILE"
+			awk '/^\* SUMMARY/,/^Please note this SUMMARY/' "$LOGFILE" 2>/dev/null \
+				| sed -nE 's/^([^ ]+) ipv([0-9]+) ([^ ]+) : nfqws (.*)$/{"tool":"nfqws","ipv":\2,"scope":"\1","domain":"\3","strategy":"\4"}/p'
+		} | sort -u
 		;;
 
 	apply)
@@ -125,8 +136,13 @@ case "$cmd" in
 			has_backup=true
 			backup_ts=$ts_str
 		fi
-		# Count nfqws-only strategies to match what the UI shows as applicable.
-		candidates=$( [ -f "$LOGFILE" ] && sed -nE '/^!!!!! nfqws: working strategy found for /p' "$LOGFILE" | sort -u | wc -l || echo 0 )
+		# Reuse the parse subcommand so the displayed candidate count matches
+		# the dropdown contents exactly (deduplication is across BOTH formats,
+		# not just within each).
+		candidates=0
+		if [ -f "$LOGFILE" ]; then
+			candidates=$("$0" parse 2>/dev/null | wc -l)
+		fi
 		candidates=$(printf '%s' "$candidates" | tr -d ' ')
 		current=$(uci -q get "$UCI_KEY" 2>/dev/null || echo "")
 		current=$(flatten_opt "$current")

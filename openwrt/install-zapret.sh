@@ -60,6 +60,13 @@ else
 		opkg update >/dev/null 2>&1 || true
 		opkg install unzip >/dev/null 2>&1 || { echo "install-zapret: failed to install unzip"; exit 1; }
 	fi
+	# stdbuf is used by zapret-blockcheck to line-buffer curl output so the
+	# LuCI log tail updates live instead of in 4 KiB bursts. Non-fatal.
+	if ! command -v stdbuf >/dev/null 2>&1; then
+		echo "install-zapret: opkg install coreutils-stdbuf (best-effort)"
+		opkg install coreutils-stdbuf >/dev/null 2>&1 || \
+			echo "install-zapret: coreutils-stdbuf install failed; blockcheck log will buffer"
+	fi
 
 	# Extract only the cortex-a53 ipk we need; ignore the .apk and luci-app.
 	( cd "$WORK" && unzip -q -o zapret.zip "$ZAPRET_IPK_NAME" )
