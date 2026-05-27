@@ -23,6 +23,11 @@ function parseRuStamp(text) {
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
 
+function parseZapret(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
 function fmtUptime(sec) {
 	if (sec === null || sec === undefined) return '';
 	var d = Math.floor(sec / 86400);
@@ -59,6 +64,59 @@ function paintTunnel(s) {
 		btn.disabled = false;
 	}
 	if (raw) raw.textContent = s.raw;
+}
+
+function paintZapret(s, errMsg) {
+	var dot = document.getElementById('zapret-dot');
+	var label = document.getElementById('zapret-state-label');
+	var ver = document.getElementById('zapret-version');
+	var mode = document.getElementById('zapret-mode');
+	var strat = document.getElementById('zapret-strategy');
+	var btn = document.getElementById('zapret-toggle-btn');
+
+	// errMsg means we couldn't read status (script error / unparseable output) --
+	// distinct from "package not installed". Leave previous fields alone where
+	// possible, just mark dot red and show the error in the label.
+	if (errMsg) {
+		if (dot) dot.style.background = '#a94442';
+		if (label) label.textContent = _('status error');
+		if (strat) strat.textContent = errMsg;
+		if (btn && !btn.dataset.busy) {
+			btn.disabled = true;
+			btn.textContent = _('N/A');
+			btn.className = 'btn';
+		}
+		return;
+	}
+
+	if (!s || !s.installed) {
+		if (dot) dot.style.background = '#888';
+		if (label) label.textContent = _('not installed');
+		if (ver) ver.textContent = '';
+		if (mode) mode.textContent = '';
+		if (strat) strat.textContent = '';
+		if (btn && !btn.dataset.busy) { btn.disabled = true; btn.textContent = _('N/A'); }
+		return;
+	}
+
+	// Healthy = enabled AND running. Yellow = enabled but no process (broken
+	// config or just-started). Gray = clean off. Red = running while disabled.
+	var colour;
+	if (s.enabled && s.running)        colour = '#3c763d';
+	else if (s.enabled && !s.running)  colour = '#f0ad4e';
+	else if (!s.enabled && s.running)  colour = '#a94442';
+	else                                colour = '#888';
+
+	if (dot) dot.style.background = colour;
+	if (label) label.textContent = (s.enabled ? _('ON') : _('OFF')) + (s.running ? ' ' + _('(running)') : '');
+	if (ver) ver.textContent = s.version ? ('v' + s.version) : '';
+	if (mode) mode.textContent = (s.mode || '') + (s.filter ? (' / ' + s.filter) : '');
+	if (strat) strat.textContent = s.strategy || '';
+	if (btn && !btn.dataset.busy) {
+		btn.textContent = s.enabled ? _('Turn OFF') : _('Turn ON');
+		btn.className = 'btn ' + (s.enabled ? 'cbi-button-negative' : 'cbi-button-positive');
+		btn.disabled = false;
+	}
 }
 
 function paintRuStamp(stamp) {
@@ -100,6 +158,22 @@ return view.extend({
 		});
 	},
 
+	handleZapretToggle: function(ev) {
+		var btn = document.getElementById('zapret-toggle-btn');
+		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Working...'); }
+		return fs.exec('/usr/bin/zapret-toggle').then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				(res.code === 0) ? 'info' : 'warning');
+			if (btn) delete btn.dataset.busy;
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Zapret toggle failed: ') + err), 'danger');
+			var b = document.getElementById('zapret-toggle-btn');
+			if (b) { delete b.dataset.busy; b.disabled = false; }
+		});
+	},
+
 	handleRuUpdate: function(ev) {
 		var btn = document.getElementById('awg-ru-btn');
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Updating...'); }
@@ -131,19 +205,34 @@ return view.extend({
 		var p2 = L.resolveDefault(fs.read('/etc/awg/ru-update.json'), '').then(function(text) {
 			paintRuStamp(parseRuStamp(text));
 		});
-		return Promise.all([p1, p2]);
+		var p3 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
+			if (!res) { paintZapret(null, _('cannot run zapret-status')); return; }
+			var parsed = parseZapret(res.stdout || '');
+			if (parsed) {
+				paintZapret(parsed);
+			} else if (res.code !== 0) {
+				paintZapret(null, _('zapret-status exit ') + res.code);
+			} else if ((res.stdout || '').length === 0) {
+				paintZapret(null, _('zapret-status returned empty output'));
+			} else {
+				paintZapret(null, _('unparseable status output'));
+			}
+		});
+		return Promise.all([p1, p2, p3]);
 	},
 
 	load: function() {
 		return Promise.all([
 			L.resolveDefault(fs.exec('/usr/bin/awg-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/awg/ru-update.json'), '')
+			L.resolveDefault(fs.read('/etc/awg/ru-update.json'), ''),
+			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' })
 		]);
 	},
 
 	render: function(data) {
 		var initial = parseStatus((data && data[0] && data[0].stdout) || '');
 		var stamp = parseRuStamp(data && data[1]);
+		var zap = parseZapret((data && data[2] && data[2].stdout) || '');
 
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
@@ -206,6 +295,53 @@ return view.extend({
 								'class': 'btn cbi-button-action',
 								'click': ui.createHandlerFn(this, 'handleRuUpdate')
 							}, _('Update now'))
+						])
+					])
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('DPI desync (zapret)')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('TCP/UDP packet desync for WAN-direct traffic. Does not affect AmneziaWG-tunneled traffic. Start disabled — enable only after running blockcheck on the router.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('State')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('span', {
+								'id': 'zapret-dot',
+								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:#888;margin-right:8px;vertical-align:middle;'
+							}),
+							E('strong', { 'id': 'zapret-state-label' }, zap ? ((zap.enabled ? _('ON') : _('OFF')) + (zap.running ? ' ' + _('(running)') : '')) : _('unknown')),
+							E('span', { 'id': 'zapret-version', 'style': 'margin-left:8px;color:#666;' },
+								zap && zap.version ? ('v' + zap.version) : '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Mode / filter')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('span', { 'id': 'zapret-mode' },
+								zap ? ((zap.mode || '') + (zap.filter ? (' / ' + zap.filter) : '')) : '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Strategy')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('code', {
+								'id': 'zapret-strategy',
+								'style': 'font-size:11px;word-break:break-all;'
+							}, zap && zap.strategy ? zap.strategy : '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Action')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('button', {
+								'id': 'zapret-toggle-btn',
+								'class': 'btn ' + (zap && zap.enabled ? 'cbi-button-negative' : 'cbi-button-positive'),
+								'disabled': (zap && zap.installed) ? null : '',
+								'click': ui.createHandlerFn(this, 'handleZapretToggle')
+							}, zap && zap.installed ? (zap.enabled ? _('Turn OFF') : _('Turn ON')) : _('N/A'))
 						])
 					])
 				])

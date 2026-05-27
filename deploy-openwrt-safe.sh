@@ -59,7 +59,7 @@ CHK
 
 start_remote_deploy() {
   echo "=== Upload deploy script + AWG config + PBR helpers ==="
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/install-luci-toggle.sh; do
+  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/install-zapret.sh; do
     cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   ssh_run "cat > /tmp/openwrt-deploy-body.sh && chmod +x /tmp/openwrt-deploy-body.sh" <<'REMOTE_BODY'
@@ -226,6 +226,14 @@ if SRC=/tmp/awg-toggle.sh sh /tmp/install-luci-toggle.sh >>"$LOG" 2>&1; then
 	log "luci toggle installed"
 else
 	log "WARN: luci toggle install failed (non-fatal)"
+fi
+
+# zapret (DPI desync) install. Service stays DISABLED after install -- user
+# enables via the LuCI button. Non-fatal: failure here must not break AWG.
+if sh /tmp/install-zapret.sh >>"$LOG" 2>&1; then
+	log "zapret installed (service left disabled)"
+else
+	log "WARN: zapret install failed (non-fatal)"
 fi
 
 ok "1 awg1"

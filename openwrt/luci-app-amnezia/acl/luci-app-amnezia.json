@@ -10,7 +10,9 @@
 			"file": {
 				"/usr/bin/awg-toggle":    [ "exec" ],
 				"/usr/bin/awg-status":    [ "exec" ],
-				"/usr/bin/awg-ru-update": [ "exec" ]
+				"/usr/bin/awg-ru-update": [ "exec" ],
+				"/usr/bin/zapret-toggle": [ "exec" ],
+				"/usr/bin/zapret-status": [ "exec" ]
 			}
 		}
 	}
