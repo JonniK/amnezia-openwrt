@@ -21,11 +21,14 @@ ZAPRET_ZIP_SHA256="fda00483a87071555e4bf3ae40ee815ee6c7f6a386f2860b646ce7e934757
 
 TOGGLE_SRC="${TOGGLE_SRC:-/tmp/zapret-toggle.sh}"
 STATUS_SRC="${STATUS_SRC:-/tmp/zapret-status.sh}"
+BLOCKCHECK_SRC="${BLOCKCHECK_SRC:-/tmp/zapret-blockcheck.sh}"
 TOGGLE_DST=/usr/bin/zapret-toggle
 STATUS_DST=/usr/bin/zapret-status
+BLOCKCHECK_DST=/usr/bin/zapret-blockcheck
 
-[ -f "$TOGGLE_SRC" ] || { echo "missing $TOGGLE_SRC"; exit 1; }
-[ -f "$STATUS_SRC" ] || { echo "missing $STATUS_SRC"; exit 1; }
+[ -f "$TOGGLE_SRC" ]     || { echo "missing $TOGGLE_SRC"; exit 1; }
+[ -f "$STATUS_SRC" ]     || { echo "missing $STATUS_SRC"; exit 1; }
+[ -f "$BLOCKCHECK_SRC" ] || { echo "missing $BLOCKCHECK_SRC"; exit 1; }
 
 if opkg list-installed 2>/dev/null | grep -q '^zapret '; then
 	echo "install-zapret: zapret already installed, skipping package install"
@@ -72,13 +75,15 @@ else
 fi
 
 # Always (re)place wrappers.
-cp "$TOGGLE_SRC" "$TOGGLE_DST"
-cp "$STATUS_SRC" "$STATUS_DST"
-chmod 0755 "$TOGGLE_DST" "$STATUS_DST"
+cp "$TOGGLE_SRC"     "$TOGGLE_DST"
+cp "$STATUS_SRC"     "$STATUS_DST"
+cp "$BLOCKCHECK_SRC" "$BLOCKCHECK_DST"
+chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST"
 
 echo "install-zapret: wrappers placed:"
 echo "  $TOGGLE_DST"
 echo "  $STATUS_DST"
+echo "  $BLOCKCHECK_DST"
 
 if /etc/init.d/zapret enabled 2>/dev/null; then
 	echo "install-zapret: zapret service is ENABLED"

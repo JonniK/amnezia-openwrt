@@ -3,16 +3,18 @@
 		"description": "AmneziaWG tunnel toggle, RU IP list refresh, and live status",
 		"read": {
 			"file": {
-				"/etc/awg/ru-update.json": [ "read" ]
+				"/etc/awg/ru-update.json":  [ "read" ],
+				"/etc/awg/blockcheck.json": [ "read" ]
 			}
 		},
 		"write": {
 			"file": {
-				"/usr/bin/awg-toggle":    [ "exec" ],
-				"/usr/bin/awg-status":    [ "exec" ],
-				"/usr/bin/awg-ru-update": [ "exec" ],
-				"/usr/bin/zapret-toggle": [ "exec" ],
-				"/usr/bin/zapret-status": [ "exec" ]
+				"/usr/bin/awg-toggle":       [ "exec" ],
+				"/usr/bin/awg-status":       [ "exec" ],
+				"/usr/bin/awg-ru-update":    [ "exec" ],
+				"/usr/bin/zapret-toggle":    [ "exec" ],
+				"/usr/bin/zapret-status":    [ "exec" ],
+				"/usr/bin/zapret-blockcheck":[ "exec" ]
 			}
 		}
 	}

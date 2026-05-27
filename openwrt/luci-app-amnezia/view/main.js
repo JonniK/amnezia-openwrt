@@ -28,6 +28,23 @@ function parseZapret(text) {
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
 
+function parseBlockcheck(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function fmtDur(sec) {
+	if (!sec || sec < 0) return '0s';
+	var m = Math.floor(sec / 60);
+	var s = sec % 60;
+	if (m >= 60) {
+		var h = Math.floor(m / 60); m = m % 60;
+		return h + 'h ' + m + 'm';
+	}
+	if (m > 0) return m + 'm ' + s + 's';
+	return s + 's';
+}
+
 function fmtUptime(sec) {
 	if (sec === null || sec === undefined) return '';
 	var d = Math.floor(sec / 86400);
@@ -119,6 +136,58 @@ function paintZapret(s, errMsg) {
 	}
 }
 
+function paintBlockcheck(s) {
+	var stateEl = document.getElementById('bc-state');
+	var elapsedEl = document.getElementById('bc-elapsed');
+	var runBtn = document.getElementById('bc-run-btn');
+	var cancelBtn = document.getElementById('bc-cancel-btn');
+	var input = document.getElementById('bc-domain');
+
+	if (!s || s.status === 'never_run') {
+		if (stateEl) stateEl.textContent = _('never run');
+		if (elapsedEl) elapsedEl.textContent = '';
+		if (runBtn) { runBtn.disabled = false; runBtn.textContent = _('Run'); }
+		if (cancelBtn) cancelBtn.style.display = 'none';
+		if (input) input.disabled = false;
+		return;
+	}
+
+	var running = (s.status === 'running');
+	var now = Math.floor(Date.now() / 1000);
+	var elapsed = running
+		? (now - (s.started_ts || now))
+		: ((s.finished_ts || 0) - (s.started_ts || 0));
+
+	if (stateEl) {
+		var colour = running ? '#3c763d'
+			: s.status === 'finished'  ? '#3c763d'
+			: s.status === 'cancelled' ? '#666'
+			: '#a94442';
+		stateEl.textContent = s.status + (s.domain ? ' [' + s.domain + ']' : '');
+		stateEl.style.color = colour;
+	}
+	if (elapsedEl) {
+		if (running) elapsedEl.textContent = _('elapsed: ') + fmtDur(elapsed);
+		else if (s.finished_ts) elapsedEl.textContent = _('took: ') + fmtDur(elapsed);
+		else elapsedEl.textContent = '';
+	}
+	if (runBtn) {
+		runBtn.disabled = running;
+		runBtn.textContent = running ? _('Running...') : _('Run');
+	}
+	if (cancelBtn) cancelBtn.style.display = running ? '' : 'none';
+	if (input) input.disabled = running;
+}
+
+function paintBlockcheckLog(text) {
+	var pre = document.getElementById('bc-log');
+	if (!pre) return;
+	if (!text) { pre.textContent = '(no log yet)'; return; }
+	pre.textContent = text;
+	// Autoscroll to bottom while a run is in progress; cheap heuristic.
+	pre.scrollTop = pre.scrollHeight;
+}
+
 function paintRuStamp(stamp) {
 	var when = document.getElementById('awg-ru-when');
 	var count = document.getElementById('awg-ru-count');
@@ -155,6 +224,44 @@ return view.extend({
 			ui.addNotification(null, E('p', {}, _('Toggle failed: ') + err), 'danger');
 			var b = document.getElementById('awg-toggle-btn');
 			if (b) { delete b.dataset.busy; b.disabled = false; }
+		});
+	},
+
+	handleBlockcheckRun: function(ev) {
+		var input = document.getElementById('bc-domain');
+		var domain = (input && input.value || '').trim() || 'youtube.com';
+		// Domain validation: hostname chars only, no shell metachars (defensive --
+		// fs.exec passes argv array so injection isn't possible, but reject
+		// obvious garbage to avoid hour-long runs on bad input).
+		if (!/^[A-Za-z0-9.\-_]{2,253}$/.test(domain)) {
+			ui.addNotification(null, E('p', {}, _('Invalid domain: ') + domain), 'warning');
+			return Promise.resolve();
+		}
+		var btn = document.getElementById('bc-run-btn');
+		if (btn) { btn.disabled = true; btn.textContent = _('Starting...'); }
+		return fs.exec('/usr/bin/zapret-blockcheck', ['start', domain]).then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				(res.code === 0) ? 'info' : 'warning');
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Blockcheck start failed: ') + err), 'danger');
+			var b = document.getElementById('bc-run-btn');
+			if (b) { b.disabled = false; b.textContent = _('Run'); }
+		});
+	},
+
+	handleBlockcheckCancel: function(ev) {
+		var btn = document.getElementById('bc-cancel-btn');
+		if (btn) { btn.disabled = true; }
+		return fs.exec('/usr/bin/zapret-blockcheck', ['cancel']).then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')), 'info');
+			if (btn) btn.disabled = false;
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Blockcheck cancel failed: ') + err), 'danger');
+			if (btn) btn.disabled = false;
 		});
 	},
 
@@ -218,14 +325,27 @@ return view.extend({
 				paintZapret(null, _('unparseable status output'));
 			}
 		});
-		return Promise.all([p1, p2, p3]);
+		var p4 = L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), '').then(L.bind(function(text) {
+			var bc = parseBlockcheck(text);
+			paintBlockcheck(bc);
+			// Fetch log when there's anything to show. Skipped on never_run to
+			// avoid an exec round-trip for users who never touched blockcheck.
+			if (bc && bc.status && bc.status !== 'never_run' && bc.log_size > 0) {
+				return fs.exec('/usr/bin/zapret-blockcheck', ['log']).then(function(r) {
+					paintBlockcheckLog((r && r.stdout) || '');
+				}).catch(function() { /* silent: status panel already shows state */ });
+			}
+		}, this));
+		return Promise.all([p1, p2, p3, p4]);
 	},
 
 	load: function() {
 		return Promise.all([
 			L.resolveDefault(fs.exec('/usr/bin/awg-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/awg/ru-update.json'), ''),
-			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' })
+			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' }),
+			L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), ''),
+			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' })
 		]);
 	},
 
@@ -233,6 +353,8 @@ return view.extend({
 		var initial = parseStatus((data && data[0] && data[0].stdout) || '');
 		var stamp = parseRuStamp(data && data[1]);
 		var zap = parseZapret((data && data[2] && data[2].stdout) || '');
+		var bc = parseBlockcheck(data && data[3]);
+		var bcLog = (data && data[4] && data[4].stdout) || '';
 
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
@@ -342,6 +464,58 @@ return view.extend({
 								'disabled': (zap && zap.installed) ? null : '',
 								'click': ui.createHandlerFn(this, 'handleZapretToggle')
 							}, zap && zap.installed ? (zap.enabled ? _('Turn OFF') : _('Turn ON')) : _('N/A'))
+						])
+					])
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Blockcheck (zapret strategy tuner)')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Runs /opt/zapret/blockcheck.sh against a test domain to find a DPI desync strategy that works on this ISP. Takes 5-30 minutes. For best results turn zapret OFF before starting. The run continues in the background if you close this page.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Test domain')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'bc-domain',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:220px;margin-right:8px;',
+								'value': (bc && bc.domain) || 'youtube.com',
+								'placeholder': 'youtube.com',
+								'disabled': (bc && bc.status === 'running') ? '' : null
+							}),
+							E('button', {
+								'id': 'bc-run-btn',
+								'class': 'btn cbi-button-action',
+								'style': 'margin-right:8px;',
+								'disabled': (bc && bc.status === 'running') ? '' : null,
+								'click': ui.createHandlerFn(this, 'handleBlockcheckRun')
+							}, (bc && bc.status === 'running') ? _('Running...') : _('Run')),
+							E('button', {
+								'id': 'bc-cancel-btn',
+								'class': 'btn cbi-button-negative',
+								'style': (bc && bc.status === 'running') ? '' : 'display:none;',
+								'click': ui.createHandlerFn(this, 'handleBlockcheckCancel')
+							}, _('Cancel'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('State')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('strong', { 'id': 'bc-state' },
+								bc && bc.status ? (bc.status + (bc.domain ? ' [' + bc.domain + ']' : '')) : _('never run')),
+							E('span', { 'id': 'bc-elapsed', 'style': 'margin-left:12px;color:#666;' }, '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Log')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('pre', {
+								'id': 'bc-log',
+								'style': 'background:#1e1e1e;color:#d4d4d4;padding:8px;margin:0;max-height:320px;overflow:auto;font-size:11px;white-space:pre;'
+							}, bcLog || _('(no log yet)'))
 						])
 					])
 				])
