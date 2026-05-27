@@ -304,16 +304,28 @@ function paintBlockcheck(s) {
 // each connection type (TLS via TCP 443, QUIC via UDP 443, plain HTTP via TCP 80).
 // Blocks are joined with --new; nfqws picks the first matching block per flow.
 function composeNfqwsOpt(selected) {
-	var blocks = [];
+	// Detect whether the selected set spans multiple distinct domains. When it
+	// does, we need to scope each block to its own domain via
+	// --hostlist-domains, otherwise nfqws's first-match logic would let block
+	// #1 swallow flows that block #2 was meant to fix (since both share the
+	// same --filter-tcp=443). Inline form keeps us free of hostlist files.
+	var uniqDomains = {};
 	for (var i = 0; i < selected.length; i++) {
-		var c = selected[i];
+		if (selected[i].domain) uniqDomains[selected[i].domain] = true;
+	}
+	var perDomain = Object.keys(uniqDomains).length > 1;
+
+	var blocks = [];
+	for (var j = 0; j < selected.length; j++) {
+		var c = selected[j];
 		var prefix;
 		var s = (c.scope || '').toLowerCase();
 		if (s.indexOf('http3') !== -1 || s.indexOf('quic') !== -1)        prefix = '--filter-udp=443 ';
 		else if (s.indexOf('tls') !== -1 || s.indexOf('https') !== -1)    prefix = '--filter-tcp=443 ';
 		else if (s.indexOf('http') !== -1)                                 prefix = '--filter-tcp=80 ';
 		else                                                                prefix = '--filter-tcp=443 '; // safe default: an unfiltered block under --new would match all flows and silently shadow later blocks.
-		blocks.push((prefix + c.strategy).replace(/\s+/g, ' ').trim());
+		var hostlist = (perDomain && c.domain) ? ('--hostlist-domains=' + c.domain + ' ') : '';
+		blocks.push((prefix + hostlist + c.strategy).replace(/\s+/g, ' ').trim());
 	}
 	return blocks.join(' --new ');
 }
@@ -491,14 +503,22 @@ return view.extend({
 
 	handleBlockcheckRun: function(ev) {
 		var input = document.getElementById('bc-domain');
-		var domain = (input && input.value || '').trim() || 'youtube.com';
-		// Domain validation: hostname chars only, no shell metachars (defensive --
-		// fs.exec passes argv array so injection isn't possible, but reject
-		// obvious garbage to avoid hour-long runs on bad input).
-		if (!/^[A-Za-z0-9.\-_]{2,253}$/.test(domain)) {
-			ui.addNotification(null, E('p', {}, _('Invalid domain: ') + domain), 'warning');
+		var raw = (input && input.value || '').trim() || 'youtube.com';
+		// Accept comma-separated list. Validate each token defensively --
+		// fs.exec passes argv array (no injection possible) but reject garbage
+		// so a typo doesn't waste 30 min on a non-existent domain.
+		var parts = raw.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+		if (parts.length === 0) {
+			ui.addNotification(null, E('p', {}, _('No domains given')), 'warning');
 			return Promise.resolve();
 		}
+		for (var i = 0; i < parts.length; i++) {
+			if (!/^[A-Za-z0-9.\-_]{2,253}$/.test(parts[i])) {
+				ui.addNotification(null, E('p', {}, _('Invalid domain: ') + parts[i]), 'warning');
+				return Promise.resolve();
+			}
+		}
+		var domain = parts.join(',');
 		var btn = document.getElementById('bc-run-btn');
 		if (btn) { btn.disabled = true; btn.textContent = _('Starting...'); }
 		return fs.exec('/usr/bin/zapret-blockcheck', ['start', domain]).then(L.bind(function(res) {
@@ -873,9 +893,10 @@ return view.extend({
 								'id': 'bc-domain',
 								'type': 'text',
 								'class': 'cbi-input-text',
-								'style': 'width:220px;margin-right:8px;',
+								'style': 'width:340px;margin-right:8px;',
 								'value': (bc && bc.domain) || 'youtube.com',
-								'placeholder': 'youtube.com',
+								'placeholder': _('youtube.com, instagram.com, ...'),
+								'title': _('One or more domains separated by commas'),
 								'disabled': (bc && bc.status === 'running') ? '' : null
 							}),
 							E('button', {

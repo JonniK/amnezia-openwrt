@@ -22,6 +22,36 @@ STAMP=/etc/awg/blockcheck.json
 LOCK=/var/lock/zapret-blockcheck.lock
 SCRIPT=/opt/zapret/blockcheck.sh
 
+# BusyBox build on OpenWrt 24.10 mediatek/filogic doesn't include `pkill` --
+# portable substitute that walks /proc and matches a fixed substring against
+# each cmdline. Args: <substring> [signal]. Skips its own pid.
+kill_by_cmdline() {
+	_pat="$1"
+	_sig="${2:-TERM}"
+	_self=$$
+	for _d in /proc/[0-9]*; do
+		[ -d "$_d" ] || continue
+		_pid="${_d#/proc/}"
+		[ "$_pid" = "$_self" ] && continue
+		_cmd=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null) || continue
+		case "$_cmd" in
+			*"$_pat"*) kill -"$_sig" "$_pid" 2>/dev/null ;;
+		esac
+	done
+}
+
+# Same shape but for a single parent: kill its direct children.
+kill_children_of() {
+	_parent="$1"
+	_sig="${2:-TERM}"
+	for _d in /proc/[0-9]*; do
+		[ -d "$_d" ] || continue
+		_pid="${_d#/proc/}"
+		_ppid=$(awk '$1=="PPid:"{print $2}' "$_d/status" 2>/dev/null)
+		[ "$_ppid" = "$_parent" ] && kill -"$_sig" "$_pid" 2>/dev/null
+	done
+}
+
 mkdir -p /etc/awg /var/run /var/lock
 
 is_running() {
@@ -65,7 +95,26 @@ cmd=${1:-}
 case "$cmd" in
 	start)
 		[ -x "$SCRIPT" ] || { echo "blockcheck.sh not found at $SCRIPT"; exit 2; }
-		domain=${2:-youtube.com}
+		# Accept comma-separated domains. blockcheck.sh's DOMAINS env is
+		# space-separated; we normalise on the way in. Each token is validated
+		# against a defensive hostname regex (anchored, no shell metas).
+		domain_raw=${2:-youtube.com}
+		domains=""
+		oldifs=$IFS; IFS=','
+		for d in $domain_raw; do
+			# Trim whitespace.
+			d=$(printf '%s' "$d" | awk '{$1=$1;print}')
+			[ -z "$d" ] && continue
+			case "$d" in
+				*[!A-Za-z0-9._-]*) echo "invalid domain: $d"; exit 2 ;;
+			esac
+			if [ -z "$domains" ]; then domains="$d"; else domains="$domains $d"; fi
+		done
+		IFS=$oldifs
+		[ -n "$domains" ] || { echo "no valid domains given"; exit 2; }
+		# Stamp uses the comma form for display (matches user input);
+		# blockcheck's DOMAINS env wants whitespace, which $domains already is.
+		domain=$(printf '%s' "$domains" | tr ' ' ',')
 		# Refuse a second concurrent start (also serialises against a racing click).
 		(
 		flock -n 9 || { echo "blockcheck-start: another invocation is mid-launch"; exit 75; }
@@ -87,25 +136,51 @@ case "$cmd" in
 			# entire blockcheck run (10-30 min) and concurrent starts misreport
 			# as flock contention instead of "already running".
 			exec 9<&-
-			# Line-buffer stdout/stderr so the LuCI log tail updates in real
-			# time. Without stdbuf, curl writes via libc which fully buffers
-			# when redirected to a file, and the log appears in 4 KiB bursts.
-			if command -v stdbuf >/dev/null 2>&1; then
-				_launch="stdbuf -oL -eL sh"
+			# Live log preference: make blockcheck and its curl children think
+			# stdout is a terminal so they line-buffer. socat with a PTY does
+			# this reliably on musl; stdbuf only half-works (musl libc lacks
+			# __fsetlocking so LD_PRELOAD-based unbuffering is partial). Plain
+			# `sh` falls all the way back if neither helper is installed --
+			# the log will then appear in 4 KiB bursts but everything else
+			# still works.
+			# Inline assignment-prefix is critical for multi-domain runs: an
+			# `env DOMAINS="$domains" CMD ...` form would word-split on the
+			# space inside $domains and treat "instagram.com" as the command.
+			# POSIX-style assignment before the simple command exports cleanly
+			# to the child regardless of token count.
+			if command -v socat >/dev/null 2>&1; then
+				# socat allocates a PTY, runs the command inside it, and pipes
+				# the PTY output back to socat's stdout (-> our $LOGFILE).
+				# `raw` keeps bytes verbatim; `echo=0` avoids local-echo dup.
+				DOMAINS="$domains" IPVS=4 \
+				ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=1 \
+				REPEATS=1 PARALLEL=0 SCANLEVEL=standard \
+				socat -u "EXEC:sh $SCRIPT,pty,stderr,raw,echo=0" - >>"$LOGFILE" 2>&1 </dev/null &
+			elif command -v stdbuf >/dev/null 2>&1; then
+				DOMAINS="$domains" IPVS=4 \
+				ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=1 \
+				REPEATS=1 PARALLEL=0 SCANLEVEL=standard \
+				stdbuf -oL -eL sh "$SCRIPT" >>"$LOGFILE" 2>&1 </dev/null &
 			else
-				_launch="sh"
+				DOMAINS="$domains" IPVS=4 \
+				ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=1 \
+				REPEATS=1 PARALLEL=0 SCANLEVEL=standard \
+				sh "$SCRIPT" >>"$LOGFILE" 2>&1 </dev/null &
 			fi
-			DOMAINS="$domain" \
-			IPVS=4 \
-			ENABLE_HTTP=0 ENABLE_HTTPS_TLS12=1 ENABLE_HTTPS_TLS13=1 ENABLE_HTTP3=1 \
-			REPEATS=1 PARALLEL=0 SCANLEVEL=standard \
-			$_launch "$SCRIPT" >>"$LOGFILE" 2>&1 </dev/null &
 			bc_pid=$!
 			echo "$bc_pid" > "$PIDFILE"
 			wait "$bc_pid"
 			rc=$?
 			finished=$(date +%s)
 			rm -f "$PIDFILE"
+			# Belt-and-suspenders: blockcheck.sh's own trap usually cleans up
+			# its test nfqws + nft chains on SIGTERM, but if our cancel went
+			# through socat the child got SIGHUP and may have skipped trap.
+			# Kill any straggler blockcheck.sh AND any nfqws using the test
+			# QNUM (59780 = upstream constant; differs from the user-running
+			# zapret nfqws which uses qnum=200).
+			kill_by_cmdline "/opt/zapret/blockcheck.sh" KILL
+			kill_by_cmdline "qnum=59780"                KILL
 			# A cancel sets CANCELMARK; trust that over the exit code, because
 			# blockcheck.sh's SIGTERM trap may cleanly exit 0 after teardown
 			# (and an rc 143/137 only fires if our SIGKILL fallback was needed).
@@ -184,7 +259,15 @@ case "$cmd" in
 		# Mark intent so the supervisor classifies as 'cancelled' even if
 		# blockcheck.sh's SIGTERM trap exits 0 after tearing down its nft table.
 		touch "$CANCELMARK"
-		echo "sending SIGTERM to pid $p"
+		# With the socat PTY wrapper, $p is socat -- blockcheck.sh is its
+		# direct child and only SIGTERM (not the SIGHUP that PTY-close
+		# delivers) triggers blockcheck's nft/NFQUEUE cleanup trap. pkill -P
+		# walks one level of children, which is exactly what we need for
+		# both the socat case (socat -> blockcheck) and the stdbuf/sh case
+		# (where $p IS blockcheck and pkill -P is a harmless no-op against
+		# blockcheck's own curl/etc. children).
+		echo "sending SIGTERM to pid $p (and immediate children)"
+		kill_children_of "$p" TERM
 		kill -TERM "$p" 2>/dev/null || true
 		# Grace period for blockcheck's trap handlers to tear down nftables.
 		for i in 1 2 3 4 5; do
@@ -193,6 +276,7 @@ case "$cmd" in
 		done
 		if [ -d "/proc/$p" ]; then
 			echo "still alive after 5s, sending SIGKILL"
+			kill_children_of "$p" KILL
 			kill -KILL "$p" 2>/dev/null || true
 		fi
 		# Supervisor subshell will pick up the wait result and rewrite the stamp.
