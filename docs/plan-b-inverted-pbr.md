@@ -1,0 +1,171 @@
+# Plan B — Inverted PBR with zapret as the default obfuscation layer
+
+Status: **draft, not started.** Becomes the next milestone only if zapret
+(installed in Plan A) proves stable and effective on the current ISP.
+
+## What changes
+
+Today (Plan A — current state):
+- Default route for foreign traffic = **AmneziaWG tunnel** (`awg1`).
+- RU IPv4 CIDRs and `.ru` TLD lookups bypass the tunnel via PBR (`pbr_wan_4_dst_ip_user`, `pbr_ru_tld4`).
+- zapret is **independent** and only meaningful for traffic already going direct.
+
+Plan B inverts the routing decision:
+- Default route for foreign traffic = **WAN direct + zapret DPI desync.**
+- AWG tunnel is used **only** for an explicit allow-list of "must-tunnel" domains
+  (sites that zapret cannot fix because the block is by destination IP, not SNI).
+- RU bypass logic stays as-is.
+
+Expected upside vs current:
+- Foreign traffic on direct = 0–5% speed loss instead of 20–50% via tunnel.
+- AWG server bandwidth / latency budget freed for the small must-tunnel set.
+- One less hop in the most-trafficked path.
+
+Expected downside:
+- Operational: a curated must-tunnel domain list to maintain.
+- Single point of failure: if zapret breaks, foreign sites that worked behind
+  the tunnel may stop working until the toggle is flipped back.
+
+## Decision criteria (before starting Plan B)
+
+Run for at least one full week with the Plan A zapret toggle ON during
+"normal usage" and answer:
+
+1. **Stability** — any unexpected disconnects, RAM pressure, kernel
+   tracebacks (`logread | grep -i 'nfqws\|oom\|stall'`)?
+2. **Effectiveness** — do the YouTube / Discord / Twitch / GitHub / Cloudflare
+   targets actually work with **AWG turned OFF** and zapret ON?
+3. **Strategy adequacy** — does the upstream-default strategy
+   (`Strategy__v6_by_StressOzz`) suffice, or did running `blockcheck.sh`
+   reveal a strategy that's notably better and needs to be persisted to
+   `/etc/config/zapret`?
+4. **Concrete must-tunnel list** — which domains *still* fail with zapret ON?
+   That list seeds the new `pbr_unblock4` nftset.
+
+If 1+2 hold and 4 produces a list of <30 domains, proceed.
+If zapret causes regressions or 4 explodes past ~100 domains, stay on Plan A.
+
+## Architecture sketch
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Client (LAN)                                                         │
+└──────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                   ┌────────────────────┐
+                   │ dnsmasq + nftsets  │
+                   │  - pbr_ru_tld4     │ ◀── .ru TLDs (DIRECT)
+                   │  - pbr_unblock4    │ ◀── must-tunnel hostlist (AWG)
+                   └────────────────────┘
+                              │
+              ┌───────────────┴───────────────┐
+              ▼                               ▼
+   ┌──────────────────────┐         ┌────────────────────┐
+   │ AWG tunnel (awg1)    │         │ WAN direct + zapret│
+   │ - dst ∈ pbr_unblock4 │         │ - everything else  │
+   └──────────────────────┘         │ - nfqws hook on    │
+              │                     │   tcp 80/443/QUIC  │
+              ▼                     └────────────────────┘
+       remote VPN server                       │
+                                               ▼
+                                          internet
+```
+
+Routing table (PBR rules in this order — first match wins):
+
+| Priority | Match                              | Route   |
+|----------|------------------------------------|---------|
+| 1        | dst ∈ `pbr_unblock4` (allow-list)  | `awg1`  |
+| 2        | dst ∈ `pbr_ru_tld4` (RU TLDs)      | WAN     |
+| 3        | dst ∈ `pbr_wan_4_dst_ip_user` (RU) | WAN     |
+| 4        | default                            | WAN     |
+
+zapret nfqws hook is on egress WAN, so steps 2/3/4 get DPI desync; step 1
+goes through the tunnel and is independent of zapret.
+
+## Implementation plan
+
+### Phase B0 — preparation (no behaviour change)
+
+1. **Curate `must-tunnel` list.** Source candidates:
+   - `itdog/allow-domains` (CDN-friendly, weekly auto-updated)
+   - `re-x-license/re-filter-lists` (geo-targeted, sng project)
+   - Hand-edited entries from the user's actual failure list from Plan A week.
+2. Persist in `/etc/awg/unblock.list` (one host per line, comments with `#`).
+3. Add `awg-unblock-update.sh` (mirror of `awg-ru-update.sh`):
+   - source priority: GitHub → mirror → user-provided file
+   - validates ≥10 lines, no nonsense
+   - writes `/etc/awg/unblock.json` stamp
+   - triggers `pbr reload` on change
+4. Wire weekly cron alongside the RU one (`/etc/crontabs/root`).
+
+### Phase B1 — new nftset + dnsmasq integration
+
+5. Create persistent nftables set `pbr_unblock4` (same shape as `pbr_ru_tld4`).
+6. Add dnsmasq nftset directive for the unblock list, file pattern:
+   `/etc/dnsmasq.d/unblock-nftset.conf` — generated by
+   `configure-dnsmasq-unblock-nftset.sh` from `/etc/awg/unblock.list`.
+7. New PBR include `/etc/pbr.d/unblock-via-vpn.sh` that:
+   - reads `/etc/awg/unblock.list`
+   - emits nft rules: "dst ∈ pbr_unblock4 → mark for awg1"
+   - mirrors the precedence-bug fix from `ru-direct.sh`
+
+### Phase B2 — invert the PBR default
+
+8. Modify `/etc/pbr.d/99-lan-vpn.sh` (or whatever the current default is) to:
+   - default route LAN → WAN (no longer awg1)
+   - first match: dst ∈ pbr_unblock4 → awg1
+9. RU rules stay where they are (priorities 2/3) but now they're redundant
+   for "make sure RU stays direct" since direct is the default — they
+   become a small optimisation only (skip the unblock-set lookup for known-RU).
+10. Adjust `awg-toggle` UX: turning the AWG tunnel OFF in Plan B is much less
+    disruptive (only the unblock list goes dark), so the warning copy in
+    the LuCI app should be updated to reflect this.
+
+### Phase B3 — LuCI app updates
+
+11. Add a fourth section "Unblock list" to the Amnezia LuCI app:
+    - last update timestamp, source, count (mirror of RU IP list section)
+    - "Update now" button → calls `/usr/bin/awg-unblock-update`
+    - link to the source list for transparency
+12. Update the existing AWG toggle subtitle to read "Tunnel for unblock-list
+    domains only" instead of "default route for foreign traffic".
+13. Add a clear visual indicator when the user has both toggles in unusual
+    states (e.g., AWG off + zapret off = "no obfuscation in effect").
+
+### Phase B4 — rollback safety net
+
+14. The current Plan A code paths (default-via-AWG + RU direct) stay in
+    the repo as `/etc/pbr.d/99-lan-vpn-full.sh` and remain referenceable.
+15. Add `/usr/bin/awg-pbr-mode` script that flips between "plan-a" and
+    "plan-b" modes (one command swaps the active include file and reloads
+    PBR). LuCI app surfaces this as a "Routing mode" dropdown.
+16. Document the rollback in `docs/openwrt-pbr-modes.md`.
+
+## Open questions to resolve before B0
+
+- **Strategy persistence.** If blockcheck recommends a non-default strategy,
+  do we ship that in repo (`openwrt/zapret-config.example` to be merged into
+  `/etc/config/zapret`) or leave it as a per-router manual step? Default:
+  manual, but add a script `zapret-apply-strategy <file>` for repeatability.
+- **DNS-over-TLS / DoH.** If the client uses external DoH (1.1.1.1, etc.),
+  dnsmasq never sees the lookup and `pbr_unblock4` won't populate. Either:
+  - block external DoT/DoH (port 853, known DoH IPs) so clients fall back to
+    the router resolver, OR
+  - accept that DoH users bypass the unblock list and document it.
+  Decision deferred to B0 measurement.
+- **IPv6.** Current setup only has IPv4 PBR sets. zapret's UCI config has
+  `DISABLE_IPV6 '1'`. Plan B inherits this — IPv6 stays default-direct, no
+  unblock support. Acceptable for the first iteration.
+- **Per-device exemption.** Some clients (e.g., a work laptop) may want to
+  stay fully tunneled regardless of the unblock list. Add a LAN-IP-based
+  "force-tunnel" set in a later iteration if requested.
+
+## Why this is in a doc and not yet code
+
+Plan B is a routing-default flip. It only makes sense after a week of real
+data from Plan A. The architecture above is intentionally close to what
+already exists (same nftset/dnsmasq/PBR-include patterns) so the actual
+implementation is incremental, not a rewrite. When we start B0, this doc
+becomes the milestone tracker.
