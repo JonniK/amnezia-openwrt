@@ -10,6 +10,58 @@
 // a fresh poller. Steady state during navigation: 0 active pollers.
 var pollFn = null;
 
+// In-flight flag for apply/revert. While true, the 5s poll's paintApply()
+// must not touch the apply/revert buttons -- otherwise a poll landing
+// mid-uci-commit re-enables the button and a second click stacks restarts.
+var applyInFlight = false;
+
+// Signature of the most recently rendered candidate list. paintApply() skips
+// rebuilding the <select> when the signature is unchanged -- otherwise an
+// open dropdown would be closed by the browser on every 5s poll.
+var candidatesSig = '';
+
+function candidatesSignature(cands) {
+	if (!cands || !cands.length) return '';
+	var parts = [];
+	for (var i = 0; i < cands.length; i++) parts.push(cands[i].strategy || '');
+	return parts.join('\x1e');
+}
+
+// Promise-returning confirm modal. confirm() is synchronous and would freeze
+// the 5s poll loop until the user clicks; this drops the user back into the
+// event loop while waiting. The Promise is guaranteed to settle even if the
+// modal is dismissed via Escape/backdrop -- otherwise ui.createHandlerFn
+// would keep the triggering button disabled forever.
+function uiConfirm(message) {
+	return new Promise(function(resolve) {
+		var done = false;
+		var finish = function(v) {
+			if (done) return;
+			done = true;
+			document.removeEventListener('keydown', onKey);
+			clearTimeout(safetyTimer);
+			try { ui.hideModal(); } catch (e) { /* already hidden */ }
+			resolve(v);
+		};
+		var onKey = function(e) {
+			if (e.key === 'Escape' || e.keyCode === 27) finish(false);
+		};
+		// Last-resort fallback: if the modal vanishes via a path we don't
+		// observe (e.g. user navigates and re-renders), give up after 60s.
+		var safetyTimer = setTimeout(function() { finish(false); }, 60000);
+		document.addEventListener('keydown', onKey);
+
+		ui.showModal(_('Confirm'), [
+			E('p', { 'style': 'white-space:pre-wrap;' }, message),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'btn', 'click': function() { finish(false); } }, _('Cancel')),
+				' ',
+				E('button', { 'class': 'btn cbi-button-positive', 'click': function() { finish(true); } }, _('Confirm'))
+			])
+		]);
+	});
+}
+
 function parseStatus(text) {
 	text = text || '';
 	var up = /"up"\s*:\s*true/.test(text);
@@ -31,6 +83,25 @@ function parseZapret(text) {
 function parseBlockcheck(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function parseApplyState(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+// zapret-apply parse emits one JSON object per line (NDJSON-ish). Returns
+// an array of candidate objects; silently drops lines that don't parse.
+function parseCandidates(text) {
+	if (!text) return [];
+	var out = [];
+	var lines = text.split('\n');
+	for (var i = 0; i < lines.length; i++) {
+		var s = lines[i].trim();
+		if (!s) continue;
+		try { out.push(JSON.parse(s)); } catch (e) { /* skip */ }
+	}
+	return out;
 }
 
 function fmtDur(sec) {
@@ -179,6 +250,72 @@ function paintBlockcheck(s) {
 	if (input) input.disabled = running;
 }
 
+function paintApply(state, candidates) {
+	var sel = document.getElementById('apply-select');
+	var currentEl = document.getElementById('apply-current');
+	var applyBtn = document.getElementById('apply-btn');
+	var revertBtn = document.getElementById('apply-revert-btn');
+	var summary = document.getElementById('apply-summary');
+
+	// Rebuild the <select> only when the candidate set actually changed --
+	// otherwise an open dropdown is collapsed by the browser on every poll.
+	if (sel) {
+		var newSig = candidatesSignature(candidates);
+		if (newSig !== candidatesSig) {
+			candidatesSig = newSig;
+			var prevValue = sel.value;
+			sel.innerHTML = '';
+			if (!candidates || candidates.length === 0) {
+				var opt = document.createElement('option');
+				opt.textContent = _('(no working strategies in log yet)');
+				opt.value = '';
+				opt.disabled = true;
+				sel.appendChild(opt);
+			} else {
+				for (var i = 0; i < candidates.length; i++) {
+					var c = candidates[i];
+					var label = '[ipv' + c.ipv + ' ' + c.scope + ' / ' + c.family + '] ' + c.strategy;
+					if (label.length > 140) label = label.substring(0, 137) + '...';
+					var o = document.createElement('option');
+					o.textContent = label;
+					o.value = c.strategy;
+					sel.appendChild(o);
+				}
+				if (prevValue) {
+					for (var j = 0; j < sel.options.length; j++) {
+						if (sel.options[j].value === prevValue) { sel.selectedIndex = j; break; }
+					}
+				}
+			}
+		}
+	}
+
+	if (summary) {
+		var count = (candidates && candidates.length) || 0;
+		summary.textContent = count
+			? (count + ' ' + _('working strategy(ies) found in current log'))
+			: _('Run blockcheck on a blocked domain to populate this list');
+	}
+
+	if (currentEl) {
+		currentEl.textContent = (state && state.current)
+			? state.current
+			: _('(NFQWS_OPT empty)');
+	}
+
+	// Never touch button enabled-state while a click is mid-flight -- the
+	// handler owns those bits until its promise resolves.
+	if (!applyInFlight) {
+		if (applyBtn) {
+			applyBtn.disabled = !(candidates && candidates.length);
+		}
+		if (revertBtn) {
+			revertBtn.style.display = (state && state.has_backup) ? '' : 'none';
+			revertBtn.title = (state && state.backup_ts) ? (_('Backup from ') + state.backup_ts) : '';
+		}
+	}
+}
+
 function paintBlockcheckLog(text) {
 	var pre = document.getElementById('bc-log');
 	if (!pre) return;
@@ -249,6 +386,56 @@ return view.extend({
 			var b = document.getElementById('bc-run-btn');
 			if (b) { b.disabled = false; b.textContent = _('Run'); }
 		});
+	},
+
+	handleApply: function(ev) {
+		var sel = document.getElementById('apply-select');
+		if (!sel || !sel.value) {
+			ui.addNotification(null, E('p', {}, _('Select a strategy first')), 'warning');
+			return Promise.resolve();
+		}
+		var strategy = sel.value;
+		// Lock the buttons BEFORE the confirm modal: a 5s poll firing while the
+		// user reads the dialog must not re-enable Apply for a second click.
+		applyInFlight = true;
+		return uiConfirm(_('Apply this nfqws strategy and restart zapret?\n\n') + strategy).then(L.bind(function(ok) {
+			if (!ok) { applyInFlight = false; return null; }
+			var btn = document.getElementById('apply-btn');
+			if (btn) { btn.disabled = true; btn.textContent = _('Applying...'); }
+			return fs.exec('/usr/bin/zapret-apply', ['apply', strategy]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					(res.code === 0) ? 'info' : 'danger');
+				applyInFlight = false;
+				if (btn) { btn.disabled = false; btn.textContent = _('Apply selected'); }
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Apply failed: ') + err), 'danger');
+				applyInFlight = false;
+				if (btn) { btn.disabled = false; btn.textContent = _('Apply selected'); }
+			});
+		}, this));
+	},
+
+	handleRevert: function(ev) {
+		applyInFlight = true;
+		return uiConfirm(_('Revert NFQWS_OPT to the previous backup and restart zapret?')).then(L.bind(function(ok) {
+			if (!ok) { applyInFlight = false; return null; }
+			var btn = document.getElementById('apply-revert-btn');
+			if (btn) { btn.disabled = true; }
+			return fs.exec('/usr/bin/zapret-apply', ['revert']).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					(res.code === 0) ? 'info' : 'danger');
+				applyInFlight = false;
+				if (btn) btn.disabled = false;
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Revert failed: ') + err), 'danger');
+				applyInFlight = false;
+				if (btn) btn.disabled = false;
+			});
+		}, this));
 	},
 
 	handleBlockcheckCancel: function(ev) {
@@ -336,7 +523,15 @@ return view.extend({
 				}).catch(function() { /* silent: status panel already shows state */ });
 			}
 		}, this));
-		return Promise.all([p1, p2, p3, p4]);
+		var p5 = Promise.all([
+			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
+			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' })
+		]).then(function(res) {
+			var st = parseApplyState((res[0] && res[0].stdout) || '');
+			var cand = parseCandidates((res[1] && res[1].stdout) || '');
+			paintApply(st, cand);
+		});
+		return Promise.all([p1, p2, p3, p4, p5]);
 	},
 
 	load: function() {
@@ -345,7 +540,9 @@ return view.extend({
 			L.resolveDefault(fs.read('/etc/awg/ru-update.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), ''),
-			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' })
+			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' }),
+			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
+			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' })
 		]);
 	},
 
@@ -355,6 +552,10 @@ return view.extend({
 		var zap = parseZapret((data && data[2] && data[2].stdout) || '');
 		var bc = parseBlockcheck(data && data[3]);
 		var bcLog = (data && data[4] && data[4].stdout) || '';
+		var applySt = parseApplyState((data && data[5] && data[5].stdout) || '');
+		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
+		// Seed the rebuild-guard so the first poll doesn't tear down our select.
+		candidatesSig = candidatesSignature(applyCands);
 
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
@@ -516,6 +717,63 @@ return view.extend({
 								'id': 'bc-log',
 								'style': 'background:#1e1e1e;color:#d4d4d4;padding:8px;margin:0;max-height:320px;overflow:auto;font-size:11px;white-space:pre;'
 							}, bcLog || _('(no log yet)'))
+						])
+					]),
+					E('hr', { 'style': 'margin:12px 0;' }),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Recommendations')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'id': 'apply-summary', 'style': 'margin-bottom:6px;color:#666;font-size:12px;' },
+								(applyCands.length
+									? (applyCands.length + ' ' + _('working strategy(ies) found in current log'))
+									: _('Run blockcheck on a blocked domain to populate this list'))),
+							(function() {
+								var sel = E('select', {
+									'id': 'apply-select',
+									'class': 'cbi-input-select',
+									'style': 'width:100%;max-width:720px;display:block;margin-bottom:6px;font-family:monospace;font-size:11px;'
+								});
+								if (!applyCands.length) {
+									var o = document.createElement('option');
+									o.textContent = _('(no working strategies in log yet)');
+									o.disabled = true; o.value = '';
+									sel.appendChild(o);
+								} else {
+									for (var i = 0; i < applyCands.length; i++) {
+										var c = applyCands[i];
+										var label = '[ipv' + c.ipv + ' ' + c.scope + ' / ' + c.family + '] ' + c.strategy;
+										if (label.length > 140) label = label.substring(0, 137) + '...';
+										var op = document.createElement('option');
+										op.textContent = label;
+										op.value = c.strategy;
+										sel.appendChild(op);
+									}
+								}
+								return sel;
+							})(),
+							E('button', {
+								'id': 'apply-btn',
+								'class': 'btn cbi-button-positive',
+								'style': 'margin-right:8px;',
+								'disabled': applyCands.length ? null : '',
+								'click': ui.createHandlerFn(this, 'handleApply')
+							}, _('Apply selected')),
+							E('button', {
+								'id': 'apply-revert-btn',
+								'class': 'btn cbi-button-negative',
+								'style': (applySt && applySt.has_backup) ? '' : 'display:none;',
+								'title': (applySt && applySt.backup_ts) ? (_('Backup from ') + applySt.backup_ts) : '',
+								'click': ui.createHandlerFn(this, 'handleRevert')
+							}, _('Revert to backup'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Current NFQWS_OPT')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('code', {
+								'id': 'apply-current',
+								'style': 'display:block;background:#f5f5f5;padding:6px;font-size:11px;word-break:break-all;'
+							}, (applySt && applySt.current) || _('(NFQWS_OPT empty)'))
 						])
 					])
 				])

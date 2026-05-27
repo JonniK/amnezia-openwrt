@@ -1,0 +1,150 @@
+#!/bin/sh
+# zapret-apply: parse blockcheck log, apply a chosen strategy to UCI
+# NFQWS_OPT, manage backups, and revert when needed.
+#
+# Subcommands:
+#   parse                  emit one JSON object per line for every "working
+#                          strategy" line found in the current blockcheck log
+#                          (deduplicated).
+#   apply <strategy>       back up the current NFQWS_OPT, write <strategy>,
+#                          uci commit, restart zapret if enabled. The argument
+#                          is the FULL nfqws option string (the right-hand
+#                          side of the "found ... :" portion of a log line).
+#   revert                 restore NFQWS_OPT from the latest backup.
+#   state                  emit JSON with has_backup, backup_ts (filename ts),
+#                          candidates count, current NFQWS_OPT (single-line).
+set -u
+
+LOGFILE=/tmp/zapret-blockcheck.log
+BACKUP_DIR=/etc/awg/zapret-backups
+LATEST="$BACKUP_DIR/NFQWS_OPT.latest"
+UCI_KEY=zapret.config.NFQWS_OPT
+
+mkdir -p "$BACKUP_DIR"
+
+json_escape() {
+	# Escape for JSON string body.
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t'
+}
+
+# Squeeze multi-line / multi-space NFQWS_OPT into a single-line readable form.
+flatten_opt() {
+	printf '%s' "$1" | tr '\n\t' '  ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//'
+}
+
+reload_if_enabled() {
+	if [ -x /etc/init.d/zapret ] && /etc/init.d/zapret enabled 2>/dev/null; then
+		/etc/init.d/zapret restart >/dev/null 2>&1 || return 1
+	fi
+	return 0
+}
+
+cmd=${1:-}
+case "$cmd" in
+	parse)
+		[ -f "$LOGFILE" ] || { exit 0; }
+		# Upstream log format (blockcheck.sh L1243):
+		#   !!!!! <tool>: working strategy found for ipv<N> <scope> <family> : <strategy> !!!!!
+		# Example:
+		#   !!!!! nfqws: working strategy found for ipv4 https-tls12 fakedsplit : --dpi-desync=fakedsplit ... !!!!!
+		# Strategy text never contains " or \ in practice -- the upstream code
+		# composes from a finite set of --dpi-desync-* flags with safe values.
+		# We filter on tool=nfqws: NFQWS_OPT is the only thing this script
+		# writes, and tpws strategies (different flag set) would corrupt it.
+		sed -nE 's/^!!!!! nfqws: working strategy found for ipv([0-9]+) ([^ ]+) ([^ :]+) : (.*) !!!!!$/{"tool":"nfqws","ipv":\1,"scope":"\2","family":"\3","strategy":"\4"}/p' "$LOGFILE" \
+			| sort -u
+		;;
+
+	apply)
+		newopt=${2:-}
+		[ -n "$newopt" ] || { echo "usage: zapret-apply apply <strategy>"; exit 2; }
+		if ! command -v uci >/dev/null 2>&1; then
+			echo "uci not available"; exit 1
+		fi
+		current=$(uci -q get "$UCI_KEY" 2>/dev/null || echo "")
+		# No-op if the value is already what the user is trying to apply --
+		# saves a jffs2 write cycle and avoids a needless zapret restart.
+		if [ "$newopt" = "$current" ]; then
+			echo "already applied (no change)"
+			exit 0
+		fi
+		ts=$(date +%Y%m%d-%H%M%S)
+		bak="$BACKUP_DIR/NFQWS_OPT.$ts.bak"
+		# Atomic backup write: tmp + mv.
+		printf '%s\n' "$current" > "$bak.tmp" && mv "$bak.tmp" "$bak"
+		ln -sf "$bak" "$LATEST"
+		# Trim backup history to the last 10 entries so the dir doesn't grow
+		# unbounded on jffs2. The .latest symlink (revert target) is preserved
+		# by name -- we only delete plain .bak / .bak.reverted older than 10.
+		ls -1t "$BACKUP_DIR"/NFQWS_OPT.*.bak "$BACKUP_DIR"/NFQWS_OPT.*.bak.reverted 2>/dev/null \
+			| tail -n +11 | while read -r _f; do rm -f "$_f"; done
+
+		# Commit new value.
+		uci set "$UCI_KEY=$newopt" || { echo "uci set failed"; exit 1; }
+		uci commit zapret || { echo "uci commit failed"; exit 1; }
+
+		if reload_if_enabled; then
+			echo "applied; backup: $bak; zapret restarted"
+		else
+			echo "applied; backup: $bak; service not enabled (no restart)"
+		fi
+		;;
+
+	revert)
+		[ -L "$LATEST" ] || { echo "no backup to revert"; exit 1; }
+		bak=$(readlink "$LATEST")
+		# readlink may emit a relative path on some busybox builds.
+		case "$bak" in
+			/*) ;;
+			*)  bak="$BACKUP_DIR/$bak" ;;
+		esac
+		[ -f "$bak" ] || { echo "backup file missing: $bak"; exit 1; }
+		old=$(cat "$bak")
+		uci set "$UCI_KEY=$old" || { echo "uci set failed"; exit 1; }
+		uci commit zapret || { echo "uci commit failed"; exit 1; }
+		# After a successful revert, the backup no longer represents "previous";
+		# rename it so a second click of Revert is a no-op rather than a loop.
+		mv "$bak" "$bak.reverted" 2>/dev/null || true
+		rm -f "$LATEST"
+		if reload_if_enabled; then
+			echo "reverted from $bak; zapret restarted"
+		else
+			echo "reverted from $bak; service not enabled (no restart)"
+		fi
+		;;
+
+	state)
+		has_backup=false
+		backup_ts=""
+		if [ -L "$LATEST" ]; then
+			target=$(readlink "$LATEST")
+			base=$(basename "$target")
+			# Filename pattern: NFQWS_OPT.<ts>.bak
+			ts_str=${base#NFQWS_OPT.}
+			ts_str=${ts_str%.bak}
+			has_backup=true
+			backup_ts=$ts_str
+		fi
+		# Count nfqws-only strategies to match what the UI shows as applicable.
+		candidates=$( [ -f "$LOGFILE" ] && sed -nE '/^!!!!! nfqws: working strategy found for /p' "$LOGFILE" | sort -u | wc -l || echo 0 )
+		candidates=$(printf '%s' "$candidates" | tr -d ' ')
+		current=$(uci -q get "$UCI_KEY" 2>/dev/null || echo "")
+		current=$(flatten_opt "$current")
+		if [ ${#current} -gt 400 ]; then
+			current=$(printf '%s' "$current" | cut -c1-397)...
+		fi
+		cat <<JSON
+{
+	"has_backup": $has_backup,
+	"backup_ts": "$(json_escape "$backup_ts")",
+	"candidates": $candidates,
+	"current": "$(json_escape "$current")"
+}
+JSON
+		;;
+
+	*)
+		echo "usage: zapret-apply {parse|apply <strategy>|revert|state}"
+		exit 2
+		;;
+esac
