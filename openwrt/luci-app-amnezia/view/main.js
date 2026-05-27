@@ -299,41 +299,81 @@ function paintBlockcheck(s) {
 	if (input) input.disabled = running;
 }
 
+// Build a single NFQWS_OPT string from N selected candidates. Each block gets a
+// protocol filter inferred from scope so that nfqws applies the right block to
+// each connection type (TLS via TCP 443, QUIC via UDP 443, plain HTTP via TCP 80).
+// Blocks are joined with --new; nfqws picks the first matching block per flow.
+function composeNfqwsOpt(selected) {
+	var blocks = [];
+	for (var i = 0; i < selected.length; i++) {
+		var c = selected[i];
+		var prefix;
+		var s = (c.scope || '').toLowerCase();
+		if (s.indexOf('http3') !== -1 || s.indexOf('quic') !== -1)        prefix = '--filter-udp=443 ';
+		else if (s.indexOf('tls') !== -1 || s.indexOf('https') !== -1)    prefix = '--filter-tcp=443 ';
+		else if (s.indexOf('http') !== -1)                                 prefix = '--filter-tcp=80 ';
+		else                                                                prefix = '--filter-tcp=443 '; // safe default: an unfiltered block under --new would match all flows and silently shadow later blocks.
+		blocks.push((prefix + c.strategy).replace(/\s+/g, ' ').trim());
+	}
+	return blocks.join(' --new ');
+}
+
+// Stable identity for a candidate row: same strategy can come from multiple
+// scopes (e.g. one recipe beating both https and http3), and each row owns
+// its own checked state. Key on the tuple instead of just .strategy.
+function candidateKey(c) {
+	return (c.strategy || '') + '|' + (c.scope || '') + '|' + (c.domain || '');
+}
+
 function paintApply(state, candidates) {
-	var sel = document.getElementById('apply-select');
+	var list = document.getElementById('apply-list');
 	var currentEl = document.getElementById('apply-current');
 	var applyBtn = document.getElementById('apply-btn');
 	var revertBtn = document.getElementById('apply-revert-btn');
 	var summary = document.getElementById('apply-summary');
 
-	// Rebuild the <select> only when the candidate set actually changed --
-	// otherwise an open dropdown is collapsed by the browser on every poll.
-	if (sel) {
+	// Rebuild the checkbox list only when the candidate set actually changed,
+	// preserving any boxes the user already ticked.
+	if (list) {
 		var newSig = candidatesSignature(candidates);
 		if (newSig !== candidatesSig) {
 			candidatesSig = newSig;
-			var prevValue = sel.value;
-			sel.innerHTML = '';
+			var prevChecked = {};
+			var existing = list.querySelectorAll('input[type=checkbox]');
+			for (var k = 0; k < existing.length; k++) {
+				if (existing[k].checked) {
+					var row = existing[k].parentNode;
+					var key = (existing[k].value || '') + '|' +
+						(row.getAttribute('data-scope') || '') + '|' +
+						(row.getAttribute('data-domain') || '');
+					prevChecked[key] = true;
+				}
+			}
+			list.innerHTML = '';
 			if (!candidates || candidates.length === 0) {
-				var opt = document.createElement('option');
-				opt.textContent = _('(no working strategies in log yet)');
-				opt.value = '';
-				opt.disabled = true;
-				sel.appendChild(opt);
+				list.appendChild(E('div', { 'style': 'color:#888;font-style:italic;' },
+					_('(no working strategies in log yet)')));
 			} else {
 				for (var i = 0; i < candidates.length; i++) {
 					var c = candidates[i];
-					var label = '[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] ' + c.strategy;
-					if (label.length > 140) label = label.substring(0, 137) + '...';
-					var o = document.createElement('option');
-					o.textContent = label;
-					o.value = c.strategy;
-					sel.appendChild(o);
-				}
-				if (prevValue) {
-					for (var j = 0; j < sel.options.length; j++) {
-						if (sel.options[j].value === prevValue) { sel.selectedIndex = j; break; }
-					}
+					var row = E('label', {
+						'class': 'apply-row',
+						'data-scope': c.scope || '',
+						'data-domain': c.domain || '',
+						'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;'
+					}, [
+						(function(c, was) {
+							var attrs = { 'type': 'checkbox', 'value': c.strategy, 'style': 'margin-top:3px;flex-shrink:0;' };
+							if (was) attrs.checked = 'checked';
+							return E('input', attrs);
+						})(c, prevChecked[candidateKey(c)]),
+						E('span', {}, [
+							E('span', { 'style': 'color:#666;' },
+								'[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] '),
+							E('span', {}, c.strategy)
+						])
+					]);
+					list.appendChild(row);
 				}
 			}
 		}
@@ -342,7 +382,7 @@ function paintApply(state, candidates) {
 	if (summary) {
 		var count = (candidates && candidates.length) || 0;
 		summary.textContent = count
-			? (count + ' ' + _('working strategy(ies) found in current log'))
+			? (count + ' ' + _('working strategy(ies) found in current log -- check the ones to combine'))
 			: _('Run blockcheck on a blocked domain to populate this list');
 	}
 
@@ -464,20 +504,36 @@ return view.extend({
 	},
 
 	handleApply: function(ev) {
-		var sel = document.getElementById('apply-select');
-		if (!sel || !sel.value) {
-			ui.addNotification(null, E('p', {}, _('Select a strategy first')), 'warning');
+		var list = document.getElementById('apply-list');
+		var selected = [];
+		if (list) {
+			var inputs = list.querySelectorAll('input[type=checkbox]:checked');
+			for (var i = 0; i < inputs.length; i++) {
+				var row = inputs[i].parentNode;
+				selected.push({
+					strategy: inputs[i].value,
+					scope: row.getAttribute('data-scope') || '',
+					domain: row.getAttribute('data-domain') || ''
+				});
+			}
+		}
+		if (selected.length === 0) {
+			ui.addNotification(null, E('p', {}, _('Check at least one strategy first')), 'warning');
 			return Promise.resolve();
 		}
-		var strategy = sel.value;
+		var composed = composeNfqwsOpt(selected);
+		var msg = (selected.length === 1)
+			? _('Apply this nfqws strategy and restart zapret?')
+			: _('Combine ') + selected.length + _(' strategies (joined with --new) and restart zapret?\nnfqws picks the first matching block per connection.');
+
 		// Lock the buttons BEFORE the confirm modal: a 5s poll firing while the
 		// user reads the dialog must not re-enable Apply for a second click.
 		applyInFlight = true;
-		return uiConfirm(_('Apply this nfqws strategy and restart zapret?\n\n') + strategy).then(L.bind(function(ok) {
+		return uiConfirm(msg + '\n\n' + composed).then(L.bind(function(ok) {
 			if (!ok) { applyInFlight = false; return null; }
 			var btn = document.getElementById('apply-btn');
 			if (btn) { btn.disabled = true; btn.textContent = _('Applying...'); }
-			return fs.exec('/usr/bin/zapret-apply', ['apply', strategy]).then(L.bind(function(res) {
+			return fs.exec('/usr/bin/zapret-apply', ['apply', composed]).then(L.bind(function(res) {
 				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
 					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
 					(res.code === 0) ? 'info' : 'danger');
@@ -830,32 +886,39 @@ return view.extend({
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('div', { 'id': 'apply-summary', 'style': 'margin-bottom:6px;color:#666;font-size:12px;' },
 								(applyCands.length
-									? (applyCands.length + ' ' + _('working strategy(ies) found in current log'))
+									? (applyCands.length + ' ' + _('working strategy(ies) found in current log -- check the ones to combine'))
 									: _('Run blockcheck on a blocked domain to populate this list'))),
-							(function() {
-								var sel = E('select', {
-									'id': 'apply-select',
-									'class': 'cbi-input-select',
-									'style': 'width:100%;max-width:720px;display:block;margin-bottom:6px;font-family:monospace;font-size:11px;'
+							(function(self) {
+								var listEl = E('div', {
+									'id': 'apply-list',
+									'style': 'max-height:280px;overflow-y:auto;border:1px solid #ddd;padding:6px;margin-bottom:8px;background:#fafafa;'
 								});
 								if (!applyCands.length) {
-									var o = document.createElement('option');
-									o.textContent = _('(no working strategies in log yet)');
-									o.disabled = true; o.value = '';
-									sel.appendChild(o);
+									listEl.appendChild(E('div', { 'style': 'color:#888;font-style:italic;' },
+										_('(no working strategies in log yet)')));
 								} else {
 									for (var i = 0; i < applyCands.length; i++) {
 										var c = applyCands[i];
-										var label = '[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] ' + c.strategy;
-										if (label.length > 140) label = label.substring(0, 137) + '...';
-										var op = document.createElement('option');
-										op.textContent = label;
-										op.value = c.strategy;
-										sel.appendChild(op);
+										var row = E('label', {
+											'class': 'apply-row',
+											'data-scope': c.scope || '',
+											'data-domain': c.domain || '',
+											'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;'
+										}, [
+											E('input', { 'type': 'checkbox', 'value': c.strategy, 'style': 'margin-top:3px;flex-shrink:0;' }),
+											E('span', {}, [
+												E('span', { 'style': 'color:#666;' },
+													'[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] '),
+												E('span', {}, c.strategy)
+											])
+										]);
+										listEl.appendChild(row);
 									}
 								}
-								return sel;
-							})(),
+								return listEl;
+							})(this),
+							E('div', { 'style': 'font-size:11px;color:#666;margin-bottom:8px;' },
+								_('Blocks are joined with --new and filtered by protocol (tcp 443 for TLS, udp 443 for QUIC). nfqws picks the first matching block per connection.')),
 							E('button', {
 								'id': 'apply-btn',
 								'class': 'btn cbi-button-positive',
