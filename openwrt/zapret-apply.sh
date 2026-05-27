@@ -48,22 +48,53 @@ case "$cmd" in
 		# Example:
 		#   !!!!! curl_test_https_tls13: working strategy found for ipv4 youtube.com : nfqws --dpi-desync=multidisorder --dpi-desync-split-pos=2 !!!!!
 		#
-		# After the run completes, blockcheck also emits a clean SUMMARY block
-		# with the deduplicated set, one entry per line:
+		# After the run completes, blockcheck also emits a clean SUMMARY block:
 		#   <TEST> ipv<N> <DOMAIN> : <TOOL> <STRATEGY>
-		# We harvest both -- the live !!!!! markers give early visibility during
-		# a long run, the SUMMARY gives the final authoritative set; sort -u
-		# dedups across them.
+		# We harvest both -- the live !!!!! markers give early visibility AND
+		# log-emit order, the SUMMARY catches anything that didn't make it to
+		# a marker. The merge is dedup'd by content.
 		#
-		# We filter on tool=nfqws: NFQWS_OPT is the only key this script
-		# writes, and tpws strategies (different flag set) would corrupt it.
-		# Strategy text in practice contains no " or \ -- the upstream composes
-		# from a finite set of --dpi-desync-* flags.
+		# Recommended-flag heuristic: blockcheck tests strategies in a built-in
+		# priority order (simpler/more reliable first) and emits a !!!!! marker
+		# the first time something in a given (scope, ipv, domain) class works.
+		# So the FIRST !!!!! marker for each class is the candidate blockcheck
+		# itself considered best; we mark it recommended=true. Later working
+		# strategies for the same class get recommended=false. SUMMARY-only
+		# entries (no !!!!! marker, shouldn't happen but defend) get false.
+		#
+		# Filter to tool=nfqws -- tpws strategies use a different flag set and
+		# would corrupt NFQWS_OPT. Strategy text in practice is ASCII without
+		# quotes or backslashes, but we json-escape defensively.
 		{
-			sed -nE 's/^!!!!! ([^:]+): working strategy found for ipv([0-9]+) ([^ ]+) : nfqws (.*) !!!!!$/{"tool":"nfqws","ipv":\2,"scope":"\1","domain":"\3","strategy":"\4"}/p' "$LOGFILE"
+			sed -nE 's/^!!!!! ([^:]+): working strategy found for ipv([0-9]+) ([^ ]+) : nfqws (.*) !!!!!$/M\t\1\t\2\t\3\t\4/p' "$LOGFILE"
 			awk '/^\* SUMMARY/,/^Please note this SUMMARY/' "$LOGFILE" 2>/dev/null \
-				| sed -nE 's/^([^ ]+) ipv([0-9]+) ([^ ]+) : nfqws (.*)$/{"tool":"nfqws","ipv":\2,"scope":"\1","domain":"\3","strategy":"\4"}/p'
-		} | sort -u
+				| sed -nE 's/^([^ ]+) ipv([0-9]+) ([^ ]+) : nfqws (.*)$/S\t\1\t\2\t\3\t\4/p'
+		} | awk -F'\t' '
+			{
+				# $1=M|S (marker or summary), $2=scope, $3=ipv, $4=domain, $5=strategy
+				key = $2 "|" $3 "|" $4 "|" $5
+				if (seen[key]) next
+				seen[key] = 1
+				class_key = $2 "|" $3 "|" $4
+				if ($1 == "M" && !seen_class[class_key]) {
+					rec = "true"; seen_class[class_key] = 1
+				} else {
+					rec = "false"
+				}
+				# JSON-escape every string field defensively (backslash + ").
+				# In practice blockcheck emits ASCII test names and DNS names,
+				# but a future log format change could leak a quote and quietly
+				# drop the line on the front-end (parseCandidates skips bad JSON).
+				strat = $5
+				scope = $2
+				domain = $4
+				gsub(/\\/, "\\\\", strat); gsub(/"/, "\\\"", strat)
+				gsub(/\\/, "\\\\", scope); gsub(/"/, "\\\"", scope)
+				gsub(/\\/, "\\\\", domain); gsub(/"/, "\\\"", domain)
+				printf "{\"tool\":\"nfqws\",\"ipv\":%s,\"scope\":\"%s\",\"domain\":\"%s\",\"strategy\":\"%s\",\"recommended\":%s}\n", \
+					$3, scope, domain, strat, rec
+			}
+		'
 		;;
 
 	apply)

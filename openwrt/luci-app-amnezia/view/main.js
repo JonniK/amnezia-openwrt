@@ -356,11 +356,15 @@ function paintApply(state, candidates) {
 			} else {
 				for (var i = 0; i < candidates.length; i++) {
 					var c = candidates[i];
+					var isRec = (c.recommended === true);
 					var row = E('label', {
-						'class': 'apply-row',
+						'class': 'apply-row' + (isRec ? ' apply-row-recommended' : ''),
 						'data-scope': c.scope || '',
 						'data-domain': c.domain || '',
-						'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;'
+						'data-recommended': isRec ? 'true' : 'false',
+						'title': isRec ? _('blockcheck\'s first working strategy in this class') : '',
+						'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;' +
+							(isRec ? 'background:#fffbe6;border-left:3px solid #f0ad4e;' : '')
 					}, [
 						(function(c, was) {
 							var attrs = { 'type': 'checkbox', 'value': c.strategy, 'style': 'margin-top:3px;flex-shrink:0;' };
@@ -368,6 +372,7 @@ function paintApply(state, candidates) {
 							return E('input', attrs);
 						})(c, prevChecked[candidateKey(c)]),
 						E('span', {}, [
+							isRec ? E('span', { 'style': 'color:#f0ad4e;font-weight:bold;margin-right:4px;' }, '★') : '',
 							E('span', { 'style': 'color:#666;' },
 								'[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] '),
 							E('span', {}, c.strategy)
@@ -397,6 +402,11 @@ function paintApply(state, candidates) {
 	if (!applyInFlight) {
 		if (applyBtn) {
 			applyBtn.disabled = !(candidates && candidates.length);
+		}
+		var recBtn = document.getElementById('apply-select-recommended-btn');
+		if (recBtn) {
+			var hasRec = !!(candidates && candidates.some(function(c){ return c.recommended === true; }));
+			recBtn.disabled = !hasRec;
 		}
 		if (revertBtn) {
 			revertBtn.style.display = (state && state.has_backup) ? '' : 'none';
@@ -501,6 +511,26 @@ return view.extend({
 			var b = document.getElementById('bc-run-btn');
 			if (b) { b.disabled = false; b.textContent = _('Run'); }
 		});
+	},
+
+	handleSelectRecommended: function(ev) {
+		var list = document.getElementById('apply-list');
+		if (!list) return Promise.resolve();
+		var rows = list.querySelectorAll('label.apply-row');
+		var toggled = 0;
+		for (var i = 0; i < rows.length; i++) {
+			if (rows[i].getAttribute('data-recommended') === 'true') {
+				var cb = rows[i].querySelector('input[type=checkbox]');
+				if (cb && !cb.checked) { cb.checked = true; toggled++; }
+			}
+		}
+		if (toggled === 0) {
+			// Button is disabled by paintApply when no row is recommended, so
+			// reaching here means everything recommended was already checked.
+			ui.addNotification(null, E('p', {},
+				_('All recommended strategies are already checked')), 'info');
+		}
+		return Promise.resolve();
 	},
 
 	handleApply: function(ev) {
@@ -899,14 +929,19 @@ return view.extend({
 								} else {
 									for (var i = 0; i < applyCands.length; i++) {
 										var c = applyCands[i];
+										var isRec = (c.recommended === true);
 										var row = E('label', {
-											'class': 'apply-row',
+											'class': 'apply-row' + (isRec ? ' apply-row-recommended' : ''),
 											'data-scope': c.scope || '',
 											'data-domain': c.domain || '',
-											'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 0;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;'
+											'data-recommended': isRec ? 'true' : 'false',
+											'title': isRec ? _('blockcheck\'s first working strategy in this class') : '',
+											'style': 'display:flex;align-items:flex-start;gap:8px;padding:3px 4px;font-family:monospace;font-size:11px;border-bottom:1px solid #eee;cursor:pointer;' +
+												(isRec ? 'background:#fffbe6;border-left:3px solid #f0ad4e;' : '')
 										}, [
 											E('input', { 'type': 'checkbox', 'value': c.strategy, 'style': 'margin-top:3px;flex-shrink:0;' }),
 											E('span', {}, [
+												isRec ? E('span', { 'style': 'color:#f0ad4e;font-weight:bold;margin-right:4px;' }, '★') : '',
 												E('span', { 'style': 'color:#666;' },
 													'[ipv' + c.ipv + ' ' + c.scope + (c.domain ? ' ' + c.domain : '') + '] '),
 												E('span', {}, c.strategy)
@@ -919,6 +954,14 @@ return view.extend({
 							})(this),
 							E('div', { 'style': 'font-size:11px;color:#666;margin-bottom:8px;' },
 								_('Blocks are joined with --new and filtered by protocol (tcp 443 for TLS, udp 443 for QUIC). nfqws picks the first matching block per connection.')),
+							E('button', {
+								'id': 'apply-select-recommended-btn',
+								'class': 'btn cbi-button-action',
+								'style': 'margin-right:8px;',
+								'disabled': (applyCands.length && applyCands.some(function(c){return c.recommended === true;})) ? null : '',
+								'title': _('Tick all rows marked ★ (one per protocol class, picked by blockcheck as first-working)'),
+								'click': ui.createHandlerFn(this, 'handleSelectRecommended')
+							}, _('Select ★ recommended')),
 							E('button', {
 								'id': 'apply-btn',
 								'class': 'btn cbi-button-positive',
