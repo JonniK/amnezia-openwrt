@@ -51,7 +51,7 @@ These shipped during the diagnostic build-out and don't need to be rebuilt:
   `example.com → direct_ok`, `chatgpt.com → direct_geoblocked (HTTP 403)`,
   `rutracker.org → direct_dpi_blocked (0.8s RST)`,
   `instagram.com → direct_unreachable (5s SYN timeout)`.
-- `/etc/awg/seed-must-tunnel.list` — short reference of well-known
+- `/etc/amnezia/seed-must-tunnel.list` — short reference of well-known
   RU-blocking sites (chatgpt, claude, gemini, netflix, nytimes, etc.).
   Read-only data; does **not** route anything by itself.
 - LuCI "Domain probe" section — input + Probe button + seed-list rows
@@ -154,13 +154,13 @@ step 1 goes through the tunnel and is independent of zapret.
 
 ### Phase B1 — must-tunnel list as a real PBR set (pending)
 
-1. New persistent file `/etc/awg/must-tunnel.list` (one domain per line).
+1. New persistent file `/etc/amnezia/must-tunnel.list` (one domain per line).
 2. `awg-must-tunnel-update.sh`:
    - Reads the list.
    - Writes a dnsmasq config snippet that nftset-tags each domain
      into `pbr_unblock4` on lookup.
    - Cron weekly: re-probes each entry; alerts the UI (via a stamp
-     file like `/etc/awg/must-tunnel-probe.json`) if any entry's
+     file like `/etc/amnezia/must-tunnel-probe.json`) if any entry's
      direct verdict flipped to `direct_ok` (candidate for removal).
 3. Persistent nftables set `pbr_unblock4` (mirror of `pbr_ru_tld4`).
 4. New PBR include `/etc/pbr.d/unblock-via-vpn.sh` emitting the
@@ -175,7 +175,7 @@ step 1 goes through the tunnel and is independent of zapret.
 6. New `/usr/bin/awg-routing-mode <tunnel|direct>`:
    - Atomically swaps which include is active.
    - Calls `pbr-reload`.
-   - Writes `/etc/awg/routing-mode` so status is observable.
+   - Writes `/etc/amnezia/routing-mode` so status is observable.
 7. LuCI Tunnel section gets a "Routing mode" dropdown surfacing the
    switch. Choosing it shows a preview ("traffic to N must-tunnel
    domains goes via AWG; everything else direct via WAN+zapret") and
