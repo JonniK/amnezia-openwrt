@@ -908,7 +908,7 @@ return view.extend({
 			var raw = document.getElementById('awg-status-raw');
 			if (raw) raw.textContent = 'status read failed: ' + err;
 		});
-		var p2 = L.resolveDefault(fs.read('/etc/awg/ru-update.json'), '').then(function(text) {
+		var p2 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
 			paintRuStamp(parseRuStamp(text));
 		});
 		var p3 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
@@ -924,7 +924,7 @@ return view.extend({
 				paintZapret(null, _('unparseable status output'));
 			}
 		});
-		var p4 = L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), '').then(L.bind(function(text) {
+		var p4 = L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), '').then(L.bind(function(text) {
 			var bc = parseBlockcheck(text);
 			paintBlockcheck(bc);
 			// Fetch log when there's anything to show. Skipped on never_run to
@@ -952,14 +952,14 @@ return view.extend({
 	load: function() {
 		return Promise.all([
 			L.resolveDefault(fs.exec('/usr/bin/awg-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/awg/ru-update.json'), ''),
+			L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/awg/blockcheck.json'), ''),
+			L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/awg/seed-must-tunnel.list'), '')
+			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), '')
 		]);
 	},
 

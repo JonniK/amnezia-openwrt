@@ -5,7 +5,7 @@
 # Subcommands:
 #   start [domain]   begin a run (default domain: youtube.com); refuses if
 #                    one is already running.
-#   status           print JSON state (file path: /etc/awg/blockcheck.json).
+#   status           print JSON state (file path: /etc/amnezia/blockcheck.json).
 #   log              tail the run log on stdout (last 200 lines).
 #   cancel           SIGTERM the running blockcheck (grace 5s, then SIGKILL).
 #
@@ -18,7 +18,7 @@ set -u
 PIDFILE=/var/run/zapret-blockcheck.pid
 CANCELMARK=/var/run/zapret-blockcheck.cancel
 LOGFILE=/tmp/zapret-blockcheck.log
-STAMP=/etc/awg/blockcheck.json
+STAMP=/etc/amnezia/blockcheck.json
 LOCK=/var/lock/zapret-blockcheck.lock
 SCRIPT=/opt/zapret/blockcheck.sh
 
@@ -52,7 +52,7 @@ kill_children_of() {
 	done
 }
 
-mkdir -p /etc/awg /var/run /var/lock
+mkdir -p /etc/amnezia /var/run /var/lock
 
 is_running() {
 	[ -f "$PIDFILE" ] || return 1

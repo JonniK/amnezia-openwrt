@@ -32,7 +32,21 @@ BLOCKCHECK_DST=/usr/bin/zapret-blockcheck
 APPLY_DST=/usr/bin/zapret-apply
 PROBE_DST=/usr/bin/zapret-probe
 VERIFY_DST=/usr/bin/zapret-verify
-SEED_DST=/etc/awg/seed-must-tunnel.list
+SEED_DST=/etc/amnezia/seed-must-tunnel.list
+
+# One-shot migration: pre-rename installs kept state under /etc/awg/ (private
+# repo era). The package now namespaces everything under /etc/amnezia/ so it
+# doesn't collide with vanilla awg-tools on a shared system. Move stamps and
+# backups across once; subsequent runs find /etc/amnezia/ already populated
+# and the conditional is a no-op. Old dir is removed only if empty so any
+# hand-placed file the user kept there survives.
+if [ -d /etc/awg ] && [ ! -d /etc/amnezia ]; then
+	echo "install-zapret: migrating /etc/awg -> /etc/amnezia"
+	mkdir -p /etc/amnezia
+	# `cp -a + rm` is safer than `mv` across overlay fs boundaries on OpenWrt.
+	cp -a /etc/awg/. /etc/amnezia/ 2>/dev/null || true
+	rm -rf /etc/awg 2>/dev/null || rmdir /etc/awg 2>/dev/null || true
+fi
 
 [ -f "$TOGGLE_SRC" ]     || { echo "missing $TOGGLE_SRC"; exit 1; }
 [ -f "$STATUS_SRC" ]     || { echo "missing $STATUS_SRC"; exit 1; }
@@ -110,7 +124,8 @@ cp "$APPLY_SRC"      "$APPLY_DST"
 cp "$PROBE_SRC"      "$PROBE_DST"
 cp "$VERIFY_SRC"     "$VERIFY_DST"
 chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST" "$APPLY_DST" "$PROBE_DST" "$VERIFY_DST"
-# Reference seed list -- read-only data, lives under /etc/awg next to ru.cidr.
+# Reference seed list -- read-only data, lives under /etc/amnezia next to ru.cidr.
+mkdir -p "$(dirname "$SEED_DST")"
 cp "$SEED_SRC"       "$SEED_DST"
 chmod 0644 "$SEED_DST"
 

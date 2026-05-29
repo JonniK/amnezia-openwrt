@@ -3,9 +3,9 @@
 		"description": "AmneziaWG tunnel toggle, RU IP list refresh, and live status",
 		"read": {
 			"file": {
-				"/etc/awg/ru-update.json":      [ "read" ],
-				"/etc/awg/blockcheck.json":     [ "read" ],
-				"/etc/awg/seed-must-tunnel.list":[ "read" ]
+				"/etc/amnezia/ru-update.json":      [ "read" ],
+				"/etc/amnezia/blockcheck.json":     [ "read" ],
+				"/etc/amnezia/seed-must-tunnel.list":[ "read" ]
 			}
 		},
 		"write": {

@@ -16,7 +16,7 @@
 set -u
 
 LOGFILE=/tmp/zapret-blockcheck.log
-BACKUP_DIR=/etc/awg/zapret-backups
+BACKUP_DIR=/etc/amnezia/zapret-backups
 LATEST="$BACKUP_DIR/NFQWS_OPT.latest"
 # Canonical source for NFQWS_OPT. The remittor zapret-openwrt init.d
 # `source`s this file at start; the UCI `option NFQWS_OPT` in

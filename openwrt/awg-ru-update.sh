@@ -7,16 +7,16 @@
 #   3. http://www.ipdeny.com/ipblocks/data/countries/ru.zone   (fallback)
 #
 # Writes:
-#   /etc/awg/ru.cidr           - persistent canonical copy (survives reboot)
+#   /etc/amnezia/ru.cidr           - persistent canonical copy (survives reboot)
 #   /var/pbr_ru.zone           - working copy read by /etc/pbr.d/ru-direct.sh
-#   /etc/awg/ru-update.json    - stamp: {ts, count, source, status, message}
+#   /etc/amnezia/ru-update.json    - stamp: {ts, count, source, status, message}
 #
 # If the new list differs from the previous, triggers `pbr reload` so the
 # nft set is repopulated from the fresh file. Otherwise leaves PBR alone.
 set -u
 
-STAMP=/etc/awg/ru-update.json
-PERSIST=/etc/awg/ru.cidr
+STAMP=/etc/amnezia/ru-update.json
+PERSIST=/etc/amnezia/ru.cidr
 WORK=/var/pbr_ru.zone
 TMP=/tmp/awg-ru.new.$$
 MIN_LINES=1000   # sanity: RU has ~6500 CIDRs; anything under 1000 is suspicious

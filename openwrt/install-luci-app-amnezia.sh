@@ -28,7 +28,7 @@ CRON_MARK='# amnezia-ru-update'
 # Place RU update script.
 cp "$RU_UPDATE_SRC" "$RU_UPDATE_DST"
 chmod 0755 "$RU_UPDATE_DST"
-mkdir -p /etc/awg
+mkdir -p /etc/amnezia
 
 # Place LuCI artifacts.
 mkdir -p "$VIEW_DIR"
@@ -58,7 +58,7 @@ luci-app-amnezia: installed.
   Toggle:   /usr/bin/awg-toggle
   Status:   /usr/bin/awg-status
   RU sync:  /usr/bin/awg-ru-update  (cron: Sundays 04:30)
-  Stamp:    /etc/awg/ru-update.json
+  Stamp:    /etc/amnezia/ru-update.json
 
 NOTE: if the new menu entry does not appear in LuCI right away, log out and
 back in (or hard-refresh with Ctrl-Shift-R) to clear the browser's menu cache.

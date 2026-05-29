@@ -2,7 +2,7 @@
 # ipdeny ru.zone -> pbr_wan_4_dst_ip_user (appended to pbr.nft; no flush/list)
 TARGET_URL='https://www.ipdeny.com/ipblocks/data/countries/ru.zone'
 TARGET_FILE='/var/pbr_ru.zone'
-PERSIST_FILE='/etc/awg/ru.cidr'
+PERSIST_FILE='/etc/amnezia/ru.cidr'
 TARGET_TABLE='inet fw4'
 TARGET_INTERFACE='wan'
 NFTSET="pbr_${TARGET_INTERFACE}_4_dst_ip_user"
