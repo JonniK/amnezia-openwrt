@@ -29,33 +29,55 @@ What you get on the router:
 
 ## Install
 
-On the router, as root:
+Two paths -- pick one. Both end at the same configured router; the
+difference is how updates work afterwards.
+
+**Before either path, place your Amnezia-exported .conf** at
+`/etc/amnezia/awg.conf` (the file with `Jc / Jmin / S* / H* / I*` lines
+under `[Interface]` -- export it from the Amnezia desktop client:
+*Settings → Connection → Export config*).
 
 ```sh
-# 1. Place your Amnezia-exported .conf
-#    (the one with Jc / Jmin / S* / H* / I* lines under [Interface])
 mkdir -p /etc/amnezia
-cat > /etc/amnezia/awg.conf <<EOF
-[Interface]
-PrivateKey = ...
-Address = ...
-Jc = ...
-Jmin = ...
-# ... rest of your Amnezia client export ...
-[Peer]
-PublicKey = ...
-PresharedKey = ...
-Endpoint = host:port
-PersistentKeepalive = 25
-EOF
+vi /etc/amnezia/awg.conf
+# paste the exported config, save, quit
+```
 
-# 2. Run the installer
+### Path A: one-line installer (simplest)
+
+```sh
 wget -O - https://raw.githubusercontent.com/JonniK/amnezia-openwrt/main/install.sh | sh
 ```
 
-It pings WAN before and after every step, never restarts the network
-as a whole, and prints `DEPLOY_FAILED` to `/tmp/openwrt-deploy.log` if
-anything goes wrong. Re-run safely after fixing config — idempotent.
+Pulls a tarball of this repo, stages the wrappers to `/usr/bin/`, runs
+the install pipeline. Updates require re-running the same command.
+Good for first install or one-off setups.
+
+### Path B: opkg .ipk packages (native, updateable)
+
+```sh
+ARCH=$(. /etc/openwrt_release && echo "$DISTRIB_ARCH")
+REL=v0.2.0   # or whatever the latest release tag is
+
+cd /tmp
+for pkg in amnezia-pbr luci-app-amnezia; do
+  wget -O "${pkg}.ipk" \
+    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-1_all.ipk"
+done
+
+opkg install ./amnezia-pbr.ipk ./luci-app-amnezia.ipk
+amnezia-pbr-setup     # downloads AmneziaWG kmod + zapret, configures UCI
+```
+
+Native opkg integration -- `opkg upgrade amnezia-pbr` picks up wrapper
+updates without re-running the bootstrap. `opkg remove` cleanly
+uninstalls. UCI config (`/etc/config/amnezia`) and `/etc/amnezia/awg.conf`
+are package conffiles, so user edits survive upgrades.
+
+Either path: WAN is pinged before and after every destructive step, the
+network is never fully restarted, and `/tmp/openwrt-deploy.log` ends
+with `DEPLOY_DONE` or `DEPLOY_FAILED`. Re-run safely after fixing
+anything -- idempotent.
 
 ### Install options
 
