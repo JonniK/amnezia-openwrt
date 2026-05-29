@@ -59,8 +59,19 @@ CHK
 
 start_remote_deploy() {
   echo "=== Upload deploy script + AWG config + PBR helpers ==="
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh; do
+  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh; do
     cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
+  done
+  # LuCI app is a directory tree (menu/acl/view subdirs). Flat /tmp/ basename
+  # upload above won't preserve that, so push each file into the explicit
+  # nested path the installer reads from. Kept separate to keep the main
+  # loop terse.
+  ssh_run "mkdir -p /tmp/luci-app-amnezia/menu /tmp/luci-app-amnezia/acl /tmp/luci-app-amnezia/view"
+  for _f in openwrt/luci-app-amnezia/menu/luci-app-amnezia.json \
+            openwrt/luci-app-amnezia/acl/luci-app-amnezia.json \
+            openwrt/luci-app-amnezia/view/main.js; do
+    _rel=${_f#openwrt/luci-app-amnezia/}
+    cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
   done
   ssh_run "cat > /tmp/openwrt-deploy-body.sh && chmod +x /tmp/openwrt-deploy-body.sh" <<'REMOTE_BODY'
 #!/bin/sh
@@ -234,6 +245,16 @@ if sh /tmp/install-zapret.sh >>"$LOG" 2>&1; then
 	log "zapret installed (service left disabled)"
 else
 	log "WARN: zapret install failed (non-fatal)"
+fi
+
+# Refresh LuCI app: menu entry, ACL (rpcd permissions for our exec/read
+# endpoints), and the main.js view. Non-fatal -- a broken LuCI panel must
+# not block AWG/PBR; user can still drive everything from CLI. The
+# installer reloads rpcd + uhttpd so ACL changes take effect immediately.
+if SRC=/tmp/luci-app-amnezia sh /tmp/install-luci-app-amnezia.sh >>"$LOG" 2>&1; then
+	log "luci-app-amnezia refreshed (menu/acl/view)"
+else
+	log "WARN: luci-app-amnezia refresh failed (non-fatal)"
 fi
 
 ok "1 awg1"
