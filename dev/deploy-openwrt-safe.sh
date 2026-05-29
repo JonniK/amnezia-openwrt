@@ -11,8 +11,10 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Script lives under dev/; repo content (openwrt/, local/) is one level up.
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 SSH_HOST="${SSH_HOST:-router}"
-CONF_LOCAL="${CONF_LOCAL:-$SCRIPT_DIR/local/awg.conf}"
+CONF_LOCAL="${CONF_LOCAL:-$REPO_ROOT/local/awg.conf}"
 STEPS="${STEPS:-3}"
 LOG_REMOTE="/tmp/openwrt-deploy.log"
 PID_REMOTE="/tmp/openwrt-deploy.pid"
@@ -60,7 +62,7 @@ CHK
 start_remote_deploy() {
   echo "=== Upload deploy script + AWG config + PBR helpers ==="
   for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh; do
-    cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
+    cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   # LuCI app is a directory tree (menu/acl/view subdirs). Flat /tmp/ basename
   # upload above won't preserve that, so push each file into the explicit
@@ -71,7 +73,7 @@ start_remote_deploy() {
             openwrt/luci-app-amnezia/acl/luci-app-amnezia.json \
             openwrt/luci-app-amnezia/view/main.js; do
     _rel=${_f#openwrt/luci-app-amnezia/}
-    cat "$SCRIPT_DIR/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
+    cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
   done
   ssh_run "cat > /tmp/openwrt-deploy-body.sh && chmod +x /tmp/openwrt-deploy-body.sh" <<'REMOTE_BODY'
 #!/bin/sh

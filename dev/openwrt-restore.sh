@@ -4,8 +4,10 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Script lives under dev/; backups land at repo root in openwrt-backups/.
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 SSH_HOST="${SSH_HOST:-router}"
-BACKUP_ROOT="${BACKUP_ROOT:-$SCRIPT_DIR/openwrt-backups}"
+BACKUP_ROOT="${BACKUP_ROOT:-$REPO_ROOT/openwrt-backups}"
 LABEL="${1:?Usage: $0 <backup-label> [--uci-only]}"
 UCI_ONLY=0
 [ "${2:-}" = "--uci-only" ] && UCI_ONLY=1

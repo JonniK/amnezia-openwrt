@@ -5,9 +5,11 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Script lives under dev/; backups land at repo root in openwrt-backups/.
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 SSH_HOST="${SSH_HOST:-router}"
 LABEL="${1:-$(date +%Y%m%d-%H%M%S)}"
-BACKUP_ROOT="${BACKUP_ROOT:-$SCRIPT_DIR/openwrt-backups}"
+BACKUP_ROOT="${BACKUP_ROOT:-$REPO_ROOT/openwrt-backups}"
 DEST="$BACKUP_ROOT/$LABEL"
 
 mkdir -p "$DEST"
