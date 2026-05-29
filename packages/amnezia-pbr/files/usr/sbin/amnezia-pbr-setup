@@ -29,6 +29,42 @@
 # shellcheck disable=SC2039
 set -eu
 
+usage() {
+  cat <<USAGE
+amnezia-pbr-setup -- first-run setup for amnezia-pbr-openwrt.
+
+Usage:
+  amnezia-pbr-setup [STEPS]
+  STEPS=N amnezia-pbr-setup
+
+Where STEPS is 1, 2, or 3 (default 3):
+  1   AmneziaWG interface + firewall zone only
+  2   + Policy-based routing base (LAN forwarded via awg1)
+  3   + RU bypass (.ru direct via dnsmasq nftset + ipdeny RU CIDR)
+
+Reads AmneziaWG config from \$CONF (default /etc/amnezia/awg.conf,
+falling back to /tmp/awg-setup.conf for install.sh-staged runs).
+Writes step-by-step log to /tmp/openwrt-deploy.log; tail it to track
+progress on a long run.
+
+Other env overrides:
+  AWG_VER     Slava-Shchipunov ipk release (default 24.10.3)
+  AWG_ARCH    auto from /etc/openwrt_release
+  AWG_TS      auto from /etc/openwrt_release
+USAGE
+}
+
+# Argument parsing: support --help and reject unknown args. Without this,
+# `amnezia-pbr-setup --help` would set STEPS=--help and silently start
+# the install pipeline with junk as the steps value.
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  ""|1|2|3) ;;
+  *) echo "amnezia-pbr-setup: unknown argument '$1' (expected 1, 2, 3, or --help)" >&2
+     usage >&2
+     exit 2 ;;
+esac
+
 STEPS="${STEPS:-${1:-3}}"
 LOG="${LOG:-/tmp/openwrt-deploy.log}"
 # CONF default cascades: explicit env -> /tmp/ (install.sh staging) ->
