@@ -14,7 +14,6 @@ once published) which deploys everything to the router directly via opkg.
 | `openwrt-backup.sh` | Pull a snapshot of router UCI configs + opkg list + sysupgrade backup into `openwrt-backups/<label>/`. |
 | `openwrt-restore.sh` | Restore from a labelled backup with `--uci-only` mode for configs-only. |
 | `openwrt-emergency-internet.sh` | Strip VPN/PBR config on the router to recover internet if a deploy bricks routing. |
-| `legacy/` | Older one-shot setup scripts (`setup-amnezia-full.sh`, `setup-openwrt-awg-pbr.sh`, `setup-router-remote.sh`). Superseded by the `openwrt/` install pipeline; kept for reference. |
 
 ## Path convention
 
