@@ -193,6 +193,22 @@ ping -c 2 -W 5 -I "$IFACE" 1.1.1.1 >/dev/null || fail "awg1 ping fail"
 need_wan
 need_dns
 
+# Lay down /etc/config/amnezia if absent. Existing file is preserved (user
+# may have overridden routing_mode); only the version + timestamp stamps
+# get refreshed each run so `uci show amnezia` always reports the latest
+# install. Non-fatal: bad UCI here must not block AWG/PBR.
+if [ -f /tmp/amnezia.config ]; then
+  if [ ! -f /etc/config/amnezia ]; then
+    install -m 0644 /tmp/amnezia.config /etc/config/amnezia
+    log "UCI: /etc/config/amnezia created"
+  fi
+  uci -q set amnezia.config.installed_version="${INSTALLED_VERSION:-main}" 2>/dev/null || true
+  uci -q set amnezia.config.installed_ts="$(date +%s)" 2>/dev/null || true
+  uci -q commit amnezia 2>/dev/null || true
+else
+  log "WARN: /tmp/amnezia.config missing; UCI scaffold not installed"
+fi
+
 # LuCI toggle buttons (System -> Custom Commands). Non-fatal.
 if SRC=/tmp/awg-toggle.sh sh /tmp/install-luci-toggle.sh >>"$LOG" 2>&1; then
   log "luci toggle installed"

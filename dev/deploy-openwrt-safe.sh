@@ -66,6 +66,10 @@ start_remote_deploy() {
   for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh openwrt/install-amnezia-pbr.sh; do
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
+  # UCI scaffold has a slash-free filename (`amnezia`), so basename loop
+  # would clobber any unrelated /tmp/amnezia file the user might have.
+  # Upload as /tmp/amnezia.config to be explicit; installer copies from there.
+  cat "$REPO_ROOT/openwrt/config/amnezia" | ssh_run "cat > /tmp/amnezia.config"
   # LuCI app is a directory tree (menu/acl/view subdirs). Flat /tmp/ basename
   # upload above won't preserve that, so push each file into the explicit
   # nested path the installer reads from. Kept separate to keep the main

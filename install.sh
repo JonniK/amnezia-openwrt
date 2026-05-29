@@ -95,6 +95,8 @@ for _f in pbr.d/ru-direct.sh pbr.d/99-lan-vpn-full.sh pbr.d/99-lan-vpn-vpn-only.
 		err "WARN: $_f missing from payload; some functionality may degrade"
 done
 chmod +x /tmp/install-amnezia-pbr.sh
+# UCI scaffold (different naming because installer copies to /etc/config/amnezia)
+[ -f "$SRC/config/amnezia" ] && cp "$SRC/config/amnezia" /tmp/amnezia.config
 
 # LuCI app tree (nested subdirs).
 mkdir -p /tmp/luci-app-amnezia/menu /tmp/luci-app-amnezia/acl /tmp/luci-app-amnezia/view
@@ -108,7 +110,7 @@ cp "$AWG_CONF" /tmp/awg-setup.conf
 # --- Run installer ---
 echo "install: running install-amnezia-pbr.sh (STEPS=$STEPS, log: $LOG)"
 : > "$LOG"
-if STEPS="$STEPS" LOG="$LOG" sh /tmp/install-amnezia-pbr.sh; then
+if STEPS="$STEPS" LOG="$LOG" INSTALLED_VERSION="$REPO_REF" sh /tmp/install-amnezia-pbr.sh; then
 	echo ""
 	echo "install: DONE. Log: $LOG"
 	echo ""
