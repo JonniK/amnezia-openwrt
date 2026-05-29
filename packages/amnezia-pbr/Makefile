@@ -28,7 +28,7 @@ define Package/amnezia-pbr
     +ip-full \
     +curl \
     +wget \
-    +nmap-ncat
+    +ncat-full
 endef
 
 define Package/amnezia-pbr/description
