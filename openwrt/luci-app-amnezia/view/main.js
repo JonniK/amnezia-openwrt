@@ -338,7 +338,14 @@ function composeNfqwsOpt(selected) {
 	}
 	var perDomain = Object.keys(uniqDomains).length > 1;
 
+	// Dedup: blockcheck typically emits the same nfqws strategy for
+	// scope=tls12 AND scope=tls13 (and similar https variants), so for one
+	// domain the recommended set can contain two rows that compose to the
+	// IDENTICAL filter+hostlist+strategy block. Without dedup, nfqws gets a
+	// `--new`-joined chain with duplicates; the second one is dead code
+	// (first match wins) but it bloats NFQWS_OPT noticeably.
 	var blocks = [];
+	var seen = {};
 	for (var j = 0; j < selected.length; j++) {
 		var c = selected[j];
 		var prefix;
@@ -348,7 +355,10 @@ function composeNfqwsOpt(selected) {
 		else if (s.indexOf('http') !== -1)                                 prefix = '--filter-tcp=80 ';
 		else                                                                prefix = '--filter-tcp=443 '; // safe default: an unfiltered block under --new would match all flows and silently shadow later blocks.
 		var hostlist = (perDomain && c.domain) ? ('--hostlist-domains=' + c.domain + ' ') : '';
-		blocks.push((prefix + hostlist + c.strategy).replace(/\s+/g, ' ').trim());
+		var block = (prefix + hostlist + c.strategy).replace(/\s+/g, ' ').trim();
+		if (seen[block]) continue;
+		seen[block] = true;
+		blocks.push(block);
 	}
 	return blocks.join(' --new ');
 }
