@@ -70,7 +70,7 @@ REL=v0.2.0   # или актуальный release tag
 cd /tmp
 for pkg in amnezia-pbr luci-app-amnezia; do
   wget -O "${pkg}.ipk" \
-    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-1_all.ipk"
+    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-r1_all.ipk"
 done
 
 opkg install ./amnezia-pbr.ipk ./luci-app-amnezia.ipk
@@ -165,7 +165,7 @@ LuCI-панель различает это тремя инструментам�
 install.sh                  Публичный bootstrap (это запускают пользователи)
 openwrt/
   install-amnezia-pbr.sh    Основной installer pipeline (на роутере)
-  install-zapret.sh         zapret package + wrappers + nmap-ncat
+  install-zapret.sh         zapret package + wrappers + ncat-full
   install-luci-app-amnezia.sh   LuCI menu/acl/view + cron
   install-luci-toggle.sh    LuCI System->CustomCommands toggle
   install-dnsmasq-full.sh   Замена на dnsmasq-full (нужен для nftset)

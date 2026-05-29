@@ -71,7 +71,7 @@ REL=v0.2.0   # or whatever the latest release tag is
 cd /tmp
 for pkg in amnezia-pbr luci-app-amnezia; do
   wget -O "${pkg}.ipk" \
-    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-1_all.ipk"
+    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-r1_all.ipk"
 done
 
 opkg install ./amnezia-pbr.ipk ./luci-app-amnezia.ipk
@@ -165,7 +165,7 @@ on direct WAN to free the tunnel from carrying the load.
 install.sh                  Public bootstrap (this is what users run)
 openwrt/
   install-amnezia-pbr.sh    Main installer pipeline (runs on the router)
-  install-zapret.sh         zapret package + wrappers + nmap-ncat
+  install-zapret.sh         zapret package + wrappers + ncat-full
   install-luci-app-amnezia.sh   LuCI menu/acl/view + cron
   install-luci-toggle.sh    LuCI System->CustomCommands toggle entries
   install-dnsmasq-full.sh   Swap to dnsmasq-full (needs nftset support)
