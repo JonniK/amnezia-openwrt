@@ -73,6 +73,15 @@ else
 		opkg install coreutils-stdbuf >/dev/null 2>&1 || \
 			echo "install-zapret: coreutils-stdbuf install failed; blockcheck log will buffer"
 	fi
+	# blockcheck.sh needs a "real" nc (busybox nc doesn't support its flags) to
+	# run port-block tests (raw TCP SYN to :443 without HTTP). Without it the
+	# port-block phase prints "suitable netcat not found" and silently skips,
+	# so we lose the L4-vs-L7 distinction in the results. Best-effort.
+	if ! opkg list-installed 2>/dev/null | grep -qE '^(nmap-ncat|ncat-full|netcat-openbsd) '; then
+		echo "install-zapret: opkg install nmap-ncat (best-effort)"
+		opkg install nmap-ncat >/dev/null 2>&1 || \
+			echo "install-zapret: nmap-ncat install failed; blockcheck port-block tests will be skipped"
+	fi
 
 	# Extract only the cortex-a53 ipk we need; ignore the .apk and luci-app.
 	( cd "$WORK" && unzip -q -o zapret.zip "$ZAPRET_IPK_NAME" )
