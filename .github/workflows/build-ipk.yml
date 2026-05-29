@@ -97,7 +97,7 @@ jobs:
           cp -a packages/luci-app-amnezia ~/sdk/package/feeds/amnezia/
 
       - name: configure SDK
-        working-directory: ~/sdk
+        working-directory: /home/runner/sdk
         run: |
           # Pull the default feeds so DEPENDS (pbr, dnsmasq-full, luci-base,
           # rpcd, etc.) resolve against the released package set.
@@ -112,12 +112,12 @@ jobs:
           make defconfig
 
       - name: build amnezia-pbr.ipk
-        working-directory: ~/sdk
+        working-directory: /home/runner/sdk
         run: |
           make package/amnezia-pbr/compile V=s -j$(nproc) 2>&1 | tail -50
 
       - name: build luci-app-amnezia.ipk
-        working-directory: ~/sdk
+        working-directory: /home/runner/sdk
         run: |
           make package/luci-app-amnezia/compile V=s -j$(nproc) 2>&1 | tail -50
 
