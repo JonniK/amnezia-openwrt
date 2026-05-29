@@ -48,13 +48,26 @@ if [ -d /etc/awg ] && [ ! -d /etc/amnezia ]; then
 	rm -rf /etc/awg 2>/dev/null || rmdir /etc/awg 2>/dev/null || true
 fi
 
-[ -f "$TOGGLE_SRC" ]     || { echo "missing $TOGGLE_SRC"; exit 1; }
-[ -f "$STATUS_SRC" ]     || { echo "missing $STATUS_SRC"; exit 1; }
-[ -f "$BLOCKCHECK_SRC" ] || { echo "missing $BLOCKCHECK_SRC"; exit 1; }
-[ -f "$APPLY_SRC" ]      || { echo "missing $APPLY_SRC"; exit 1; }
-[ -f "$PROBE_SRC" ]      || { echo "missing $PROBE_SRC"; exit 1; }
-[ -f "$VERIFY_SRC" ]     || { echo "missing $VERIFY_SRC"; exit 1; }
-[ -f "$SEED_SRC" ]       || { echo "missing $SEED_SRC"; exit 1; }
+# When this script is invoked via the install.sh / dev/deploy path, the
+# wrapper sources are pre-staged at /tmp/. When invoked via the .ipk path
+# (find_helper -> /usr/sbin/install-zapret), the wrappers are already
+# placed in /usr/bin/ by the amnezia-pbr.ipk install. Detect which case
+# we're in by checking for any one staged source; if none are present we
+# skip the cp section entirely and only handle the upstream-zapret install
+# + best-effort dep installs.
+STAGED=0
+if [ -f "$TOGGLE_SRC" ] && [ -f "$STATUS_SRC" ] && [ -f "$BLOCKCHECK_SRC" ] && \
+   [ -f "$APPLY_SRC" ] && [ -f "$PROBE_SRC" ] && [ -f "$VERIFY_SRC" ] && \
+   [ -f "$SEED_SRC" ]; then
+	STAGED=1
+elif [ -f "$TOGGLE_SRC" ] || [ -f "$STATUS_SRC" ] || [ -f "$BLOCKCHECK_SRC" ] || \
+     [ -f "$APPLY_SRC" ] || [ -f "$PROBE_SRC" ] || [ -f "$VERIFY_SRC" ] || \
+     [ -f "$SEED_SRC" ]; then
+	# Partial staging is almost certainly a deploy bug, not the .ipk case.
+	# Fail loudly so we don't silently leave an inconsistent install.
+	echo "install-zapret: partial source staging at /tmp/ -- aborting"
+	exit 1
+fi
 
 if opkg list-installed 2>/dev/null | grep -q '^zapret '; then
 	echo "install-zapret: zapret already installed, skipping package install"
@@ -116,27 +129,34 @@ else
 	/etc/init.d/zapret disable >/dev/null 2>&1 || true
 fi
 
-# Always (re)place wrappers.
-cp "$TOGGLE_SRC"     "$TOGGLE_DST"
-cp "$STATUS_SRC"     "$STATUS_DST"
-cp "$BLOCKCHECK_SRC" "$BLOCKCHECK_DST"
-cp "$APPLY_SRC"      "$APPLY_DST"
-cp "$PROBE_SRC"      "$PROBE_DST"
-cp "$VERIFY_SRC"     "$VERIFY_DST"
-chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST" "$APPLY_DST" "$PROBE_DST" "$VERIFY_DST"
-# Reference seed list -- read-only data, lives under /etc/amnezia next to ru.cidr.
-mkdir -p "$(dirname "$SEED_DST")"
-cp "$SEED_SRC"       "$SEED_DST"
-chmod 0644 "$SEED_DST"
+# (Re)place wrappers only when we have staged sources -- the .ipk path
+# (STAGED=0) gets these files directly from the amnezia-pbr package, so
+# this loop would clobber freshly-installed binaries with files that don't
+# even exist.
+if [ "$STAGED" -eq 1 ]; then
+	cp "$TOGGLE_SRC"     "$TOGGLE_DST"
+	cp "$STATUS_SRC"     "$STATUS_DST"
+	cp "$BLOCKCHECK_SRC" "$BLOCKCHECK_DST"
+	cp "$APPLY_SRC"      "$APPLY_DST"
+	cp "$PROBE_SRC"      "$PROBE_DST"
+	cp "$VERIFY_SRC"     "$VERIFY_DST"
+	chmod 0755 "$TOGGLE_DST" "$STATUS_DST" "$BLOCKCHECK_DST" "$APPLY_DST" "$PROBE_DST" "$VERIFY_DST"
+	# Reference seed list -- read-only data, lives under /etc/amnezia next to ru.cidr.
+	mkdir -p "$(dirname "$SEED_DST")"
+	cp "$SEED_SRC"       "$SEED_DST"
+	chmod 0644 "$SEED_DST"
 
-echo "install-zapret: wrappers placed:"
-echo "  $TOGGLE_DST"
-echo "  $STATUS_DST"
-echo "  $BLOCKCHECK_DST"
-echo "  $APPLY_DST"
-echo "  $PROBE_DST"
-echo "  $VERIFY_DST"
-echo "  $SEED_DST"
+	echo "install-zapret: wrappers placed:"
+	echo "  $TOGGLE_DST"
+	echo "  $STATUS_DST"
+	echo "  $BLOCKCHECK_DST"
+	echo "  $APPLY_DST"
+	echo "  $PROBE_DST"
+	echo "  $VERIFY_DST"
+	echo "  $SEED_DST"
+else
+	echo "install-zapret: wrappers already in place (running under .ipk install)"
+fi
 
 if /etc/init.d/zapret enabled 2>/dev/null; then
 	echo "install-zapret: zapret service is ENABLED"

@@ -31,10 +31,52 @@ set -eu
 
 STEPS="${STEPS:-${1:-3}}"
 LOG="${LOG:-/tmp/openwrt-deploy.log}"
-CONF="${CONF:-/tmp/awg-setup.conf}"
+# CONF default cascades: explicit env -> /tmp/ (install.sh staging) ->
+# /etc/amnezia/ (.ipk installed). The .ipk path is what `opkg install`
+# users hit; the /tmp/ path is what install.sh + dev/deploy hit.
+if [ -z "${CONF:-}" ]; then
+  if [ -f /tmp/awg-setup.conf ]; then
+    CONF=/tmp/awg-setup.conf
+  else
+    CONF=/etc/amnezia/awg.conf
+  fi
+fi
 IFACE=awg1
 CFG=amneziawg_awg1
 ZONE=awg1
+
+# Locate helper scripts (install-zapret, install-dnsmasq-full, etc.) -- they
+# may live under /tmp/ (install.sh staging, with .sh extension) or in PATH
+# without extension (amnezia-pbr.ipk installs them to /usr/sbin/). Return
+# empty + nonzero if not found anywhere; caller decides whether to skip.
+find_helper() {
+  _name=$1
+  if [ -f "/tmp/${_name}.sh" ]; then
+    echo "sh /tmp/${_name}.sh"
+    return 0
+  fi
+  if command -v "$_name" >/dev/null 2>&1; then
+    command -v "$_name"
+    return 0
+  fi
+  return 1
+}
+
+# Locate PBR templates (99-lan-vpn-*.sh, ru-direct.sh). install.sh stages
+# them under /tmp/ unmodified; the .ipk ships them under /etc/pbr.d/ with
+# a .template suffix to distinguish from the LAN-substituted active rule.
+find_template() {
+  _name=$1
+  if [ -f "/tmp/${_name}" ]; then
+    echo "/tmp/${_name}"
+    return 0
+  fi
+  if [ -f "/etc/pbr.d/${_name}.template" ]; then
+    echo "/etc/pbr.d/${_name}.template"
+    return 0
+  fi
+  return 1
+}
 
 # AmneziaWG kmod + tools come from Slava-Shchipunov's release feed -- they
 # aren't in the official OpenWrt repos. Auto-detect arch and target from
@@ -197,41 +239,52 @@ need_dns
 # may have overridden routing_mode); only the version + timestamp stamps
 # get refreshed each run so `uci show amnezia` always reports the latest
 # install. Non-fatal: bad UCI here must not block AWG/PBR.
-if [ -f /tmp/amnezia.config ]; then
-  if [ ! -f /etc/config/amnezia ]; then
-    install -m 0644 /tmp/amnezia.config /etc/config/amnezia
-    log "UCI: /etc/config/amnezia created"
-  fi
+if [ -f /tmp/amnezia.config ] && [ ! -f /etc/config/amnezia ]; then
+  # BusyBox has no `install` command; cp + chmod is the portable form.
+  cp /tmp/amnezia.config /etc/config/amnezia
+  chmod 0644 /etc/config/amnezia
+  log "UCI: /etc/config/amnezia created from staged template"
+fi
+if [ -f /etc/config/amnezia ]; then
   uci -q set amnezia.config.installed_version="${INSTALLED_VERSION:-main}" 2>/dev/null || true
   uci -q set amnezia.config.installed_ts="$(date +%s)" 2>/dev/null || true
   uci -q commit amnezia 2>/dev/null || true
-else
-  log "WARN: /tmp/amnezia.config missing; UCI scaffold not installed"
 fi
 
-# LuCI toggle buttons (System -> Custom Commands). Non-fatal.
-if SRC=/tmp/awg-toggle.sh sh /tmp/install-luci-toggle.sh >>"$LOG" 2>&1; then
-  log "luci toggle installed"
-else
-  log "WARN: luci toggle install failed (non-fatal)"
+# LuCI toggle buttons (System -> Custom Commands). Optional; skip silently
+# when the helper isn't available (.ipk path doesn't ship it as it's a
+# niche luci-app-commands integration the user likely doesn't want).
+if [ -f /tmp/install-luci-toggle.sh ]; then
+  if SRC=/tmp/awg-toggle.sh sh /tmp/install-luci-toggle.sh >>"$LOG" 2>&1; then
+    log "luci toggle installed"
+  else
+    log "WARN: luci toggle install failed (non-fatal)"
+  fi
 fi
 
 # zapret (DPI desync) install. Service stays DISABLED after install -- user
 # enables via the LuCI button. Non-fatal: failure here must not break AWG.
-if sh /tmp/install-zapret.sh >>"$LOG" 2>&1; then
-  log "zapret installed (service left disabled)"
+# In .ipk mode the helper is at /usr/sbin/install-zapret; in install.sh mode
+# it's at /tmp/install-zapret.sh.
+if _zapret=$(find_helper install-zapret); then
+  if $_zapret >>"$LOG" 2>&1; then
+    log "zapret installed (service left disabled)"
+  else
+    log "WARN: zapret install failed (non-fatal)"
+  fi
 else
-  log "WARN: zapret install failed (non-fatal)"
+  log "WARN: install-zapret helper not found; skipping zapret install"
 fi
 
-# Refresh LuCI app: menu entry, ACL (rpcd permissions for our exec/read
-# endpoints), and the main.js view. Non-fatal -- a broken LuCI panel must
-# not block AWG/PBR; user can still drive everything from CLI. The
-# installer reloads rpcd + uhttpd so ACL changes take effect immediately.
-if SRC=/tmp/luci-app-amnezia sh /tmp/install-luci-app-amnezia.sh >>"$LOG" 2>&1; then
-  log "luci-app-amnezia refreshed (menu/acl/view)"
-else
-  log "WARN: luci-app-amnezia refresh failed (non-fatal)"
+# Refresh LuCI app: menu entry, ACL, view JS. The .ipk path installs these
+# via the luci-app-amnezia package, so the helper script is absent and we
+# skip. install.sh path stages the helper to /tmp/.
+if [ -d /tmp/luci-app-amnezia ] && [ -f /tmp/install-luci-app-amnezia.sh ]; then
+  if SRC=/tmp/luci-app-amnezia sh /tmp/install-luci-app-amnezia.sh >>"$LOG" 2>&1; then
+    log "luci-app-amnezia refreshed (menu/acl/view)"
+  else
+    log "WARN: luci-app-amnezia refresh failed (non-fatal)"
+  fi
 fi
 
 ok "1 awg1"
@@ -246,8 +299,12 @@ log "Step 2: PBR base"
 LAN="$(lan_cidr)"
 [ -n "$LAN" ] || LAN="192.168.1.0/24"
 mkdir -p /etc/pbr.d
+# Step 2's PBR config is "LAN -> VPN, nothing direct yet". The .ru
+# direct rule lands in Step 3 if STEPS=3, so we drop it here so a
+# re-run isn't reading a stale file.
 rm -f /etc/pbr.d/ru-direct.sh
-sed "s|__LAN__|$LAN|g" /tmp/99-lan-vpn-vpn-only.sh > /etc/pbr.d/99-lan-vpn.sh
+_tpl=$(find_template 99-lan-vpn-vpn-only.sh) || fail "missing 99-lan-vpn-vpn-only.sh template"
+sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
 chmod 755 /etc/pbr.d/99-lan-vpn.sh
 
 while uci -q delete pbr.@policy[0]; do :; done
@@ -293,15 +350,29 @@ NFTFRAG
 /etc/init.d/firewall reload 2>/dev/null || true
 sleep 2
 
-sh /tmp/install-dnsmasq-full.sh 2>/dev/null || fail "dnsmasq-full install"
+if _dnsmasq=$(find_helper install-dnsmasq-full); then
+  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
+else
+  # .ipk path declares dnsmasq-full as a hard DEPENDS, so opkg already has
+  # it installed. No-op.
+  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
+fi
 need_dns || fail "DNS broken after dnsmasq-full"
 
-sh /tmp/configure-dnsmasq-ru-nftset.sh 2>/dev/null || fail "dnsmasq .ru nftset config"
+if _nftset=$(find_helper configure-dnsmasq-ru-nftset); then
+  $_nftset 2>/dev/null || fail "dnsmasq .ru nftset config"
+else
+  log "WARN: configure-dnsmasq-ru-nftset helper missing; .ru nftset not wired"
+fi
 
-# ru-direct + full LAN rules (idempotent — no duplicate nft rules on pbr restart)
-cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
+# ru-direct + full LAN rules (idempotent — no duplicate nft rules on pbr restart).
+# ru-direct.sh ships at /etc/pbr.d/ in .ipk; copy from /tmp/ only when present.
+if [ -f /tmp/ru-direct.sh ]; then
+  cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
+fi
 chmod 755 /etc/pbr.d/ru-direct.sh
-sed "s|__LAN__|$LAN|g" /tmp/99-lan-vpn-full.sh > /etc/pbr.d/99-lan-vpn.sh
+_tpl=$(find_template 99-lan-vpn-full.sh) || fail "missing 99-lan-vpn-full.sh template"
+sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
 chmod 755 /etc/pbr.d/99-lan-vpn.sh
 
 idx=0
