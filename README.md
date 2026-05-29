@@ -27,6 +27,15 @@ What you get on the router:
   - **Blockcheck** runner with live log + apply/revert of recommended
     nfqws strategies
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Panel overview](docs/screenshots/luci-amnezia-overview.png) | ![Domain probe](docs/screenshots/luci-amnezia-probe.png) |
+| Tunnel + PBR + RU list + zapret status, one place. | Probe a domain, get a verdict + recommendation. |
+| ![Verify list](docs/screenshots/luci-amnezia-verify.png) | ![Blockcheck](docs/screenshots/luci-amnezia-blockcheck.png) |
+| Re-probe N domains after Apply with summary chips and an action hint. | Run upstream blockcheck.sh with a live log; one-click Apply of the recommended nfqws strategy. |
+
 ## Install
 
 Two paths -- pick one. Both end at the same configured router; the

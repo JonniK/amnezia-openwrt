@@ -25,6 +25,15 @@
   - **Blockcheck** runner с live-логом + apply/revert рекомендованных
     nfqws стратегий.
 
+## Скриншоты
+
+| | |
+|---|---|
+| ![Обзор панели](docs/screenshots/luci-amnezia-overview.png) | ![Domain probe](docs/screenshots/luci-amnezia-probe.png) |
+| Туннель + PBR + RU список + zapret статус, в одном месте. | Пробить домен, получить verdict + рекомендацию. |
+| ![Verify list](docs/screenshots/luci-amnezia-verify.png) | ![Blockcheck](docs/screenshots/luci-amnezia-blockcheck.png) |
+| Перепробить N доменов после Apply с summary-чипами и action-подсказкой. | Запустить апстримный blockcheck.sh с live-логом; в один клик Apply рекомендованной nfqws стратегии. |
+
 ## Установка
 
 Два пути — выбирай один. Оба приводят к одному и тому же
