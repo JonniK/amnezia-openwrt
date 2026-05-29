@@ -1,109 +1,164 @@
-# AmneziaWG + OpenWrt (split tunnel)
+# amnezia-pbr-openwrt
 
 **Languages:** English (this file) · [Русский](README.ru.md)
 
-Scripts and notes for deploying **AmneziaWG 2.0** on **OpenWrt** with **policy-based routing (PBR)**: traffic to Russian subnets goes out **WAN**; other LAN traffic uses the VPN (**`awg1`**). Includes **backup / restore** without a factory reset.
+OpenWrt router config for **AmneziaWG** + **policy-based routing** with
+**RU bypass** and an optional **zapret DPI desync** layer, plus a LuCI
+panel that wraps it all.
 
-## What this does
+What you get on the router:
 
-1. **Split routing (“RU direct, rest via VPN”)**  
-   Russian IPv4 ranges are loaded from [ipdeny `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone) into the PBR nftables set `pbr_wan_4_dst_ip_user`. When **`dnsmasq-full`** is present, resolved **`*.ru`** IPv4 addresses are also stored in **`pbr_ru_tld4`** (dhcp `nftset` + `/etc/nftables.d/15-pbr-ru-tld4.nft`). For clients in **`192.168.1.0/24`**, traffic to either set stays on **WAN**; other destinations use **`awg1`**. More detail: [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md).
+- `awg1` AmneziaWG interface (kmod + tools from
+  [Slava-Shchipunov/awg-openwrt](https://github.com/Slava-Shchipunov/awg-openwrt)).
+- Policy-based routing (`pbr` + `luci-app-pbr`) sending LAN traffic
+  through `awg1` by default, with the standard `.ru` TLDs and the
+  current ipdeny RU IPv4 list routed direct (so banks, госуслуги, mail.ru
+  etc. don't tunnel).
+- `zapret` (DPI desync, from
+  [remittor/zapret-openwrt](https://github.com/remittor/zapret-openwrt))
+  installed but disabled by default — you turn it on from LuCI after
+  finding a strategy that works on your ISP.
+- A LuCI page at **Network → Amnezia** with:
+  - tunnel + PBR status, one-click toggle
+  - weekly RU CIDR refresh
+  - **Domain probe** to classify how a site fails on direct WAN
+  - **Verify list** to check a set of domains in one go after applying
+    a strategy
+  - **Blockcheck** runner with live log + apply/revert of recommended
+    nfqws strategies
 
-2. **AmneziaWG in UCI**  
-   Interface **`awg1`**, firewall zone **`awg1`**, LAN → VPN forwarding, peer with **`route_allowed_ips=0`** so the tunnel does **not** install a full default route—PBR chooses paths.
+## Install
 
-3. **AWG packages pinned to a build**  
-   `setup-amnezia-full.sh` embeds OpenWrt package **`VER`**, **`ARCH`**, and **`TS`** for [awg-openwrt releases](https://github.com/Slava-Shchipunov/awg-openwrt/releases). Change those lines for your device.
+On the router, as root:
 
-4. **Router snapshots under `openwrt-backups/`** (local only, see `openwrt-backups/.gitignore`):  
-   Examples: `clean-after-reset`, `before-amnezia`, `after-amnezia`—whatever labels you choose when running `openwrt-backup.sh`.
+```sh
+# 1. Place your Amnezia-exported .conf
+#    (the one with Jc / Jmin / S* / H* / I* lines under [Interface])
+mkdir -p /etc/amnezia
+cat > /etc/amnezia/awg.conf <<EOF
+[Interface]
+PrivateKey = ...
+Address = ...
+Jc = ...
+Jmin = ...
+# ... rest of your Amnezia client export ...
+[Peer]
+PublicKey = ...
+PresharedKey = ...
+Endpoint = host:port
+PersistentKeepalive = 25
+EOF
 
-5. **`amnezia_sites_ru_geoip.json`** — JSON snapshot of **[ipdeny `ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)** (same CIDRs, converted to `{hostname,ip}` records). Current shell scripts still fetch **`ru.zone`** on the router instead. **Details / refresh:** [docs/amnezia_sites_ru_geoip.md](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md).
+# 2. Run the installer
+wget -O - https://raw.githubusercontent.com/JonniK/amnezia-openwrt/main/install.sh | sh
+```
 
-6. **Amnezia client export** (`vpn://…`) — for the Amnezia desktop app only, not for router UCI.
+It pings WAN before and after every step, never restarts the network
+as a whole, and prints `DEPLOY_FAILED` to `/tmp/openwrt-deploy.log` if
+anything goes wrong. Re-run safely after fixing config — idempotent.
 
-## Files
+### Install options
+
+| Env var | Default | Effect |
+|---|---|---|
+| `STEPS` | `3` | `1` = AWG + firewall only, `2` = +PBR, `3` = +RU bypass |
+| `AWG_CONF` | `/etc/amnezia/awg.conf` | Where to read AWG keys/params from |
+| `REPO_REF` | `main` | Branch/tag to install from |
+| `AWG_VER` | `24.10.3` | Slava-Shchipunov ipk release pin |
+
+### Where things live
 
 | Path | Purpose |
-|------|---------|
-| `setup-amnezia-full.sh` | **Main SSH flow:** upload import, install kmod/tools/luci AmneziaWG + PBR, UCI + firewall + `ru-direct.sh` + `99-lan-vpn.sh`, restart services. |
-| `setup-openwrt-awg-pbr.sh` | Alternate deploy: parse `.conf` **on your machine**, pass values over SSH (same idea as “full”, different parse path). |
-| `setup-router-remote.sh` | Run **on the router** after placing **`/tmp/awg-setup.conf`**. |
-| `openwrt-backup.sh` | Pull snapshot: selected `/etc/config/*`, `uci export`, `opkg list-installed`, routes/rules, optional `sysupgrade -b`. |
-| `openwrt-restore.sh` | Restore by label; `--uci-only` for configs only. Prompts unless `OPENWRT_RESTORE_YES=1`. |
-| `openwrt-emergency-internet.sh` | Strip VPN/PBR, reset typical WAN DHCP + LAN `192.168.1.1/24`. |
-| `openwrt-backups/<label>/` | Extracted backup: `config/`, `meta/`, `README.txt` with restore hints. |
-| `amnezia_sites_ru_geoip.json` | Optional CIDR list (not used by current sh scripts). [Docs](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) |
-| `docs/amnezia_sites_ru_geoip*.md` | Provenance & how to refresh `amnezia_sites_ru_geoip.json`. |
-| [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md) · [RU](docs/ru-tld-bypass.ru.md) | `.ru` DNS → nftset bypass and DNS tuning notes. |
-| [CHEATSHEET.md](CHEATSHEET.md) | Command table · [Шпаргалка (RU)](CHEATSHEET.ru.md) |
-| `local/README.md` | Default import location (`local/awg.conf`, not in git). [Русский](local/README.ru.md) |
-| `.gitignore` | Ignores `local/*` except `local/README*.md`; see `openwrt-backups/.gitignore` for snapshots. |
+|---|---|
+| `/etc/amnezia/awg.conf` | Your AmneziaWG client config (you provide it) |
+| `/etc/amnezia/ru.cidr` | Current ipdeny RU IPv4 list (refreshed weekly) |
+| `/etc/amnezia/ru-update.json` | Stamp of last refresh |
+| `/etc/amnezia/blockcheck.json` | Stamp of last blockcheck run |
+| `/etc/amnezia/seed-must-tunnel.list` | Reference list of known anti-VPN / geo-block sites |
+| `/etc/amnezia/zapret-backups/` | Per-Apply backups of `NFQWS_OPT` |
+| `/opt/zapret/config` | Active zapret config (`NFQWS_OPT` lives here) |
+| `/etc/pbr.d/99-lan-vpn.sh` | PBR include: LAN → awg1 |
+| `/etc/pbr.d/ru-direct.sh` | PBR include: RU CIDRs → WAN direct |
 
-## Requirements
+### Supported hardware
 
-- SSH host for the router (default **`router`** in scripts—override with **`SSH_HOST`**), e.g. in `~/.ssh/config`.
-- Optional env:
-  - **`SSH_HOST`** — SSH target;
-  - **`CONF_LOCAL`** — path to decoded `.conf` with keys (default **`local/awg.conf`**, see `local/README.md` / `local/README.ru.md`);
-  - **`BACKUP_ROOT`** — backup root (default **`openwrt-backups/`** next to the scripts).
+Tested on **aarch64 mediatek/filogic** (Xiaomi AX3000T, Banana Pi BPI-R4,
+etc.) on OpenWrt 24.10.3.
 
-## Typical workflow
+The installer auto-detects `DISTRIB_ARCH` and `DISTRIB_TARGET` to pick
+the right AmneziaWG kmod ipk from Slava-Shchipunov's releases, so other
+targets *should* work as long as a matching ipk exists for your kernel.
+mips_24kc is intended but untested.
 
-1. Decode Amnezia config to a plain `.conf` and place it at **`CONF_LOCAL`** (default **`local/awg.conf`**, see `local/README.md` / `local/README.ru.md`).
-2. Before changes: `./openwrt-backup.sh before-amnezia`
-3. Full install from your host: `./setup-amnezia-full.sh` (adjust **`VER` / `ARCH` / `TS`** if needed).
-4. After checks: `./openwrt-backup.sh after-amnezia`
+## When zapret helps and when it doesn't
 
-From a LAN client, e.g. `curl ifconfig.me` — for non‑RU checks you should see the VPN egress IP.
+zapret performs DPI desync on egress packets after they've left the
+router but before they hit the ISP's TSPU. It can help when:
 
-## Rollback & emergency
+- A site is **DPI-blocked**: TSPU lets the SYN through, parses the
+  ClientHello's SNI, then RSTs the connection. zapret rewrites the
+  ClientHello (split, fakedsplit, multidisorder, etc.) so the SNI
+  isn't parseable. This is the classic case it's designed for.
 
-- Restore: `./openwrt-restore.sh before-amnezia` (or your label).
-- If the router is unreachable except LAN: `./openwrt-emergency-internet.sh`, then renew DHCP / reconnect Wi‑Fi on clients.
+It **cannot help** when:
 
-## Security
+- A site is **SYN-blocked**: TSPU drops the first packet of the
+  handshake by destination IP. zapret operates on packets that reach
+  it; if the SYN dies upstream, there's nothing to desync. In 2026
+  Russia this is the dominant block mode for many western services
+  (Instagram, Facebook, X, LinkedIn, often YouTube).
+- A site does **server-side anti-VPN** (Cloudflare's `cf-mitigated`,
+  OpenAI's region check, Netflix). The block is based on your IP, and
+  no packet-level desync changes the IP. Only the tunnel (with a
+  non-flagged exit) helps.
 
-- **`local/awg.conf`** (or any **`CONF_LOCAL`**) and **`openwrt-backups/*`** hold **keys and sensitive UCI**. They are excluded by **`.gitignore`** and **`openwrt-backups/.gitignore`**. Rotate in Amnezia if leaked.
-- If something was committed before these rules: `git rm --cached local/awg.conf`, `git rm -r --cached openwrt-backups/<label>/`, etc.
+The LuCI panel makes the distinction with three tools:
 
-## LAN note
+- **Domain probe** classifies one domain into `direct_ok`,
+  `direct_dpi_blocked`, `direct_geoblocked`, or `direct_unreachable`.
+- **Blockcheck** runs the upstream `/opt/zapret/blockcheck.sh` and
+  surfaces a recommended `--dpi-desync=...` strategy when one works.
+- **Verify list** then re-probes a list of domains with the applied
+  strategy live, so you can see whether the recommendation actually
+  helps on your real targets (blockcheck often gets a false positive
+  by testing against `iana.org` IPs rather than the real destination).
 
-Scripts assume **`192.168.1.0/24`**. For another LAN, edit `99-lan-vpn.sh` / PBR policies in the `.sh` files (or UCI / `/etc/pbr.d` on the router).
+If most of your blocked sites are SYN-blocked, leaving zapret off and
+sending those domains through the tunnel is the right answer. zapret
+is most valuable when it lets you keep high-bandwidth, DPI-only sites
+on direct WAN to free the tunnel from carrying the load.
 
-## Command cheat sheet
+## Repo layout
 
-See **[CHEATSHEET.md](CHEATSHEET.md)** · [RU](CHEATSHEET.ru.md).
+```
+install.sh                  Public bootstrap (this is what users run)
+openwrt/
+  install-amnezia-pbr.sh    Main installer pipeline (runs on the router)
+  install-zapret.sh         zapret package + wrappers + nmap-ncat
+  install-luci-app-amnezia.sh   LuCI menu/acl/view + cron
+  install-luci-toggle.sh    LuCI System->CustomCommands toggle entries
+  install-dnsmasq-full.sh   Swap to dnsmasq-full (needs nftset support)
+  configure-dnsmasq-ru-nftset.sh   .ru TLD -> pbr_ru_tld4 nftset directive
+  awg-{toggle,status,ru-update}.sh    AWG wrappers
+  pbr-{status,reload}.sh    PBR wrappers
+  zapret-{toggle,status,blockcheck,apply,probe,verify}.sh   zapret wrappers
+  seed-must-tunnel.list     Reference list of geo-blocked sites
+  pbr.d/                    PBR include files
+  luci-app-amnezia/         LuCI app (menu, acl, view/main.js)
+docs/                       Design notes (plan-b: inverted PBR architecture)
+dev/                        Maintainer-side SSH tooling (not for end users)
+local/                      Your private AWG config (gitignored)
+```
 
-## FAQ
+## License
 
-**Difference between `setup-amnezia-full.sh` and `setup-openwrt-awg-pbr.sh`?**  
-`full` downloads AmneziaWG `.ipk` from GitHub for pinned **`VER`/`ARCH`/`TS`**, uploads the import, parses on the router from **`/tmp/awg-setup.conf`**, writes **`99-lan-vpn.sh`** + **`.ru` nftset** bits, restarts in a fixed order. `setup-openwrt-awg-pbr.sh` parses `.conf` **on your machine** and passes values over SSH; it does **not** install AWG packages—you must have them already. **Split-tunnel nft** (ipdeny + `99-lan-vpn` + dnsmasq `.ru`) is the same idea in both.
+GPLv2. See LICENSE.
 
-**`Missing …` (no import file).**  
-Fix **`CONF_LOCAL`** or create **`local/awg.conf`** (see `local/README.md` / `local/README.ru.md`). Example:  
-`CONF_LOCAL=/absolute/path/to/import.conf ./setup-amnezia-full.sh`.
+## See also
 
-**`.ipk` download / `opkg install` fails.**  
-Usually **`ARCH`** or **`TS`** mismatch vs [awg-openwrt releases](https://github.com/Slava-Shchipunov/awg-openwrt/releases). On the router: `cat /etc/openwrt_release` and update **`ARCH`**, **`TS`**, **`VER`** in `setup-amnezia-full.sh`.
-
-**`curl ifconfig.me` shows ISP IP, not VPN.**  
-Test a **non‑**Russian destination; some CDNs map oddly. Check `ifstatus awg1`, PBR status, client in **`192.168.1.0/24`**. On the router, read the script footer (`awg ping`, `pbr`).
-
-**RU sites via VPN or odd routing.**  
-ipdeny updates over time; CDN edge cases exist. The **`.ru` nftset** helps once the router’s dnsmasq has resolved the name. On the router: `/etc/init.d/pbr restart` ( `ru-direct.sh` refreshes `ru.zone` when needed); **`/etc/init.d/dnsmasq restart`** after dhcp `nftset` changes. Slow DNS: [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md).
-
-**Use `amnezia_sites_ru_geoip.json` instead of ipdeny?**  
-Current sh scripts **do not** wire it in—you’d need a custom generator / nft rules. The JSON is already derived from the same **[`ru.zone`](https://www.ipdeny.com/ipblocks/data/countries/ru.zone)** list; see [docs/amnezia_sites_ru_geoip.md](docs/amnezia_sites_ru_geoip.md) · [RU](docs/amnezia_sites_ru_geoip.ru.md) to regenerate it.
-
-**LAN is not `192.168.1.0/24` or I have a guest network.**  
-Change the subnet in `99-lan-vpn.sh` and PBR `src_addr` / nft `ip saddr` in all involved scripts, then redeploy or edit UCI / `/etc/pbr.d` manually.
-
-**`openwrt-restore.sh` waits at `Continue?`**  
-Non‑interactive: `OPENWRT_RESTORE_YES=1 ./openwrt-restore.sh <label>`.
-
-**No internet on clients after restore / emergency.**  
-Renew DHCP, reconnect Wi‑Fi, or reboot the router.
-
-**Do I need git?**  
-No—only SSH + POSIX `sh`. Git is handy to version scripts and docs **without** secrets—see **`.gitignore`** and [CHEATSHEET.md](CHEATSHEET.md) · [RU](CHEATSHEET.ru.md).
+- [docs/plan-b-inverted-pbr.md](docs/plan-b-inverted-pbr.md) — design
+  notes for the "direct default + zapret + selective must-tunnel"
+  routing architecture that's the next major iteration.
+- [docs/ru-tld-bypass.md](docs/ru-tld-bypass.md) — how the `.ru` TLD
+  bypass works via dnsmasq nftset.
+- [README.ru.md](README.ru.md) — русская версия.
