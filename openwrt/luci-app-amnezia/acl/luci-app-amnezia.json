@@ -18,6 +18,7 @@
 				"/usr/bin/zapret-blockcheck":[ "exec" ],
 				"/usr/bin/zapret-apply":     [ "exec" ],
 				"/usr/bin/zapret-probe":     [ "exec" ],
+				"/usr/bin/zapret-verify":    [ "exec" ],
 				"/usr/bin/pbr-status":       [ "exec" ],
 				"/usr/bin/pbr-reload":       [ "exec" ]
 			}

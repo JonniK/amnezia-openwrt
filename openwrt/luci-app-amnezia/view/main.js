@@ -26,6 +26,11 @@ var pbrBadCount = 0;
 // (or row + button) would race two execs both writing to #probe-result.
 var probeInFlight = false;
 
+// Same guard for the multi-domain Verify button. Verify can take 30-60s
+// (sequential N probes), so a double-click without the guard would queue a
+// second run that overwrites the in-progress result mid-render.
+var verifyInFlight = false;
+
 // Signature of the most recently rendered candidate list. paintApply() skips
 // rebuilding the <select> when the signature is unchanged -- otherwise an
 // open dropdown would be closed by the browser on every 5s poll.
@@ -99,6 +104,29 @@ function parsePbr(text) {
 function parseProbe(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function parseVerify(text) {
+	if (!text) return null;
+	try {
+		var obj = JSON.parse(text);
+		if (obj && obj.results && obj.results.length !== undefined) return obj;
+		return null;
+	} catch (e) { return null; }
+}
+
+// Same vocabulary as the inline switch in handleProbe -- kept as a function so
+// the multi-domain verify table doesn't drift from the single-probe colouring.
+function verdictColor(v) {
+	switch (v) {
+		case 'direct_ok':           return '#3c763d';
+		case 'direct_geoblocked':   return '#a94442';
+		case 'direct_dpi_blocked':  return '#f0ad4e';
+		case 'direct_blocked':      return '#a94442';
+		case 'direct_unreachable':  return '#888';
+		case 'error':               return '#a94442';
+		default:                    return '#666';
+	}
 }
 
 // Split the seed-must-tunnel.list file (one domain per line, # comments) into
@@ -569,16 +597,7 @@ return view.extend({
 				return;
 			}
 			if (resultEl) {
-				var colour;
-				switch (parsed.verdict) {
-					case 'direct_ok':            colour = '#3c763d'; break;
-					case 'direct_geoblocked':    colour = '#a94442'; break;
-					case 'direct_dpi_blocked':   colour = '#f0ad4e'; break;
-					case 'direct_blocked':       colour = '#a94442'; break;
-					case 'direct_unreachable':   colour = '#888';    break;
-					default:                     colour = '#666';
-				}
-				resultEl.style.color = colour;
+				resultEl.style.color = verdictColor(parsed.verdict);
 				resultEl.innerHTML = '';
 				resultEl.appendChild(E('strong', {}, parsed.verdict));
 				resultEl.appendChild(document.createTextNode(' — ' + parsed.reason));
@@ -595,6 +614,120 @@ return view.extend({
 			if (resultEl) {
 				resultEl.style.color = '#a94442';
 				resultEl.textContent = _('Probe failed: ') + err;
+			}
+		});
+	},
+
+	handleVerify: function(ev) {
+		if (verifyInFlight) {
+			ui.addNotification(null, E('p', {}, _('Verify is already running -- wait for it to finish')), 'info');
+			return Promise.resolve();
+		}
+		var input = document.getElementById('verify-domains');
+		var raw = (input && input.value || '').trim();
+		if (!raw) {
+			ui.addNotification(null, E('p', {}, _('Enter at least one domain (comma-separated)')), 'warning');
+			return Promise.resolve();
+		}
+		var parts = raw.split(',').map(function(s){ return s.trim(); }).filter(Boolean);
+		if (parts.length === 0) {
+			ui.addNotification(null, E('p', {}, _('No domains given')), 'warning');
+			return Promise.resolve();
+		}
+		// Validate client-side so a typo doesn't blow ~5s of probe budget per
+		// bad token before zapret-verify rejects it.
+		for (var i = 0; i < parts.length; i++) {
+			if (!/^[A-Za-z0-9.\-_]{2,253}$/.test(parts[i])) {
+				ui.addNotification(null, E('p', {}, _('Invalid domain: ') + parts[i]), 'warning');
+				return Promise.resolve();
+			}
+		}
+		verifyInFlight = true;
+		var btn = document.getElementById('verify-btn');
+		var box = document.getElementById('verify-result');
+		if (btn) { btn.disabled = true; btn.textContent = _('Verifying...'); }
+		if (box) {
+			box.innerHTML = '';
+			box.appendChild(E('span', { 'style': 'color:#666;' },
+				_('Probing ') + parts.length + _(' domains (~') + (parts.length * 8) + _('s)...')));
+		}
+		return fs.exec('/usr/bin/zapret-verify', [parts.join(',')]).then(function(res) {
+			verifyInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Verify'); }
+			var parsed = parseVerify(res && res.stdout);
+			if (!parsed) {
+				if (box) {
+					box.innerHTML = '';
+					box.appendChild(E('span', { 'style': 'color:#a94442;' },
+						_('Verify failed: ') + ((res && res.stderr) || _('no output'))));
+				}
+				return;
+			}
+			if (box) {
+				box.innerHTML = '';
+				var table = E('table', {
+					'style': 'border-collapse:collapse;font-size:11px;width:100%;max-width:100%;table-layout:fixed;'
+				});
+				var head = E('tr', {}, [
+					E('th', { 'style': 'text-align:left;padding:3px 6px;border-bottom:1px solid #ddd;width:30%;' }, _('Domain')),
+					E('th', { 'style': 'text-align:left;padding:3px 6px;border-bottom:1px solid #ddd;width:22%;' }, _('Verdict')),
+					E('th', { 'style': 'text-align:left;padding:3px 6px;border-bottom:1px solid #ddd;' }, _('Reason')),
+					E('th', { 'style': 'text-align:right;padding:3px 6px;border-bottom:1px solid #ddd;width:12%;' }, _('Status / time'))
+				]);
+				table.appendChild(head);
+				// Tally for the summary line.
+				var counts = { direct_ok: 0, direct_geoblocked: 0, direct_dpi_blocked: 0,
+					direct_blocked: 0, direct_unreachable: 0, error: 0 };
+				for (var j = 0; j < parsed.results.length; j++) {
+					var r = parsed.results[j] || {};
+					var v = r.verdict || 'error';
+					if (counts[v] === undefined) counts[v] = 0;
+					counts[v]++;
+					var row = E('tr', {}, [
+						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;font-family:monospace;word-break:break-all;' },
+							r.domain || ''),
+						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;color:' + verdictColor(v) + ';font-weight:bold;' },
+							v),
+						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;color:#444;word-break:break-word;' },
+							r.reason || ''),
+						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;text-align:right;color:#888;font-family:monospace;' },
+							(r.status !== undefined ? r.status : '') +
+							(r.time_total !== undefined ? (' / ' + r.time_total + 's') : ''))
+					]);
+					table.appendChild(row);
+				}
+				var summary = E('div', { 'style': 'margin-bottom:6px;color:#444;' }, [
+					E('strong', {}, _('Summary: ')),
+					counts.direct_ok       ? E('span', { 'style': 'color:#3c763d;margin-right:10px;' }, counts.direct_ok + ' ok')                  : '',
+					counts.direct_geoblocked? E('span', { 'style': 'color:#a94442;margin-right:10px;' }, counts.direct_geoblocked + ' geoblocked') : '',
+					counts.direct_dpi_blocked? E('span', { 'style': 'color:#f0ad4e;margin-right:10px;' }, counts.direct_dpi_blocked + ' dpi')      : '',
+					counts.direct_blocked  ? E('span', { 'style': 'color:#a94442;margin-right:10px;' }, counts.direct_blocked + ' blocked')        : '',
+					counts.direct_unreachable? E('span', { 'style': 'color:#888;margin-right:10px;' }, counts.direct_unreachable + ' unreachable'): '',
+					counts.error           ? E('span', { 'style': 'color:#a94442;margin-right:10px;' }, counts.error + ' error')                   : ''
+				]);
+				box.appendChild(summary);
+				box.appendChild(table);
+				// Action hint: tell the user what to do with the verdicts.
+				var hint = '';
+				if (counts.direct_dpi_blocked) {
+					hint = _('Some domains failed via DPI. Re-run blockcheck with those domains as input to find a stronger nfqws strategy.');
+				} else if (counts.direct_geoblocked) {
+					hint = _('Some domains refused us by country / anti-VPN. Those are must-tunnel candidates -- DPI tuning will not help.');
+				} else if (counts.direct_ok > 0 && counts.direct_blocked === 0) {
+					// No DPI/geoblock failures means the current strategy isn't the
+					// bottleneck for this set, even if a domain timed out transiently.
+					hint = _('No DPI or geoblock failures. Current strategy covers this set; any unreachable entries look like transient outages.');
+				}
+				if (hint) {
+					box.appendChild(E('div', { 'style': 'margin-top:6px;color:#555;font-style:italic;' }, hint));
+				}
+			}
+		}).catch(function(err) {
+			verifyInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Verify'); }
+			if (box) {
+				box.innerHTML = '';
+				box.appendChild(E('span', { 'style': 'color:#a94442;' }, _('Verify failed: ') + err));
 			}
 		});
 	},
@@ -1032,6 +1165,40 @@ return view.extend({
 							})(this)
 						])
 					]) : ''
+				])
+			]),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Verify list')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Probe a list of domains in one go. Use after Apply to confirm the current zapret strategy actually covers your common targets. Sequential probes, ~5-10s per domain.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Domains')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'verify-domains',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:340px;margin-right:8px;',
+								'placeholder': 'youtube.com, instagram.com, github.com'
+							}),
+							E('button', {
+								'id': 'verify-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(this, 'handleVerify')
+							}, _('Verify'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Result')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', {
+								'id': 'verify-result',
+								'style': 'min-height:1.5em;color:#666;font-size:12px;box-sizing:border-box;max-width:100%;overflow-x:auto;'
+							}, _('No verify run yet'))
+						])
+					])
 				])
 			]),
 
