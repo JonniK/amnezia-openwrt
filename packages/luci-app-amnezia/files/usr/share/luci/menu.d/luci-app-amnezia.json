@@ -1,0 +1,13 @@
+{
+	"admin/network/amnezia": {
+		"title": "Amnezia",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "amnezia/main"
+		},
+		"depends": {
+			"acl": [ "luci-app-amnezia" ]
+		}
+	}
+}

@@ -1,0 +1,26 @@
+# /etc/config/amnezia
+# UCI config for amnezia-pbr-openwrt. Edit via:
+#   uci set amnezia.config.<key>=<value> && uci commit amnezia
+# or via LuCI: Network -> Amnezia.
+#
+# This file is the canonical home for package-level toggles. State stamps
+# (blockcheck.json, ru-update.json, etc.) live as files under /etc/amnezia/
+# because UCI is awkward for nested JSON.
+
+config amnezia 'config'
+	# routing_mode controls whether AmneziaWG is the default route or
+	# only used for an explicit must-tunnel allow-list.
+	#   tunnel-default  (current behaviour) LAN -> awg1 by default, with
+	#                   .ru TLDs and RU CIDRs routed direct via WAN.
+	#   direct-default  (Plan B, not yet wired) LAN -> WAN direct by default
+	#                   with zapret DPI desync, must-tunnel domains -> awg1.
+	# Switching modes will eventually be a one-click operation in LuCI; for
+	# now this scaffold lets consumers (status wrappers, future Plan B
+	# include-swap logic) read intent without parsing /etc/pbr.d/ file names.
+	option routing_mode 'tunnel-default'
+
+	# Stamp the install so `uci show amnezia` doubles as a quick "what's
+	# running" report. install-amnezia-pbr.sh updates these on every run;
+	# preserved across re-runs only if user has not overridden routing_mode.
+	option installed_version 'main'
+	option installed_ts ''

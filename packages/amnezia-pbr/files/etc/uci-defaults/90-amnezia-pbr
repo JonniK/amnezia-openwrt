@@ -1,0 +1,7 @@
+#!/bin/sh
+# uci-defaults: stamp the install timestamp. /etc/config/amnezia ships as the
+# package conffile so opkg preserves user edits across upgrades; we only
+# touch the install metadata here.
+uci -q set amnezia.config.installed_ts="$(date +%s)" || exit 0
+uci -q commit amnezia
+exit 0

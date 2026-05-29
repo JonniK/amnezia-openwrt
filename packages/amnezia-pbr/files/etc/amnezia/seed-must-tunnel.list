@@ -1,0 +1,43 @@
+# Domains commonly known to refuse traffic from RU IPs.
+# Sourced from public lists (dartraiden/no-russia-hosts) and personal curation.
+# One domain per line; lines starting with # are comments.
+#
+# This file is a *reference* the LuCI probe UI uses to suggest candidates.
+# It does NOT route anything by itself -- it just feeds the probe and the
+# (future) must-tunnel list in Plan B.
+#
+# Bias: short and high-signal. Add domains you actually use and that you want
+# to verify-or-route-via-AWG; a maintained big list lives in dartraiden's repo.
+
+# AI / dev tooling that bans RU IPs
+chatgpt.com
+openai.com
+claude.ai
+anthropic.com
+gemini.google.com
+github.com
+copilot.microsoft.com
+
+# Streaming / media that geo-block RU
+netflix.com
+hbo.com
+hbomax.com
+disneyplus.com
+spotify.com
+hulu.com
+paramountplus.com
+
+# News
+nytimes.com
+washingtonpost.com
+bbc.com
+ft.com
+bloomberg.com
+
+# Misc commonly-affected services
+notion.so
+slack.com
+linear.app
+stripe.com
+docker.com
+gradle.org

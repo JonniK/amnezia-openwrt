@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# Build amnezia-pbr.ipk + luci-app-amnezia.ipk against the OpenWrt 24.10
+# SDK for the architectures we ship. Matrix runs once on push to main and
+# once on tagged releases; tag builds also attach the .ipk's to the GitHub
+# Release for `opkg install <url>` consumption.
+name: build-ipk
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/**'
+      - 'openwrt/**'
+      - 'dev/sync-to-packages.sh'
+      - '.github/workflows/build-ipk.yml'
+  pull_request:
+    paths:
+      - 'packages/**'
+      - 'openwrt/**'
+      - 'dev/sync-to-packages.sh'
+      - '.github/workflows/build-ipk.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # required for the release-attach step
+
+jobs:
+  sync-check:
+    # Source of truth for the package files/ tree is openwrt/. Refuse to
+    # build if a contributor edited openwrt/* without re-running sync,
+    # otherwise the .ipk's would silently lag the install.sh path.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: regenerate packages/ from openwrt/
+        run: sh dev/sync-to-packages.sh
+      - name: fail if diff
+        run: |
+          if ! git diff --quiet -- packages/; then
+            echo "::error::packages/ is out of sync with openwrt/."
+            echo "Run dev/sync-to-packages.sh and commit the result."
+            git diff --stat -- packages/
+            exit 1
+          fi
+
+  build:
+    needs: sync-check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64_cortex-a53
+            target: mediatek/filogic
+            sdk_url: https://downloads.openwrt.org/releases/24.10.3/targets/mediatek/filogic/openwrt-sdk-24.10.3-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+          - arch: mips_24kc
+            target: ramips/mt7621
+            sdk_url: https://downloads.openwrt.org/releases/24.10.3/targets/ramips/mt7621/openwrt-sdk-24.10.3-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+    name: build (${{ matrix.arch }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install SDK deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache ecj fastjar file g++ gawk \
+            gettext git java-propose-classpath libelf-dev libncurses-dev \
+            libssl-dev python3 python3-distutils python3-setuptools rsync \
+            subversion swig time xsltproc zlib1g-dev zstd
+
+      - name: cache SDK tarball
+        uses: actions/cache@v4
+        with:
+          path: ~/sdk.tar.zst
+          # SDK URL embeds the version, so the URL itself is a stable
+          # cache key. Cache hit means we skip the ~150 MB download.
+          key: sdk-${{ hashFiles('.github/workflows/build-ipk.yml') }}-${{ matrix.arch }}
+
+      - name: download SDK
+        run: |
+          if [ ! -f ~/sdk.tar.zst ]; then
+            wget -q -O ~/sdk.tar.zst "${{ matrix.sdk_url }}"
+          fi
+          mkdir -p ~/sdk
+          tar -I zstd -xf ~/sdk.tar.zst -C ~/sdk --strip-components=1
+
+      - name: stage packages into SDK feed
+        run: |
+          mkdir -p ~/sdk/package/feeds/amnezia
+          cp -a packages/amnezia-pbr ~/sdk/package/feeds/amnezia/
+          cp -a packages/luci-app-amnezia ~/sdk/package/feeds/amnezia/
+
+      - name: configure SDK
+        working-directory: ~/sdk
+        run: |
+          # Pull the default feeds so DEPENDS (pbr, dnsmasq-full, luci-base,
+          # rpcd, etc.) resolve against the released package set.
+          cp feeds.conf.default feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # Minimal .config: enable our two packages as modules (.ipk),
+          # everything else stays at SDK default.
+          make defconfig
+          echo "CONFIG_PACKAGE_amnezia-pbr=m"        >> .config
+          echo "CONFIG_PACKAGE_luci-app-amnezia=m"   >> .config
+          make defconfig
+
+      - name: build amnezia-pbr.ipk
+        working-directory: ~/sdk
+        run: |
+          make package/amnezia-pbr/compile V=s -j$(nproc) 2>&1 | tail -50
+
+      - name: build luci-app-amnezia.ipk
+        working-directory: ~/sdk
+        run: |
+          make package/luci-app-amnezia/compile V=s -j$(nproc) 2>&1 | tail -50
+
+      - name: collect .ipk's
+        run: |
+          mkdir -p artifacts
+          find ~/sdk/bin -name 'amnezia-pbr_*.ipk' -o -name 'luci-app-amnezia_*.ipk' \
+            | xargs -I{} cp {} artifacts/
+          ls -la artifacts/
+
+      - name: upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ matrix.arch }}
+          path: artifacts/*.ipk
+          if-no-files-found: error
+
+      - name: attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.ipk
+          fail_on_unmatched_files: true
