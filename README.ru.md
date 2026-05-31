@@ -65,12 +65,13 @@ install pipeline. Обновления — пере-запуск той же к�
 
 ```sh
 ARCH=$(. /etc/openwrt_release && echo "$DISTRIB_ARCH")
-REL=v0.2.0   # или актуальный release tag
+REL=v0.2.0-r2   # или актуальный release tag
+VER=0.2.0-r2
 
 cd /tmp
 for pkg in amnezia-pbr luci-app-amnezia; do
   wget -O "${pkg}.ipk" \
-    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_0.2.0-r1_all.ipk"
+    "https://github.com/JonniK/amnezia-openwrt/releases/download/${REL}/${pkg}_${VER}_all.ipk"
 done
 
 opkg install ./amnezia-pbr.ipk ./luci-app-amnezia.ipk
