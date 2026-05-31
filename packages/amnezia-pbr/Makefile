@@ -68,6 +68,13 @@ define Package/amnezia-pbr/postinst
 # Skip when opkg is staging for a sysupgrade image build, not real install.
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 
+# Legacy cleanup: 0.2.0 shipped 99-lan-vpn-*.sh.template files INTO /etc/pbr.d/.
+# pbr globs that directory and would execute them with the literal __LAN__
+# placeholder, breaking the generated nft. 0.2.1+ ships them under
+# /usr/share/amnezia-pbr/pbr.d/; on upgrade, evict the stale templates so a
+# routine pbr reload heals.
+rm -f /etc/pbr.d/*.template 2>/dev/null || true
+
 # Weekly RU CIDR refresh. Idempotent: replace any prior entry tagged with
 # our marker comment so a re-install doesn't duplicate the line.
 CRON=/etc/crontabs/root

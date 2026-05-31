@@ -24,6 +24,7 @@ rm -rf "$PBR_PKG" "$LUCI_PKG"
 mkdir -p \
 	"$PBR_PKG/usr/bin" \
 	"$PBR_PKG/usr/sbin" \
+	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d" \
 	"$PBR_PKG/etc/amnezia" \
 	"$PBR_PKG/etc/config" \
 	"$PBR_PKG/etc/pbr.d" \
@@ -61,9 +62,15 @@ chmod 0755 \
 cp "$SRC/seed-must-tunnel.list"   "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
 cp "$SRC/config/amnezia"          "$PBR_PKG/etc/config/amnezia"
 cp "$SRC/pbr.d/ru-direct.sh"      "$PBR_PKG/etc/pbr.d/ru-direct.sh"
-cp "$SRC/pbr.d/99-lan-vpn-full.sh"     "$PBR_PKG/etc/pbr.d/99-lan-vpn-full.sh.template"
-cp "$SRC/pbr.d/99-lan-vpn-vpn-only.sh" "$PBR_PKG/etc/pbr.d/99-lan-vpn-vpn-only.sh.template"
+# Templates ship OUT of /etc/pbr.d/ -- pbr globs that dir and would execute
+# them with the literal __LAN__ placeholder. install-amnezia-pbr.sh reads
+# them from here and writes the LAN-substituted result to /etc/pbr.d/99-lan-vpn.sh.
+cp "$SRC/pbr.d/99-lan-vpn-full.sh"     "$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-full.sh"
+cp "$SRC/pbr.d/99-lan-vpn-vpn-only.sh" "$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-vpn-only.sh"
 chmod 0755 "$PBR_PKG/etc/pbr.d/ru-direct.sh"
+chmod 0644 \
+	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-full.sh" \
+	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-vpn-only.sh"
 
 # uci-defaults: runs once after package install to populate UCI from the
 # shipped /etc/config/amnezia template + record the install timestamp.

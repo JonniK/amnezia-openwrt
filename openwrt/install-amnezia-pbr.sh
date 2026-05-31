@@ -98,21 +98,31 @@ find_helper() {
   return 1
 }
 
-# Locate PBR templates (99-lan-vpn-*.sh, ru-direct.sh). install.sh stages
-# them under /tmp/ unmodified; the .ipk ships them under /etc/pbr.d/ with
-# a .template suffix to distinguish from the LAN-substituted active rule.
+# Locate PBR templates (99-lan-vpn-*.sh). install.sh stages them under /tmp/
+# unmodified; the .ipk ships them under /usr/share/amnezia-pbr/pbr.d/.
+#
+# Templates MUST NOT live in /etc/pbr.d/ -- the pbr service globs that
+# directory and would execute them with the literal __LAN__ placeholder,
+# triggering "Could not resolve hostname" in the generated nft file. The
+# resolved file is written to /etc/pbr.d/99-lan-vpn.sh by the install steps
+# below.
 find_template() {
   _name=$1
   if [ -f "/tmp/${_name}" ]; then
     echo "/tmp/${_name}"
     return 0
   fi
-  if [ -f "/etc/pbr.d/${_name}.template" ]; then
-    echo "/etc/pbr.d/${_name}.template"
+  if [ -f "/usr/share/amnezia-pbr/pbr.d/${_name}" ]; then
+    echo "/usr/share/amnezia-pbr/pbr.d/${_name}"
     return 0
   fi
   return 1
 }
+
+# Legacy cleanup: 0.2.0 shipped templates with a .template suffix in
+# /etc/pbr.d/, which pbr globbed and tried to execute. Remove them on any
+# re-run so a routine `amnezia-pbr-setup` heals the bad install state.
+rm -f /etc/pbr.d/*.template 2>/dev/null || true
 
 # AmneziaWG kmod + tools come from Slava-Shchipunov's release feed -- they
 # aren't in the official OpenWrt repos. Auto-detect arch and target from
