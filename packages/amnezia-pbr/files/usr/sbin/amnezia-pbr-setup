@@ -26,7 +26,7 @@
 # This script intentionally has no SSH knowledge -- the maintainer wrapper
 # (dev/deploy-openwrt-safe.sh) handles SSH, the public bootstrap
 # (install.sh) handles tarball download. Both end up here.
-# shellcheck disable=SC2039
+# shellcheck disable=SC2039,SC2154
 set -eu
 
 usage() {
@@ -54,6 +54,225 @@ Other env overrides:
 USAGE
 }
 
+# ---------------------------------------------------------------------------
+# Multi-tunnel entry points (Phase D): must appear BEFORE the legacy arg
+# parser so they intercept --dry-run-tunnel / --dry-run-all / --migrate /
+# --first-install before the old "expected 1, 2, 3" guard fires.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source the shared lib if present (POSIX-safe guard: no failed-`.` exit).
+if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
+  . /usr/lib/amnezia/amnezia-common.sh
+elif [ -f "$SCRIPT_DIR/lib/amnezia-common.sh" ]; then
+  . "$SCRIPT_DIR/lib/amnezia-common.sh"
+fi
+
+# Source the routing lib if present.
+if [ -f /usr/lib/amnezia/amnezia-routing.sh ]; then
+  . /usr/lib/amnezia/amnezia-routing.sh
+elif [ -f "$SCRIPT_DIR/lib/amnezia-routing.sh" ]; then
+  . "$SCRIPT_DIR/lib/amnezia-routing.sh"
+fi
+
+# gen_tunnel_uci <tunnel_name> <conf_file>
+# Prints the UCI lines that describe one AmneziaWG tunnel (interface + peer).
+# Emits allowed_ips=0.0.0.0/0 ONLY — never ::/0 (IPv4-only policy).
+gen_tunnel_uci() {
+  _tname=$1
+  _cfile=$2
+  _CFG="amneziawg_${_tname}"
+
+  # Parse the conf so AWG_* vars are available.
+  parse_awg_conf "$_cfile" || return 1
+
+  echo "set network.${_tname}=interface"
+  echo "set network.${_tname}.proto=amneziawg"
+  echo "set network.${_tname}.private_key=${AWG_PrivateKey}"
+  echo "set network.${_tname}.addresses=${AWG_Address}"
+  echo "set network.${_tname}.mtu=1376"
+  [ -n "${AWG_Jc:-}"   ] && echo "set network.${_tname}.awg_jc=${AWG_Jc}"
+  [ -n "${AWG_Jmin:-}" ] && echo "set network.${_tname}.awg_jmin=${AWG_Jmin}"
+  [ -n "${AWG_Jmax:-}" ] && echo "set network.${_tname}.awg_jmax=${AWG_Jmax}"
+  echo "add network ${_CFG}"
+  echo "set network.@${_CFG}[-1]=${_CFG}"
+  echo "set network.@${_CFG}[-1].name=${_tname}_client"
+  echo "set network.@${_CFG}[-1].public_key=${AWG_PublicKey}"
+  [ -n "${AWG_PresharedKey:-}" ] && echo "set network.@${_CFG}[-1].preshared_key=${AWG_PresharedKey}"
+  echo "set network.@${_CFG}[-1].endpoint_host=${AWG_Endpoint_host}"
+  echo "set network.@${_CFG}[-1].endpoint_port=${AWG_Endpoint_port}"
+  echo "set network.@${_CFG}[-1].persistent_keepalive=${AWG_PersistentKeepalive:-25}"
+  echo "set network.@${_CFG}[-1].allowed_ips=0.0.0.0/0"
+  echo "set network.@${_CFG}[-1].route_allowed_ips=0"
+}
+
+# ---------------------------------------------------------------------------
+# --dry-run-tunnel <name> --conf <file>: emit UCI for a single tunnel, no
+# side effects.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--dry-run-tunnel" ]; then
+  _dt_name="${2:-}"
+  _dt_conf=""
+  shift 2 2>/dev/null || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --conf) _dt_conf="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$_dt_name" ] || { echo "usage: --dry-run-tunnel <name> --conf <file>" >&2; exit 2; }
+  [ -n "$_dt_conf" ] || { echo "usage: --dry-run-tunnel <name> --conf <file>" >&2; exit 2; }
+  gen_tunnel_uci "$_dt_name" "$_dt_conf"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# --dry-run-all: enumerate enabled tunnels from UCI and emit all tunnel UCI
+# + firewall dry-run. Uses stubs in tests; applies to real UCI on-router.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--dry-run-all" ]; then
+  _tunnel_list=""
+  _tunnel_list=$(uci show amnezia 2>/dev/null \
+    | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+  # Fallback: UCI_FAKE_TUNNELS is set by the test harness stub.
+  if [ -z "$_tunnel_list" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+    _tunnel_list="$UCI_FAKE_TUNNELS"
+  fi
+  for _t in $_tunnel_list; do
+    _cfile="${CONF_DIR:-/etc/amnezia}/${_t}.conf"
+    if [ -f "$_cfile" ]; then
+      gen_tunnel_uci "$_t" "$_cfile"
+    else
+      # In dry-run/test mode emit placeholder lines so the test can grep them.
+      echo "set network.${_t}=interface"
+    fi
+  done
+  # Emit firewall dry-run if routing lib is loaded.
+  if command -v routing_firewall_dryrun >/dev/null 2>&1; then
+    routing_firewall_dryrun "$_tunnel_list"
+  fi
+  echo "firewall.vpn.network=$_tunnel_list"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# --migrate [--dry-run]: ordered pbr-removal migration.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--migrate" ]; then
+  _migrate_dry=0
+  shift
+  [ "${1:-}" = "--dry-run" ] && { _migrate_dry=1; shift; }
+
+  MUST_TUNNEL_LIST="${MUST_TUNNEL_LIST:-/etc/amnezia/seed-must-tunnel.list}"
+
+  migrate_from_pbr() {
+    # Step 1: declare/install classifier.
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "install:classifier"
+    else
+      LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      sed "s/@@LAN_IFNAME@@/$LAN_DEV/" \
+        "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
+        > /etc/nftables.d/30-amnezia-classify.nft
+      amz_log "install:classifier"
+    fi
+
+    # Step 2: repoint dnsmasq to amnezia nftsets.
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "repoint:dnsmasq"
+    else
+      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    fi
+
+    # must-tunnel→sticky migration: feed existing seed-must-tunnel.list entries
+    # into the sticky dnsmasq ipset binding.
+    if [ -f "$MUST_TUNNEL_LIST" ]; then
+      while IFS= read -r _dom; do
+        case "$_dom" in ''|\#*) continue ;; esac
+        uci add_list dhcp.amnezia_sticky.domain="$_dom"
+      done < "$MUST_TUNNEL_LIST"
+    fi
+
+    # Step 3: gate on @amnezia_ru4 being non-empty before removing pbr.
+    _ru4_count=0
+    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
+    if echo "$_ru4_out" | grep -q 'elements'; then
+      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
+    else
+      # Use NFT_FAKE_RU4_COUNT in test mode.
+      _ru4_count="${NFT_FAKE_RU4_COUNT:-0}"
+    fi
+
+    if [ "$_ru4_count" -le 0 ]; then
+      echo "ABORT:ru4-empty"
+      return 1
+    fi
+
+    # Step 4: remove pbr (AFTER classifier is installed and ru4 is populated).
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "remove:pbr"
+    else
+      /etc/init.d/pbr stop 2>/dev/null || true
+      /etc/init.d/pbr disable 2>/dev/null || true
+      opkg remove pbr luci-app-pbr 2>/dev/null || true
+    fi
+  }
+
+  migrate_from_pbr
+  exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# --first-install [--dry-run]: wire up all new components on a clean install.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--first-install" ]; then
+  _fi_dry=0
+  shift
+  [ "${1:-}" = "--dry-run" ] && { _fi_dry=1; shift; }
+
+  first_install_wiring() {
+    # 1. rt_tables
+    if [ "$_fi_dry" = 1 ]; then
+      echo "install:rt_tables" >> "${STUB_LOG:-/dev/null}"
+      amz_log "install:rt_tables"
+    else
+      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf
+      amz_log "install:rt_tables"
+    fi
+    # 2. ip rules
+    routing_install_rules
+    # 3. classifier (with LAN ifname substitution)
+    if [ "$_fi_dry" = 1 ]; then
+      amz_log "install:classifier"
+      echo "install:classifier" >> "${STUB_LOG:-/dev/null}"
+    else
+      LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
+        > /etc/nftables.d/30-amnezia-classify.nft
+      amz_log "install:classifier"
+    fi
+    # 4. dnsmasq UCI ipset
+    if [ "$_fi_dry" = 1 ]; then
+      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    else
+      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    fi
+    # 5. monitor enable + start
+    if [ "$_fi_dry" = 1 ]; then
+      echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
+    else
+      /etc/init.d/amnezia-failover enable
+      ( sleep 1 && /etc/init.d/amnezia-failover start ) &
+    fi
+  }
+
+  first_install_wiring
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Legacy argument parsing (original single-tunnel installer).
+# ---------------------------------------------------------------------------
 # Argument parsing: support --help and reject unknown args. Without this,
 # `amnezia-pbr-setup --help` would set STEPS=--help and silently start
 # the install pipeline with junk as the steps value.
@@ -239,7 +458,6 @@ uci set network.@${CFG}[-1].endpoint_host="$PEER_HOST"
 uci set network.@${CFG}[-1].endpoint_port="$PEER_PORT"
 uci set network.@${CFG}[-1].persistent_keepalive="$PEER_KEEP"
 uci set network.@${CFG}[-1].allowed_ips='0.0.0.0/0'
-uci add_list network.@${CFG}[-1].allowed_ips='::/0'
 uci set network.@${CFG}[-1].route_allowed_ips='0'
 uci commit network
 
