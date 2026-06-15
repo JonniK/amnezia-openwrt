@@ -93,7 +93,7 @@ for _f in install-dnsmasq-full.sh configure-dnsmasq-amnezia.sh \
           zapret-apply.sh zapret-probe.sh zapret-verify.sh \
           seed-must-tunnel.list seed-sticky-domains.list install-zapret.sh \
           install-luci-app-amnezia.sh install-amnezia-pbr.sh \
-          awg-ru-update.sh awg-status.sh \
+          awg-ru-update.sh \
           amnezia-ru-cidr.sh amnezia-status.sh \
           amnezia-failover amnezia-failover.init amnezia-failover-ctl.sh \
           amnezia-ru-load.init 99-amnezia-ru-load.hotplug \
