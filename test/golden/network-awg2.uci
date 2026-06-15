@@ -1,0 +1,18 @@
+set network.awg2=interface
+set network.awg2.proto=amneziawg
+set network.awg2.private_key=DDD_priv2
+set network.awg2.addresses=10.9.0.2/24
+set network.awg2.mtu=1376
+set network.awg2.awg_jc=5
+set network.awg2.awg_jmin=50
+set network.awg2.awg_jmax=80
+add network amneziawg_awg2
+set network.@amneziawg_awg2[-1]=amneziawg_awg2
+set network.@amneziawg_awg2[-1].name=awg2_client
+set network.@amneziawg_awg2[-1].public_key=EEE_pub2
+set network.@amneziawg_awg2[-1].preshared_key=FFF_psk2
+set network.@amneziawg_awg2[-1].endpoint_host=vpn2.example.com
+set network.@amneziawg_awg2[-1].endpoint_port=51821
+set network.@amneziawg_awg2[-1].persistent_keepalive=25
+set network.@amneziawg_awg2[-1].allowed_ips=0.0.0.0/0
+set network.@amneziawg_awg2[-1].route_allowed_ips=0
