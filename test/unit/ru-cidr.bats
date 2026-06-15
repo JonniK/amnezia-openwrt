@@ -40,6 +40,21 @@ load '../lib/harness.bash'
   grep -q "/usr/bin/amnezia-ru-cidr" "$F"
   ! grep -q "/usr/sbin/amnezia-ru-cidr" "$F"
 }
+@test "_load_into_set skips non-CIDR lines and only passes valid IPv4 CIDRs to nft" {
+  # Source file contains one valid CIDR, one bare IP, and one shell-injection attempt.
+  printf '5.0.0.0/8\n10.0.0.1\n$(touch /tmp/ru-inject)\n31.0.0.0/16\n' \
+    > "$BATS_TEST_TMPDIR/mixed.zone"
+  RU_SRC="file://$BATS_TEST_TMPDIR/mixed.zone" \
+  RU_CIDR_PERSIST="$BATS_TEST_TMPDIR/ru.cidr" \
+    sh "$HARNESS_DIR/../openwrt/amnezia-ru-cidr.sh"
+  # Only valid CIDRs must appear in nft add element calls.
+  grep "nft add element inet fw4 amnezia_ru4" "$STUB_LOG" | grep -q "5.0.0.0/8"
+  grep "nft add element inet fw4 amnezia_ru4" "$STUB_LOG" | grep -q "31.0.0.0/16"
+  # No injection file must exist.
+  [ ! -f /tmp/ru-inject ]
+  # The bare IP (no slash) must not appear.
+  ! grep "nft add element" "$STUB_LOG" | grep -q "10.0.0.1,"
+}
 @test "does not overwrite persist file when nft add element fails" {
   # Provide a valid source but simulate nft failure via stub exit 1.
   printf '5.0.0.0/8\n' > "$BATS_TEST_TMPDIR/ru.zone"

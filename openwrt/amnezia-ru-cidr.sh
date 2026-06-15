@@ -28,7 +28,15 @@ _load_into_set() {
   nft flush set inet fw4 "$SET_RU4" 2>/dev/null || true
   _n=0; _buf=""
   while IFS= read -r _c; do
+    # Validate IPv4-CIDR shape: x.x.x.x/n — skip lines that don't match.
     case "$_c" in */*) ;; *) continue ;; esac
+    case "$_c" in
+      *[!0-9./]*) continue ;;   # reject anything containing non-numeric/dot/slash chars
+    esac
+    # Require exactly one slash and dotted-quad prefix.
+    _prefix="${_c%/*}"; _len="${_c##*/}"
+    case "$_prefix" in *.*.*.*) ;; *) continue ;; esac
+    case "$_len" in *[!0-9]*) continue ;; esac
     if [ -z "$_buf" ]; then _buf="$_c,"; else _buf="${_buf} ${_c},"; fi
     _n=$((_n+1))
     if [ "$_n" -ge 256 ]; then

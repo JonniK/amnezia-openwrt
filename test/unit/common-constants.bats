@@ -11,7 +11,4 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; }
   [ "$TBL_STICKY" = "100" ]
   [ "$TBL_POOL" = "101" ]
 }
-@test "member conntrack mark is low-byte and never collides with selector nibble" {
-  run member_ctmark 3
-  [ "$output" = "0x000003" ]
-}
+# member_ctmark() was removed (dead code — balance-mode per-member flush descoped).

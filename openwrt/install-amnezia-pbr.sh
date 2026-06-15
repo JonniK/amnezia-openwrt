@@ -224,12 +224,12 @@ if [ "${1:-}" = "--migrate" ]; then
       sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
     fi
 
-    # must-tunnel→sticky migration: idempotent — delete list before repopulating.
-    # configure-dnsmasq-amnezia.sh already deletes amnezia_sticky in the real path;
-    # in dry-run we do it explicitly so idempotency holds without the full script.
-    uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
-    if [ "$_migrate_dry" != 1 ]; then
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh" >/dev/null 2>&1 || true
+    # must-tunnel→sticky migration: append old must-tunnel domains to the sticky section
+    # that configure-dnsmasq-amnezia.sh already created above (no second call needed).
+    # In dry-run: delete amnezia_sticky explicitly so idempotency holds (the real path
+    # relies on configure-dnsmasq-amnezia.sh having already done the delete+recreate).
+    if [ "$_migrate_dry" = 1 ]; then
+      uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
     fi
     if [ -f "$MUST_TUNNEL_LIST" ]; then
       while IFS= read -r _dom; do

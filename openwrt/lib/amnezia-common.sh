@@ -13,9 +13,6 @@ export CONF_DIR=/etc/amnezia
 export RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
 export MAX_TUNNELS=5
 
-# Per-member conntrack mark (balance mode): low byte only, never the selector nibble.
-member_ctmark() { printf '0x%06x\n' "$1"; }
-
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
 
 # Parse an AmneziaWG client .conf into AWG_<Key> vars. Endpoint split into host/port.
