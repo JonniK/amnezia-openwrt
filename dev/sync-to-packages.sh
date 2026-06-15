@@ -30,6 +30,7 @@ mkdir -p \
 	"$PBR_PKG/etc/nftables.d" \
 	"$PBR_PKG/etc/iproute2/rt_tables.d" \
 	"$PBR_PKG/etc/init.d" \
+	"$PBR_PKG/etc/hotplug.d/firewall" \
 	"$PBR_PKG/etc/uci-defaults" \
 	"$LUCI_PKG/usr/share/luci/menu.d" \
 	"$LUCI_PKG/usr/share/rpcd/acl.d" \
@@ -79,9 +80,17 @@ cp "$SRC/iproute2-amnezia-rt_tables.conf" \
    "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
 chmod 0644 "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
 
-# procd init script
-cp "$SRC/amnezia-failover.init" "$PBR_PKG/etc/init.d/amnezia-failover"
-chmod 0755 "$PBR_PKG/etc/init.d/amnezia-failover"
+# procd init scripts
+cp "$SRC/amnezia-failover.init"  "$PBR_PKG/etc/init.d/amnezia-failover"
+cp "$SRC/amnezia-ru-load.init"   "$PBR_PKG/etc/init.d/amnezia-ru-load"
+chmod 0755 \
+	"$PBR_PKG/etc/init.d/amnezia-failover" \
+	"$PBR_PKG/etc/init.d/amnezia-ru-load"
+
+# firewall hotplug: repopulate amnezia_ru4 on every fw4 reload
+cp "$SRC/99-amnezia-ru-load.hotplug" \
+   "$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-ru-load"
+chmod 0755 "$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-ru-load"
 
 # Reference data and config.
 cp "$SRC/seed-must-tunnel.list"    "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
