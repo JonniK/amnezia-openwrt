@@ -304,14 +304,24 @@ if [ "${1:-}" = "--first-install" ]; then
         _fi_tunnels="$UCI_FAKE_TUNNELS"
       fi
       # Apply each enabled tunnel's network UCI and bring it up.
+      # Guard: validate parse_awg_conf succeeded (gen_tunnel_uci returns non-zero
+      # on incomplete conf) BEFORE piping to uci batch; on parse failure log and
+      # skip the tunnel so a malformed/truncated .conf never applies a partial UCI
+      # batch that leaves the config in an inconsistent state.
       for _tunnel in $_fi_tunnels; do
         _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
         if [ -f "$_tcf" ]; then
           gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
-          uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
-          rm -f /tmp/amnezia-tunnel-uci.$$
-          uci commit network 2>/dev/null || true
-          ifup "$_tunnel" 2>/dev/null || true
+          _gen_rc=$?
+          if [ "$_gen_rc" -ne 0 ]; then
+            amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
+            rm -f /tmp/amnezia-tunnel-uci.$$
+          else
+            uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+            rm -f /tmp/amnezia-tunnel-uci.$$
+            uci commit network 2>/dev/null || true
+            ifup "$_tunnel" 2>/dev/null || true
+          fi
         fi
       done
       [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"

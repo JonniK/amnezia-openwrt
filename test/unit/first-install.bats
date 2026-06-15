@@ -51,3 +51,20 @@ load '../lib/harness.bash'
   grep -q "ifup awg1" "$STUB_LOG"
   grep -q "ifup awg2" "$STUB_LOG"
 }
+@test "first-install skips uci batch and ifup for a tunnel with a malformed conf" {
+  # A .conf missing PrivateKey/PublicKey must cause gen_tunnel_uci to fail;
+  # the installer must skip uci batch and ifup for that tunnel only.
+  # A sibling tunnel with a valid conf must still be applied.
+  _conf_dir="$BATS_TEST_TMPDIR/confs"
+  mkdir -p "$_conf_dir"
+  cp "$HARNESS_DIR/../test/fixtures/awg-sample.conf"  "$_conf_dir/awg1.conf"
+  cp "$HARNESS_DIR/../test/fixtures/awg-malformed.conf" "$_conf_dir/awg2.conf"
+  CONF_DIR="$_conf_dir" UCI_FAKE_TUNNELS="awg1 awg2" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  # Valid tunnel (awg1) must be applied and brought up.
+  grep -q "ifup awg1" "$STUB_LOG"
+  # Malformed tunnel (awg2) must NOT be applied or brought up.
+  ! grep -q "ifup awg2" "$STUB_LOG"
+  # Only one uci batch call (for awg1), not two.
+  [ "$(grep -c "^uci batch" "$STUB_LOG")" -eq 1 ]
+}
