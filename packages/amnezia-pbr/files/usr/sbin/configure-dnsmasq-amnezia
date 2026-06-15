@@ -6,6 +6,13 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 STICKY_LIST="${STICKY_LIST:-$SCRIPT_DIR/seed-sticky-domains.list}"
 
+if command -v opkg >/dev/null 2>&1; then
+  if ! opkg list-installed 2>/dev/null | grep -q '^dnsmasq-full '; then
+    echo "NOTE: dnsmasq-full missing — amnezia nftset domain bypass disabled." >&2
+    exit 0
+  fi
+fi
+
 # RU TLD -> amnezia_ru_tld4
 uci -q delete dhcp.amnezia_ru_tld 2>/dev/null || true
 uci set dhcp.amnezia_ru_tld='ipset'

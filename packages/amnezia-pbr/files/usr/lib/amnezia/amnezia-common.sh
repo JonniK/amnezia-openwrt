@@ -13,14 +13,18 @@ export CONF_DIR=/etc/amnezia
 export RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
 export MAX_TUNNELS=5
 
-# Per-member conntrack mark (balance mode): low byte only, never the selector nibble.
-member_ctmark() { printf '0x%06x\n' "$1"; }
-
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
 
 # Parse an AmneziaWG client .conf into AWG_<Key> vars. Endpoint split into host/port.
 parse_awg_conf() {
   _f=$1; [ -f "$_f" ] || { amz_log "conf missing: $_f"; return 1; }
+  # Clear all optional fields so a PSK-bearing conf never leaks into a PSK-less one.
+  AWG_PrivateKey=""; AWG_Address=""; AWG_Jc=""; AWG_Jmin=""; AWG_Jmax=""
+  AWG_S1=""; AWG_S2=""; AWG_S3=""; AWG_S4=""
+  AWG_H1=""; AWG_H2=""; AWG_H3=""; AWG_H4=""
+  AWG_I1=""; AWG_I2=""; AWG_I3=""; AWG_I4=""; AWG_I5=""
+  AWG_PublicKey=""; AWG_PresharedKey=""; AWG_Endpoint_host=""; AWG_Endpoint_port=""
+  AWG_PersistentKeepalive=""
   _sec=""
   while IFS= read -r _line; do
     _line=$(printf '%s' "$_line" | tr -d '\r')
@@ -33,6 +37,15 @@ parse_awg_conf() {
     _k=$(printf '%s' "${_line%%=*}" | tr -d ' \t')
     _v=$(printf '%s' "${_line#*=}" | sed 's/^[ \t]*//; s/[ \t]*$//')
     [ -n "$_sec" ] || continue
+    # Allowlist: only known AmneziaWG/WireGuard keys are accepted.
+    # Any key not on this list is silently skipped to prevent command
+    # injection via eval with attacker-controlled key names.
+    case "$_k" in
+      PrivateKey|PublicKey|PresharedKey|Address|Endpoint|\
+PersistentKeepalive|Jc|Jmin|Jmax|S1|S2|S3|S4|\
+H1|H2|H3|H4|I1|I2|I3|I4|I5) ;;
+      *) continue ;;
+    esac
     if [ "$_k" = Endpoint ]; then
       # shellcheck disable=SC2034  # Set for caller inspection after parse_awg_conf.
       AWG_Endpoint_host=${_v%:*}; AWG_Endpoint_port=${_v##*:}

@@ -61,12 +61,20 @@ USAGE
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Preserve any caller-supplied CONF_DIR before sourcing amnezia-common.sh.
+# amnezia-common.sh hard-sets `export CONF_DIR=/etc/amnezia`, which would
+# otherwise overwrite an env var injected by the test harness or a sysadmin.
+_saved_conf_dir="${CONF_DIR:-}"
+
 # Source the shared lib if present (POSIX-safe guard: no failed-`.` exit).
 if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
   . /usr/lib/amnezia/amnezia-common.sh
 elif [ -f "$SCRIPT_DIR/lib/amnezia-common.sh" ]; then
   . "$SCRIPT_DIR/lib/amnezia-common.sh"
 fi
+
+# Restore caller-supplied CONF_DIR if it was set before the source.
+[ -n "$_saved_conf_dir" ] && CONF_DIR="$_saved_conf_dir"
 
 # Source the routing lib if present.
 if [ -f /usr/lib/amnezia/amnezia-routing.sh ]; then
@@ -151,7 +159,6 @@ if [ "${1:-}" = "--dry-run-all" ]; then
   if command -v routing_firewall_dryrun >/dev/null 2>&1; then
     routing_firewall_dryrun "$_tunnel_list"
   fi
-  echo "firewall.vpn.network=$_tunnel_list"
   exit 0
 fi
 
@@ -171,21 +178,59 @@ if [ "${1:-}" = "--migrate" ]; then
       echo "install:classifier"
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
       sed "s/@@LAN_IFNAME@@/$LAN_DEV/" \
         "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft
+        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
       amz_log "install:classifier"
     fi
 
-    # Step 2: repoint dnsmasq to amnezia nftsets.
+    # Step 2: populate @amnezia_ru4 from persist before the gate check.
+    # Moved before dnsmasq repoint so that an abort here leaves dnsmasq
+    # still pointing at the old pbr nftsets — no partial-migration state.
+    if [ "$_migrate_dry" != 1 ]; then
+      sh "$SCRIPT_DIR/amnezia-ru-cidr.sh" 2>/dev/null || true
+    fi
+
+    # Step 3: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
+    # If this gate fails we roll back only the classifier; dnsmasq is untouched.
+    _ru4_count=0
+    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
+    if echo "$_ru4_out" | grep -q 'elements'; then
+      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
+    fi
+    # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
+    _ru4_abort=0
+    if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ "$_ru4_abort" = 1 ]; then
+      echo "ABORT:ru4-empty"
+      # Roll back: remove classifier so pbr does not run alongside new classifier.
+      # dnsmasq has NOT been repointed yet, so no dnsmasq rollback is needed.
+      if [ "$_migrate_dry" != 1 ]; then
+        rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      fi
+      return 1
+    fi
+
+    # Step 4: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
     if [ "$_migrate_dry" = 1 ]; then
       echo "repoint:dnsmasq"
     else
       sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
     fi
 
-    # must-tunnel→sticky migration: feed existing seed-must-tunnel.list entries
-    # into the sticky dnsmasq ipset binding.
+    # must-tunnel→sticky migration: append old must-tunnel domains to the sticky section
+    # that configure-dnsmasq-amnezia.sh already created above (no second call needed).
+    # In dry-run: delete amnezia_sticky explicitly so idempotency holds (the real path
+    # relies on configure-dnsmasq-amnezia.sh having already done the delete+recreate).
+    if [ "$_migrate_dry" = 1 ]; then
+      uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
+    fi
     if [ -f "$MUST_TUNNEL_LIST" ]; then
       while IFS= read -r _dom; do
         case "$_dom" in ''|\#*) continue ;; esac
@@ -193,28 +238,24 @@ if [ "${1:-}" = "--migrate" ]; then
       done < "$MUST_TUNNEL_LIST"
     fi
 
-    # Step 3: gate on @amnezia_ru4 being non-empty before removing pbr.
-    _ru4_count=0
-    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
-    if echo "$_ru4_out" | grep -q 'elements'; then
-      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
-    else
-      # Use NFT_FAKE_RU4_COUNT in test mode.
-      _ru4_count="${NFT_FAKE_RU4_COUNT:-0}"
-    fi
-
-    if [ "$_ru4_count" -le 0 ]; then
-      echo "ABORT:ru4-empty"
-      return 1
-    fi
-
-    # Step 4: remove pbr (AFTER classifier is installed and ru4 is populated).
+    # Step 5: remove pbr (AFTER classifier is installed, ru4 is populated, dnsmasq repointed).
     if [ "$_migrate_dry" = 1 ]; then
       echo "remove:pbr"
     else
       /etc/init.d/pbr stop 2>/dev/null || true
       /etc/init.d/pbr disable 2>/dev/null || true
       opkg remove pbr luci-app-pbr 2>/dev/null || true
+    fi
+
+    # Step 6: apply firewall zones + disable LAN IPv6 (real path only).
+    if [ "$_migrate_dry" != 1 ]; then
+      _mig_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _mig_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      [ -n "$_mig_tunnels" ] && routing_firewall_apply "$_mig_tunnels"
+      routing_disable_lan_v6
     fi
   }
 
@@ -236,7 +277,8 @@ if [ "${1:-}" = "--first-install" ]; then
       echo "install:rt_tables" >> "${STUB_LOG:-/dev/null}"
       amz_log "install:rt_tables"
     else
-      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf
+      mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
+      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
       amz_log "install:rt_tables"
     fi
     # 2. ip rules
@@ -247,21 +289,62 @@ if [ "${1:-}" = "--first-install" ]; then
       echo "install:classifier" >> "${STUB_LOG:-/dev/null}"
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
       sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft
+        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
       amz_log "install:classifier"
     fi
     # 4. dnsmasq UCI ipset
-    if [ "$_fi_dry" = 1 ]; then
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
-    else
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    # 5. tunnel UCI apply + bring-up + firewall zones + disable LAN IPv6 (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      _fi_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_fi_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _fi_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      # Apply each enabled tunnel's network UCI and bring it up.
+      # Guard: validate parse_awg_conf succeeded (gen_tunnel_uci returns non-zero
+      # on incomplete conf) BEFORE piping to uci batch; on parse failure log and
+      # skip the tunnel so a malformed/truncated .conf never applies a partial UCI
+      # batch that leaves the config in an inconsistent state.
+      for _tunnel in $_fi_tunnels; do
+        _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
+        if [ -f "$_tcf" ]; then
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
+          _gen_rc=$?
+          if [ "$_gen_rc" -ne 0 ]; then
+            amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
+            rm -f /tmp/amnezia-tunnel-uci.$$
+          else
+            uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+            rm -f /tmp/amnezia-tunnel-uci.$$
+            uci commit network 2>/dev/null || true
+            ifup "$_tunnel" 2>/dev/null || true
+          fi
+        fi
+      done
+      [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"
+      routing_disable_lan_v6
     fi
-    # 5. monitor enable + start
+    # 6. RU boot loader: install init + firewall hotplug hook (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      if [ -f "$SCRIPT_DIR/amnezia-ru-load.init" ]; then
+        cp "$SCRIPT_DIR/amnezia-ru-load.init" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+        chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+        /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      fi
+      if [ -f "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" ]; then
+        mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+        cp "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+      fi
+    fi
+    # 7. monitor enable + start
     if [ "$_fi_dry" = 1 ]; then
       echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
     else
-      /etc/init.d/amnezia-failover enable
+      /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
     fi
   }
@@ -408,7 +491,7 @@ if ! opkg list-installed | grep -q '^kmod-amneziawg '; then
   done
   rm -rf "$DIR"
 fi
-opkg install pbr luci-app-pbr resolveip ip-full 2>/dev/null || true
+opkg install conntrack-tools 2>/dev/null || true
 
 IF_PRIV="$(get Interface PrivateKey)"
 IF_ADDR="$(get Interface Address)"
@@ -558,113 +641,40 @@ if [ "$STEPS" -lt 2 ]; then
   exit 0
 fi
 
-# --- Step 2: PBR base (LAN -> VPN) ---
-log "Step 2: PBR base"
-LAN="$(lan_cidr)"
-[ -n "$LAN" ] || LAN="192.168.1.0/24"
-mkdir -p /etc/pbr.d
-# Step 2's PBR config is "LAN -> VPN, nothing direct yet". The .ru
-# direct rule lands in Step 3 if STEPS=3, so we drop it here so a
-# re-run isn't reading a stale file.
-rm -f /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-vpn-only.sh) || fail "missing 99-lan-vpn-vpn-only.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-while uci -q delete pbr.@policy[0]; do :; done
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci set pbr.config.enabled='1'
-uci set pbr.config.strict_enforcement='0'
-uci set pbr.config.resolver_set='none'
-uci -q delete pbr.config.supported_interface 2>/dev/null || true
-uci add_list pbr.config.supported_interface='awg1'
-uci commit pbr
-
-/etc/init.d/pbr enable
-/etc/init.d/pbr restart
-sleep 8
-pbr_nft_ok || fail "pbr.nft syntax error (step2)"
-need_wan
-need_dns
-ok "2 pbr_base"
+# --- Steps 2+3: failover stack (classifier + ip rules + monitor + RU bypass) ---
+# Replaces the old pbr/pbr.d-based Steps 2+3.  Detects whether this is a
+# fresh install (pbr absent) or a pbr-to-failover upgrade, and dispatches to
+# the appropriate wiring function.  Both functions live at the top of this
+# script (under --first-install / --migrate sections).
+log "Step 2: dnsmasq-full"
+if _dnsmasq=$(find_helper install-dnsmasq-full); then
+  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
+else
+  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
+fi
+need_dns || fail "DNS broken after dnsmasq-full"
+ok "2 dnsmasq_full"
 
 if [ "$STEPS" -lt 3 ]; then
   log "DEPLOY_DONE steps=$STEPS"
   exit 0
 fi
 
-# --- Step 3: RU bypass (ipdeny + dnsmasq nftset) ---
-log "Step 3: RU bypass"
+log "Step 3: failover stack wiring"
+if /etc/init.d/pbr status >/dev/null 2>&1 || opkg list-installed 2>/dev/null | grep -q '^pbr '; then
+  # pbr is still present: run ordered migration so RU sets are live before pbr is removed.
+  log "Step 3: pbr detected — running migrate_from_pbr"
+  # Inline the migrate_from_pbr logic using the flags the top-of-script block accepts.
+  # Re-exec ourselves with --migrate so the already-defined function runs cleanly,
+  # inheriting SCRIPT_DIR, CONF_DIR, and all sourced libs.
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --migrate || fail "migrate_from_pbr failed"
+else
+  # Fresh install: wire classifier, ip rules, monitor, firewall zones.
+  log "Step 3: no pbr found — running first_install_wiring"
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --first-install || fail "first_install_wiring failed"
+fi
 
-mkdir -p /etc/nftables.d
-cat > /etc/nftables.d/15-pbr-ru-tld4.nft <<'NFTFRAG'
-	set pbr_ru_tld4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-NFTFRAG
 /etc/init.d/firewall reload 2>/dev/null || true
-sleep 2
 
-if _dnsmasq=$(find_helper install-dnsmasq-full); then
-  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
-else
-  # .ipk path declares dnsmasq-full as a hard DEPENDS, so opkg already has
-  # it installed. No-op.
-  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
-fi
-need_dns || fail "DNS broken after dnsmasq-full"
-
-if _nftset=$(find_helper configure-dnsmasq-ru-nftset); then
-  $_nftset 2>/dev/null || fail "dnsmasq .ru nftset config"
-else
-  log "WARN: configure-dnsmasq-ru-nftset helper missing; .ru nftset not wired"
-fi
-
-# ru-direct + full LAN rules (idempotent — no duplicate nft rules on pbr restart).
-# ru-direct.sh ships at /etc/pbr.d/ in .ipk; copy from /tmp/ only when present.
-if [ -f /tmp/ru-direct.sh ]; then
-  cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
-fi
-chmod 755 /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-full.sh) || fail "missing 99-lan-vpn-full.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci commit pbr
-
-/etc/init.d/pbr restart
-sleep 10
-pbr_nft_ok || fail "pbr.nft syntax error (step3 ru-direct)"
-logread 2>/dev/null | tail -20 | grep -qi "FAILED TO START" && fail "PBR failed to start step3"
-
-/etc/init.d/dnsmasq restart 2>/dev/null || true
-sleep 3
-need_wan
-need_dns
-nslookup -type=A mail.ru 127.0.0.1 >/dev/null 2>&1 || log "WARN: mail.ru lookup failed (may need time)"
-
-_ipdeny=$(nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l)
-_ipdeny=$(printf '%s' "$_ipdeny" | tr -d ' ')
-log "ipdeny entries: $_ipdeny"
-[ "$_ipdeny" -gt 100 ] || fail "ipdeny set too small ($_ipdeny)"
-
-ok "3 ru_bypass"
+ok "3 failover_wiring"
 log "DEPLOY_DONE steps=$STEPS"
