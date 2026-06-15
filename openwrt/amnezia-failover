@@ -203,19 +203,21 @@ run_loop() {
   # OpenWrt 24.10 must be confirmed in the Tier-3 hardware spike; "network.interface"
   # is the canonical netifd event bus object.  Periodic polling remains the fallback.
   _trigger="$ST_DIR/immediate"
-  # Spawn the listener in its own process group (setsid) so that killing the
-  # subshell PID also delivers SIGTERM to the child "ubus listen" process.
-  # BusyBox kill on just the subshell PID does not automatically reap its exec'd
-  # child, but killing the process group (-$_ubus_pid) does.
-  (
+  # Spawn the listener in a new session via setsid so that it gets its own
+  # process group (PGID == PID of the setsid'd subshell).  When the cleanup
+  # trap fires, `kill -- "-${_ubus_pid}"` delivers SIGTERM to that entire
+  # process group, which includes the child "ubus listen" process even if the
+  # subshell exec'd away.  Without setsid, the subshell inherits the daemon's
+  # PGID and process-group kill would deliver SIGTERM to the daemon itself.
+  setsid sh -c '
+    _trig=$1
     while true; do
-      ubus listen network.interface 2>/dev/null | while IFS= read -r _evt; do
-        touch "$_trigger"
+      ubus listen network.interface 2>/dev/null | while IFS= read -r _e; do
+        touch "$_trig"
       done
-      # Listener exited (ubus unavailable or restarted); brief pause before re-arm.
       sleep 2
     done
-  ) &
+  ' -- "$_trigger" &
   _ubus_pid=$!
 
   # ── cleanup trap ─────────────────────────────────────────────────────────────

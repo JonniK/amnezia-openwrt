@@ -81,6 +81,11 @@ setup() {
 @test "daemon kill of listener uses process-group kill (covers ubus listen child)" {
   grep -q 'kill -- "-\${_ubus_pid}"' "$HARNESS_DIR/../openwrt/amnezia-failover"
 }
+@test "listener is spawned with setsid so process-group kill actually works" {
+  # Without setsid the listener inherits the daemon's PGID; kill -- -PID would
+  # deliver SIGTERM to the daemon itself rather than the listener subtree.
+  grep -q 'setsid' "$HARNESS_DIR/../openwrt/amnezia-failover"
+}
 
 @test "two tunnels sharing track_ip each get a distinct probe route bound to their own dev" {
   # Both awg1 and awg2 use 1.1.1.1 as track_ip — the classic collision scenario.
