@@ -7,7 +7,7 @@ load '../lib/harness.bash'
   # rt_tables
   grep -q "install:rt_tables" "$STUB_LOG"
   # ip rules
-  grep -q "ip rule add fwmark" "$STUB_LOG"
+  grep -q "ip rule add pref" "$STUB_LOG"
   # monitor enabled
   grep -q "/etc/init.d/amnezia-failover enable" "$STUB_LOG"
   # classifier installed

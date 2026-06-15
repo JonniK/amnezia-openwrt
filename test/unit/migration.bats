@@ -100,8 +100,8 @@ load '../lib/harness.bash'
   grep -q "install:rt_tables" "$STUB_LOG" \
     || { echo "FAIL: install:rt_tables not found in STUB_LOG"; false; }
   # ip rules installed (routing_install_rules calls ip rule add)
-  grep -q "ip rule add fwmark" "$STUB_LOG" \
-    || { echo "FAIL: ip rule add fwmark not found — routing_install_rules not called"; false; }
+  grep -q "ip rule add pref" "$STUB_LOG" \
+    || { echo "FAIL: ip rule add pref not found — routing_install_rules not called"; false; }
   # Fail-closed blackhole routes installed
   grep -q "ip route replace blackhole default table" "$STUB_LOG" \
     || { echo "FAIL: fail-closed blackhole routes not installed"; false; }

@@ -37,7 +37,7 @@ load '../lib/harness.bash'
     run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install --dry-run
   # New stack markers must be present.
   grep -q "install:rt_tables"                    "$STUB_LOG"
-  grep -q "ip rule add fwmark"                   "$STUB_LOG"
+  grep -q "ip rule add pref"                      "$STUB_LOG"
   grep -q "/etc/init.d/amnezia-failover enable"  "$STUB_LOG"
   grep -q "install:classifier"                   "$STUB_LOG"
 }

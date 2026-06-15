@@ -5,6 +5,11 @@ export POOL_MARK=0x0B0000
 export MARK_MASK=0x0FF0000
 export TBL_STICKY=100
 export TBL_POOL=101
+# ip rule priorities — deliberately ABOVE pbr's cleanup range (pbr deletes priorities
+# <= uplink_ip_rules_priority, default 30000) and BELOW the main-table fallback (32766),
+# so a pbr teardown during migrate never removes our rules.
+export RULE_PREF_STICKY=31000
+export RULE_PREF_POOL=31001
 export SET_RU4=amnezia_ru4
 export SET_RU_TLD4=amnezia_ru_tld4
 export SET_STICKY4=amnezia_sticky4

@@ -52,7 +52,7 @@ setup_staging() {
     run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
   [ "$status" -eq 0 ]
   grep -q "install:rt_tables"               "$STUB_LOG"
-  grep -q "ip rule add fwmark"              "$STUB_LOG"
+  grep -q "ip rule add pref"                "$STUB_LOG"
   grep -q "install:classifier"              "$STUB_LOG"
   # firewall zone apply must have been called (routing_firewall_apply stub output)
   grep -q "uci set firewall.vpn=zone"       "$STUB_LOG"

@@ -4,8 +4,8 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; . "$HARNESS_DIR/../
 
 @test "install_ip_rules adds masked fwmark rules for both tables" {
   routing_install_rules
-  grep -q "ip rule add fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG"
-  grep -q "ip rule add fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG"
+  grep -q "ip rule add pref 31000 fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG"
+  grep -q "ip rule add pref 31001 fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG"
 }
 @test "install is idempotent: no duplicate add when stub emits real kernel form" {
   # IP_FAKE_RULE_EXISTS shortcut bypasses _rule_exists entirely; instead we
@@ -49,7 +49,41 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; . "$HARNESS_DIR/../
 }
 @test "routing_remove_rules uses lowercase marks matching kernel form" {
   routing_remove_rules
-  # del must use lowercase marks so they match what the kernel installed.
-  grep -q "ip rule del fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG"
-  grep -q "ip rule del fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG"
+  # del must use lowercase marks and explicit pref so removal is precise.
+  grep -q "ip rule del pref 31000 fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG"
+  grep -q "ip rule del pref 31001 fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG"
+}
+
+# REGRESSION GUARD: explicit pref above pbr's cleanup range.
+# pbr's cleanup loop deletes ip rules by priority in [uplink_ip_rules_priority-max .. uplink_ip_rules_priority]
+# (default top = 30000). Rules installed WITHOUT an explicit pref get auto-assigned adjacent to pbr's
+# rules and fall inside that range, so pbr's stop wipes them during migrate → WAN leak.
+# Fix: install with pref 31000/31001 (above 30000, below main-table fallback 32766).
+@test "install_ip_rules uses explicit pref ABOVE pbr cleanup range (> 30000) and BELOW main fallback (< 32766)" {
+  routing_install_rules
+  # Must see pref on the sticky rule
+  grep -q "ip rule add pref [0-9]* fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG" \
+    || grep -q "ip rule add.*pref [0-9].*fwmark 0x0a0000" "$STUB_LOG" \
+    || { echo "FAIL: no pref on sticky rule add"; cat "$STUB_LOG"; false; }
+  # Must see pref on the pool rule
+  grep -q "ip rule add pref [0-9]* fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG" \
+    || grep -q "ip rule add.*pref [0-9].*fwmark 0x0b0000" "$STUB_LOG" \
+    || { echo "FAIL: no pref on pool rule add"; cat "$STUB_LOG"; false; }
+  # Extract the actual pref values and assert > 30000 and < 32766
+  _sticky_pref=$(grep "ip rule add.*fwmark 0x0a0000" "$STUB_LOG" | grep -o 'pref [0-9]*' | awk '{print $2}')
+  _pool_pref=$(grep "ip rule add.*fwmark 0x0b0000" "$STUB_LOG" | grep -o 'pref [0-9]*' | awk '{print $2}')
+  [ -n "$_sticky_pref" ] || { echo "FAIL: could not extract sticky pref"; false; }
+  [ -n "$_pool_pref" ]   || { echo "FAIL: could not extract pool pref"; false; }
+  [ "$_sticky_pref" -gt 30000 ] || { echo "FAIL: sticky pref $_sticky_pref not > 30000 (pbr cleanup range)"; false; }
+  [ "$_pool_pref"   -gt 30000 ] || { echo "FAIL: pool pref $_pool_pref not > 30000 (pbr cleanup range)"; false; }
+  [ "$_sticky_pref" -lt 32766 ] || { echo "FAIL: sticky pref $_sticky_pref not < 32766 (main fallback)"; false; }
+  [ "$_pool_pref"   -lt 32766 ] || { echo "FAIL: pool pref $_pool_pref not < 32766 (main fallback)"; false; }
+}
+
+@test "routing_remove_rules uses explicit pref matching install — removes precisely" {
+  routing_remove_rules
+  grep -q "ip rule del pref $RULE_PREF_STICKY fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG" \
+    || { echo "FAIL: remove didn't use explicit pref $RULE_PREF_STICKY"; cat "$STUB_LOG"; false; }
+  grep -q "ip rule del pref $RULE_PREF_POOL fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG" \
+    || { echo "FAIL: remove didn't use explicit pref $RULE_PREF_POOL"; cat "$STUB_LOG"; false; }
 }

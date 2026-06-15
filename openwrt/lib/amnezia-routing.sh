@@ -23,13 +23,13 @@ _rule_exists() {  # $1 mark/mask string (e.g. 0x0a0000/0x0ff0000)
 }
 routing_install_rules() {
   _sm=$(_lc "$STICKY_MARK"); _pm=$(_lc "$POOL_MARK"); _mm=$(_lc "$MARK_MASK")
-  _rule_exists "$_sm/$_mm" || ip rule add fwmark "$_sm/$_mm" lookup "$TBL_STICKY"
-  _rule_exists "$_pm/$_mm" || ip rule add fwmark "$_pm/$_mm" lookup "$TBL_POOL"
+  _rule_exists "$_sm/$_mm" || ip rule add pref "$RULE_PREF_STICKY" fwmark "$_sm/$_mm" lookup "$TBL_STICKY"
+  _rule_exists "$_pm/$_mm" || ip rule add pref "$RULE_PREF_POOL"   fwmark "$_pm/$_mm" lookup "$TBL_POOL"
 }
 routing_remove_rules() {
   _sm=$(_lc "$STICKY_MARK"); _pm=$(_lc "$POOL_MARK"); _mm=$(_lc "$MARK_MASK")
-  ip rule del fwmark "$_sm/$_mm" lookup "$TBL_STICKY" 2>/dev/null
-  ip rule del fwmark "$_pm/$_mm" lookup "$TBL_POOL" 2>/dev/null
+  ip rule del pref "$RULE_PREF_STICKY" fwmark "$_sm/$_mm" lookup "$TBL_STICKY" 2>/dev/null
+  ip rule del pref "$RULE_PREF_POOL"   fwmark "$_pm/$_mm" lookup "$TBL_POOL"   2>/dev/null
 }
 # $1 = dev (empty -> blackhole). Fail-closed.
 routing_set_pool_default() {
