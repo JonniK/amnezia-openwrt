@@ -24,3 +24,13 @@ config amnezia 'config'
 	# preserved across re-runs only if user has not overridden routing_mode.
 	option installed_version 'main'
 	option installed_ts ''
+
+config globals 'globals'
+	option mode 'failover'
+	option sticky_target 'awg1'
+
+config tunnel 'awg1'
+	option enabled '1'
+	option label 'Primary'
+	option metric '1'
+	option weight '1'
