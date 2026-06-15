@@ -295,11 +295,9 @@ if [ "${1:-}" = "--first-install" ]; then
       for _tunnel in $_fi_tunnels; do
         _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
         if [ -f "$_tcf" ]; then
-          gen_tunnel_uci "$_tunnel" "$_tcf" | while IFS= read -r _ucl; do
-            uci "${_ucl#set }" 2>/dev/null || uci batch <<EOF
-$_ucl
-EOF
-          done
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
+          uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+          rm -f /tmp/amnezia-tunnel-uci.$$
           uci commit network 2>/dev/null || true
           ifup "$_tunnel" 2>/dev/null || true
         fi
