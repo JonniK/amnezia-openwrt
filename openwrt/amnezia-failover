@@ -15,7 +15,7 @@ else
   . "$(dirname "$0")/lib/amnezia-routing.sh"
 fi
 
-PROBE_TBL=110
+PROBE_TBL_BASE=110
 HS_STALE=150
 ST_DIR=${ST_DIR:-/tmp/amnezia-fo}
 DEBOUNCE_N=3
@@ -31,20 +31,40 @@ handshake_fresh() {  # $1 iface
   [ $(( _now - _hs )) -lt "$HS_STALE" ]
 }
 
-# Called once at startup per tunnel. Sets up a persistent probe route + idempotent rule.
-# Idempotency is tracked via a local state file so we don't rely on 'ip rule show' output.
-probe_setup() {  # $1 iface $2 target_ip
-  ip route replace "$2" dev "$1" table "$PROBE_TBL" 2>/dev/null
-  _pf="$ST_DIR/probe_rule_$2"
+# Called once at startup per tunnel. Sets up a persistent probe route + per-tunnel rule.
+# Each tunnel gets its own routing table (PROBE_TBL_BASE + awgN index) and its ip rule
+# is keyed by the tunnel's source address, so tunnels sharing the same track_ip each
+# get an independent, correctly-bound probe path regardless of shared target.
+# Idempotency is tracked via a per-iface state file (not per-target) so two tunnels
+# with the same track_ip do not overwrite each other's rule marker.
+probe_setup() {  # $1 iface $2 target_ip $3 probe_tbl
+  _tbl=$3
+  ip route replace "$2" dev "$1" table "$_tbl" 2>/dev/null
+  _pf="$ST_DIR/probe_rule_$1"
   if [ ! -f "$_pf" ]; then
-    ip rule add to "$2" lookup "$PROBE_TBL" 2>/dev/null && touch "$_pf"
+    # Use the tunnel's own source address as the ip rule selector so that pings
+    # bound to this iface (which use this source addr) look up the per-tunnel table,
+    # not a shared "to <target>" rule that only the first tunnel would win.
+    _src=$(ip -4 addr show dev "$1" 2>/dev/null \
+      | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
+    if [ -n "$_src" ]; then
+      ip rule add from "$_src" lookup "$_tbl" 2>/dev/null && touch "$_pf"
+    else
+      # Interface not yet up (no address assigned). No rule is installed; the
+      # handshake-freshness check remains the primary health signal until the
+      # tunnel comes up and probe_setup is re-called on the next daemon start.
+      touch "$_pf"
+    fi
   fi
 }
 
-probe_cleanup() {  # $1 iface $2 target_ip
-  ip rule del to "$2" lookup "$PROBE_TBL" 2>/dev/null
-  ip route del "$2" table "$PROBE_TBL" 2>/dev/null
-  rm -f "$ST_DIR/probe_rule_$2"
+probe_cleanup() {  # $1 iface $2 target_ip $3 probe_tbl
+  _tbl=$3
+  _src=$(ip -4 addr show dev "$1" 2>/dev/null \
+    | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
+  [ -n "$_src" ] && ip rule del from "$_src" lookup "$_tbl" 2>/dev/null
+  ip route del "$2" table "$_tbl" 2>/dev/null
+  rm -f "$ST_DIR/probe_rule_$1"
 }
 
 ping_via() {  # $1 iface $2 target; returns 0 when reachable.
@@ -159,7 +179,11 @@ run_loop() {
       _w=$(uci -q get "amnezia.${_tun}.weight" 2>/dev/null || echo 1)
       _track=$(uci -q get "amnezia.${_tun}.track_ip" 2>/dev/null || echo "1.1.1.1")
       MEMBERS="$MEMBERS ${_tun}:${_met}:${_w}"
-      probe_setup "$_tun" "$_track"
+      # Each awgN gets a dedicated probe table: PROBE_TBL_BASE + (N-1).
+      # awg1 -> 110, awg2 -> 111, ..., awg5 -> 114.  Unique tables guarantee
+      # that tunnels sharing the same track_ip each get an independent probe route.
+      _probe_tbl=$(( PROBE_TBL_BASE + _i - 1 ))
+      probe_setup "$_tun" "$_track" "$_probe_tbl"
       # Preserve debounce state across daemon restarts so a tunnel confirmed down
       # does not require a fresh 3-sample reconvergence (~30s) on every ctl mutation.
       # Only seed "up 0" if no prior state file exists.
@@ -206,9 +230,13 @@ run_loop() {
     # PID kill.  Silence errors in case the process already exited.
     kill -- "-${_ubus_pid}" 2>/dev/null || kill -- "$_ubus_pid" 2>/dev/null
     # Free the per-member probe route + ip rule that probe_setup installed.
+    # Recompute each tunnel's probe table id (PROBE_TBL_BASE + awgN index - 1)
+    # to match what probe_setup used at startup.
     for _m in $MEMBERS; do _n=${_m%%:*}
       _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
-      probe_cleanup "$_n" "$_track"
+      _ni=${_n#awg}
+      _probe_tbl=$(( PROBE_TBL_BASE + _ni - 1 ))
+      probe_cleanup "$_n" "$_track" "$_probe_tbl"
     done
     amz_log "failover daemon stopped"
     exit 0

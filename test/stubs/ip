@@ -9,8 +9,16 @@ case "$*" in
     [ "${IP_NEXTHOP_OK:-0}" = 1 ] && exit 0 || exit 1 ;;
   "-j route show table vpn_pool"|"-j route show table 101")
     printf '%s\n' "${IP_FAKE_ROUTE:-[]}" ;;
-  "rule show"*"to "*"lookup 110")
-    # IP_FAKE_PROBE_RULE: set to 1 if probe rule already exists
-    [ "${IP_FAKE_PROBE_RULE:-0}" = 1 ] && printf 'to 1.1.1.1 lookup 110\n' ;;
+  "-4 addr show dev awg1")
+    # Return a fake per-tunnel source address so probe_setup can key ip rules by src.
+    printf '2: awg1: <POINTOPOINT,UP>\n    inet 10.100.1.2/24 scope global awg1\n' ;;
+  "-4 addr show dev awg2")
+    printf '3: awg2: <POINTOPOINT,UP>\n    inet 10.100.2.2/24 scope global awg2\n' ;;
+  "-4 addr show dev awg3")
+    printf '4: awg3: <POINTOPOINT,UP>\n    inet 10.100.3.2/24 scope global awg3\n' ;;
+  "-4 addr show dev awg4")
+    printf '5: awg4: <POINTOPOINT,UP>\n    inet 10.100.4.2/24 scope global awg4\n' ;;
+  "-4 addr show dev awg5")
+    printf '6: awg5: <POINTOPOINT,UP>\n    inet 10.100.5.2/24 scope global awg5\n' ;;
 esac
 exit 0
