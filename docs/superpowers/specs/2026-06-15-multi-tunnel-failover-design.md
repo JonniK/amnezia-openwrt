@@ -315,6 +315,13 @@ not just the spike.
 - Tunneling router-originated DNS — dnsmasq upstream stays router-sourced via main→wan,
   **unchanged from today** (stated so the omission is a decision, not an oversight).
 - Auto-import of configs (QR / remote) — user pastes `.conf` as today.
+- **Per-member surgical conntrack flush in balance mode** — when a member
+  departs from a balance-group, v1 relies on the resilient nexthop group's
+  `idle_timer` + bucket reassignment to migrate flows rather than actively
+  flushing the dead member's conntrack entries.  A targeted flush would
+  require a classifier that stamps per-member low-byte ctmarks (design §8
+  reserves the low nibble) and a separate flush loop keyed on those marks;
+  that is deferred until the per-member mark classifier is implemented.
 - Replacing `zapret`.
 
 ## Sources
