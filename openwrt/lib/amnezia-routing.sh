@@ -1,9 +1,17 @@
 # Routing-table / ip-rule management. Sourced; depends on amnezia-common.sh.
 # Normalise a hex constant to lowercase (POSIX awk, BusyBox-safe).
 _lc() { printf '%s' "$1" | awk '{print tolower($0)}'; }
-_rule_exists() {  # $1 mark (lowercase fwmark/mask string)
+# Normalise a mark/mask pair so the mask has no extra leading zeros, matching
+# what the kernel emits (e.g. 0x0ff0000 -> 0xff0000, mark 0x0a0000 unchanged).
+# sed: replace /0x0 only when followed by a non-zero hex digit through end-of-string.
+_norm_mask() {
+  printf '%s' "$1" | sed 's|/0x0\([1-9a-fA-F]\)|/0x\1|g' | awk '{print tolower($0)}'
+}
+_rule_exists() {  # $1 mark/mask string (e.g. 0x0a0000/0x0ff0000)
   [ "${IP_FAKE_RULE_EXISTS:-0}" = 1 ] && return 0
-  ip rule show 2>/dev/null | grep -q "fwmark $1"
+  # Accept both kernel form (0xff0000) and our form (0x0ff0000) in the grep pattern.
+  _lc1=$(_lc "$1"); _lc2=$(_norm_mask "$1")
+  ip rule show 2>/dev/null | grep -qE "fwmark ${_lc1}|fwmark ${_lc2}"
 }
 routing_install_rules() {
   _sm=$(_lc "$STICKY_MARK"); _pm=$(_lc "$POOL_MARK"); _mm=$(_lc "$MARK_MASK")
@@ -11,8 +19,9 @@ routing_install_rules() {
   _rule_exists "$_pm/$_mm" || ip rule add fwmark "$_pm/$_mm" lookup "$TBL_POOL"
 }
 routing_remove_rules() {
-  ip rule del fwmark "$STICKY_MARK/$MARK_MASK" lookup "$TBL_STICKY" 2>/dev/null
-  ip rule del fwmark "$POOL_MARK/$MARK_MASK" lookup "$TBL_POOL" 2>/dev/null
+  _sm=$(_lc "$STICKY_MARK"); _pm=$(_lc "$POOL_MARK"); _mm=$(_lc "$MARK_MASK")
+  ip rule del fwmark "$_sm/$_mm" lookup "$TBL_STICKY" 2>/dev/null
+  ip rule del fwmark "$_pm/$_mm" lookup "$TBL_POOL" 2>/dev/null
 }
 # $1 = dev (empty -> blackhole). Fail-closed.
 routing_set_pool_default() {
