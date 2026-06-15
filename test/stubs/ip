@@ -2,7 +2,9 @@
 echo "ip $*" >> "${STUB_LOG:-/dev/null}"
 case "$*" in
   "rule show"*)
-    [ "${IP_FAKE_RULE_EXISTS:-0}" = 1 ] && printf 'fwmark 0x0a0000/0xff0000 lookup 100\nfwmark 0x0b0000/0xff0000 lookup 101\n' ;;
+    # Emit real kernel form: %#x strips leading zeros from the mark.
+    # 0x0a0000 -> 0xa0000, 0x0b0000 -> 0xb0000.  Mask 0x0ff0000 -> 0xff0000.
+    [ "${IP_FAKE_RULE_EXISTS:-0}" = 1 ] && printf 'fwmark 0xa0000/0xff0000 lookup 100\nfwmark 0xb0000/0xff0000 lookup 101\n' ;;
   "nexthop help")
     [ "${IP_NEXTHOP_OK:-0}" = 1 ] && exit 0 || exit 1 ;;
   "-j route show table vpn_pool"|"-j route show table 101")

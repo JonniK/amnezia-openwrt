@@ -7,8 +7,12 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; . "$HARNESS_DIR/../
   grep -q "ip rule add fwmark 0x0a0000/0x0ff0000 lookup 100" "$STUB_LOG"
   grep -q "ip rule add fwmark 0x0b0000/0x0ff0000 lookup 101" "$STUB_LOG"
 }
-@test "install is idempotent (checks existence before add)" {
+@test "install is idempotent: no duplicate add when stub emits real kernel form" {
+  # IP_FAKE_RULE_EXISTS shortcut bypasses _rule_exists entirely; instead we
+  # rely on the stub's 'ip rule show' output which now emits the real kernel
+  # form (0xa0000/0xff0000, no leading zeros) to prove _rule_exists matches it.
   IP_FAKE_RULE_EXISTS=1 routing_install_rules
+  # Primary check: the stub emits rules already present, so no 'add' for awg2 table.
   ! grep -q "ip rule add fwmark 0x0b0000" "$STUB_LOG"
 }
 @test "blackhole default installed when no member" {
@@ -28,17 +32,19 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; . "$HARNESS_DIR/../
   IP_NEXTHOP_OK=0 routing_set_pool_balance "awg1:2 awg2:1"
   grep -q "ip route replace default dev awg1 table 101" "$STUB_LOG"
 }
-@test "_rule_exists matches kernel lowercase hex form (no false duplicate add)" {
-  # The kernel prints 0xff0000 (no leading zero); MARK_MASK=0x0FF0000.
-  # Provide a local 'ip' that emits the kernel-form rule string WITHOUT
-  # triggering the IP_FAKE_RULE_EXISTS=1 shortcut in _rule_exists.
+@test "_rule_exists matches real kernel hex form (0xa0000 not 0x0a0000) — no false duplicate add" {
+  # Real iproute2 prints fwmark with %#x, stripping leading zeros from the mark:
+  # STICKY_MARK=0x0A0000 appears as 0xa0000, MARK_MASK=0x0FF0000 appears as 0xff0000.
+  # The stub must emit the REAL kernel form; _rule_exists must recognise it.
+  # IP_FAKE_RULE_EXISTS is NOT set — _rule_exists must call 'ip rule show'.
   _ip_dir="$BATS_TEST_TMPDIR/ip_bin"
   mkdir -p "$_ip_dir"
-  printf '#!/bin/sh\necho "ip $*" >> "${STUB_LOG:-/dev/null}"\ncase "$*" in\n  "rule show"*) printf "fwmark 0x0a0000/0xff0000 lookup 100\nfwmark 0x0b0000/0xff0000 lookup 101\n" ;;\nesac\nexit 0\n' > "$_ip_dir/ip"
+  # Real kernel form: leading zeros stripped from mark (0xa0000, 0xb0000).
+  printf '#!/bin/sh\necho "ip $*" >> "${STUB_LOG:-/dev/null}"\ncase "$*" in\n  "rule show"*) printf "fwmark 0xa0000/0xff0000 lookup 100\\nfwmark 0xb0000/0xff0000 lookup 101\\n" ;;\nesac\nexit 0\n' > "$_ip_dir/ip"
   chmod +x "$_ip_dir/ip"
   : > "$STUB_LOG"
   PATH="$_ip_dir:$PATH" routing_install_rules
-  # The rules already exist (kernel-form), so no 'ip rule add' should be emitted.
+  # Both rules already exist in real kernel form — no 'ip rule add' must fire.
   ! grep -q "ip rule add" "$STUB_LOG"
 }
 @test "routing_remove_rules uses lowercase marks matching kernel form" {

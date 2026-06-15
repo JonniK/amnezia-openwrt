@@ -1,17 +1,25 @@
 # Routing-table / ip-rule management. Sourced; depends on amnezia-common.sh.
 # Normalise a hex constant to lowercase (POSIX awk, BusyBox-safe).
 _lc() { printf '%s' "$1" | awk '{print tolower($0)}'; }
-# Normalise a mark/mask pair so the mask has no extra leading zeros, matching
-# what the kernel emits (e.g. 0x0ff0000 -> 0xff0000, mark 0x0a0000 unchanged).
-# sed: replace /0x0 only when followed by a non-zero hex digit through end-of-string.
-_norm_mask() {
-  printf '%s' "$1" | sed 's|/0x0\([1-9a-fA-F]\)|/0x\1|g' | awk '{print tolower($0)}'
+# Build a leading-zero-tolerant ERE pattern for a hex value like 0x0a0000.
+# The kernel prints fwmark with %#x (stripping leading zeros), so 0x0a0000
+# becomes 0xa0000.  We produce "0x0*a0000" which matches both forms.
+_hex_pat() {
+  printf '%s' "$1" | awk '{
+    s = tolower($0)
+    prefix = substr(s, 1, 2)   # "0x"
+    rest   = substr(s, 3)
+    gsub(/^0+/, "", rest)
+    print prefix "0*" rest
+  }'
 }
 _rule_exists() {  # $1 mark/mask string (e.g. 0x0a0000/0x0ff0000)
   [ "${IP_FAKE_RULE_EXISTS:-0}" = 1 ] && return 0
-  # Accept both kernel form (0xff0000) and our form (0x0ff0000) in the grep pattern.
-  _lc1=$(_lc "$1"); _lc2=$(_norm_mask "$1")
-  ip rule show 2>/dev/null | grep -qE "fwmark ${_lc1}|fwmark ${_lc2}"
+  # Split mark/mask, build a leading-zero-tolerant pattern for each field.
+  # Matches kernel form (0xa0000/0xff0000) AND our form (0x0a0000/0x0ff0000).
+  _mark_s="${1%%/*}"; _mask_s="${1##*/}"
+  _mp=$(_hex_pat "$_mark_s"); _mskp=$(_hex_pat "$_mask_s")
+  ip rule show 2>/dev/null | grep -qE "fwmark ${_mp}/${_mskp}"
 }
 routing_install_rules() {
   _sm=$(_lc "$STICKY_MARK"); _pm=$(_lc "$POOL_MARK"); _mm=$(_lc "$MARK_MASK")
