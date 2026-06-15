@@ -1,13 +1,20 @@
 #!/bin/sh
-# Bring a freshly-booted OpenWrt armsr VM to the pbr pre-state (Tier 1 regression
-# testing: dummy tunnels, no real crypto, no secrets).
+# Bring a freshly-booted OpenWrt armsr VM to a pre-state for Tier 1 regression
+# testing (dummy tunnels, no real crypto, no secrets).
 #
-# Run AFTER run-vm.sh has booted the VM. Drives:
+# Usage:
+#   provision.sh                  default: pbr pre-state (for migrate test)
+#   provision.sh --first-install  clean no-pbr state (for first_install test)
+#   PROVISION_MODE=first-install provision.sh   (env-flag equivalent)
+#
+# Drives:
 #   a) Serial console bootstrap (WAN DHCP + SSH key injection) until SSH works.
 #      Skipped automatically if SSH already responds (idempotent on re-run).
-#   b) opkg installs over SSH (pbr, dnsmasq-full, ip-full, etc.).
-#   c) Dummy tunnel interfaces (awg1, awg2) + /etc/config/amnezia pbr pre-state.
-#   d) Active pbr policy (real ip rules so pbr teardown is genuine).
+#   b) opkg installs over SSH. In pbr mode: installs pbr + all deps.
+#      In first-install mode: installs all deps EXCEPT pbr.
+#   c) Dummy tunnel interfaces (awg1, awg2) + /etc/config/amnezia config.
+#   d) [pbr mode only] Active pbr policy with simulated ip rules.
+#      [first-install mode] Skipped entirely — no pbr, no pbr ip rules.
 #   e) Push the repo's openwrt/ tree into the VM at /root/cutover.
 #
 # Idempotent where possible: re-running is safe.
@@ -20,10 +27,20 @@ set -eu
 
 VM_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
+# ── mode flag ────────────────────────────────────────────────────────────────
+# Parse --first-install flag OR PROVISION_MODE env var.
+# Default: pbr mode (migrate pre-state).
+PROVISION_MODE="${PROVISION_MODE:-pbr}"
+for _a in "$@"; do
+  case "$_a" in
+    --first-install) PROVISION_MODE=first-install ;;
+  esac
+done
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-log() { echo "[provision] $*"; }
-die() { echo "[provision] FATAL: $*" >&2; exit 1; }
+log() { echo "[provision:${PROVISION_MODE}] $*"; }
+die() { echo "[provision:${PROVISION_MODE}] FATAL: $*" >&2; exit 1; }
 
 ssh_run() {
   # shellcheck disable=SC2086
@@ -172,10 +189,14 @@ log "=== Phase B: opkg installs ==="
 
 ssh_run "opkg update 2>&1 | tail -3" || log "WARN: opkg update failed (non-fatal if cache fresh)"
 
-log "installing pbr (for the migrate pre-state)"
-# FIRST_BOOT_TWEAK: if pbr is not in the default feeds, you may need to add a
-# custom feed. For 24.10.3, pbr is in the packages feed (should be present).
-ssh_run "opkg install pbr 2>&1 || true"
+if [ "$PROVISION_MODE" = "pbr" ]; then
+  log "installing pbr (for the migrate pre-state)"
+  # FIRST_BOOT_TWEAK: if pbr is not in the default feeds, you may need to add a
+  # custom feed. For 24.10.3, pbr is in the packages feed (should be present).
+  ssh_run "opkg install pbr 2>&1 || true"
+else
+  log "SKIPPING pbr install (first-install mode: no pbr pre-state)"
+fi
 
 log "installing dnsmasq-full (replaces dnsmasq; required for nftset support)"
 # dnsmasq-full conflicts with dnsmasq; opkg remove dnsmasq first if needed.
@@ -296,95 +317,102 @@ UCI_EOF
 log "verifying /etc/config/amnezia"
 ssh_run "uci show amnezia"
 
-# Set up a minimal pbr rule so 'pbr status' shows it as doing something.
-ssh_run "mkdir -p /etc/pbr.d 2>/dev/null || true"
+# pbr-mode only: set up /etc/pbr.d stub and the amnezia_block_quic rule.
+if [ "$PROVISION_MODE" = "pbr" ]; then
+  # Set up a minimal pbr rule so 'pbr status' shows it as doing something.
+  ssh_run "mkdir -p /etc/pbr.d 2>/dev/null || true"
 
-# Add the amnezia_block_quic firewall rule (the migrate must NOT touch this).
-# This is the negative-space test (assertion F).
-log "adding amnezia_block_quic firewall rule (must survive migrate)"
-ssh_run "
-  uci set firewall.amnezia_block_quic=rule
-  uci set firewall.amnezia_block_quic.name='amnezia-block-quic'
-  uci set firewall.amnezia_block_quic.src=lan
-  uci set firewall.amnezia_block_quic.dest=wan
-  uci set firewall.amnezia_block_quic.proto=udp
-  uci set firewall.amnezia_block_quic.dest_port='443'
-  uci set firewall.amnezia_block_quic.target=REJECT
-  uci commit firewall
-"
-log "verifying amnezia_block_quic"
-ssh_run "uci show firewall.amnezia_block_quic"
+  # Add the amnezia_block_quic firewall rule (the migrate must NOT touch this).
+  # This is the negative-space test (assertion F).
+  log "adding amnezia_block_quic firewall rule (must survive migrate)"
+  ssh_run "
+    uci set firewall.amnezia_block_quic=rule
+    uci set firewall.amnezia_block_quic.name='amnezia-block-quic'
+    uci set firewall.amnezia_block_quic.src=lan
+    uci set firewall.amnezia_block_quic.dest=wan
+    uci set firewall.amnezia_block_quic.proto=udp
+    uci set firewall.amnezia_block_quic.dest_port='443'
+    uci set firewall.amnezia_block_quic.target=REJECT
+    uci commit firewall
+  "
+  log "verifying amnezia_block_quic"
+  ssh_run "uci show firewall.amnezia_block_quic"
+fi
 
-# ── d) Activate pbr with real policy routing ──────────────────────────────────
-# Goal 2 requirement: pbr must be GENUINELY ACTIVE with its own ip rules so that
-# its teardown in the migrate is a real test of whether OUR fwmark rules survive.
-# A pbr that never installed ip rules would be a trivial teardown — we need pbr
-# to have installed its own rules that we can watch disappear.
-#
-# pbr on OpenWrt uses nft sets + ip rules. We give it a minimal valid policy:
-#   - a 'lan' source + 'awg1' interface so pbr steers LAN traffic via awg1.
-# After pbr start, we verify pbr's own ip rules are present (priorities ~3000-30999).
-# These ip rules are captured and stored for the test-migrate.sh E2 assertion.
+# ── d) Activate pbr with real policy routing (pbr mode only) ─────────────────
+if [ "$PROVISION_MODE" = "pbr" ]; then
+  # Goal 2 requirement: pbr must be GENUINELY ACTIVE with its own ip rules so that
+  # its teardown in the migrate is a real test of whether OUR fwmark rules survive.
+  # A pbr that never installed ip rules would be a trivial teardown — we need pbr
+  # to have installed its own rules that we can watch disappear.
+  #
+  # pbr on OpenWrt uses nft sets + ip rules. We give it a minimal valid policy:
+  #   - a 'lan' source + 'awg1' interface so pbr steers LAN traffic via awg1.
+  # After pbr start, we verify pbr's own ip rules are present (priorities ~3000-30999).
+  # These ip rules are captured and stored for the test-migrate.sh E2 assertion.
 
-log "=== Phase D: activate pbr with real policy routing ==="
+  log "=== Phase D: activate pbr with real policy routing ==="
 
-log "enabling and starting pbr (basic, without active policy)"
-# Note: pbr 1.2.2-r14 on armsr does NOT install ip rules for a 'static' proto
-# interface (it requires proto=wireguard/openvpn/etc. for tunnel detection, and
-# the awg1 dummy does not have a real WG kernel module). pbr also fails to create
-# its nft file because /usr/share/nftables.d/ruleset-post/ is absent in the base
-# image. As a result, pbr's start succeeds (finds WAN uplink) but installs zero
-# ip rules and zero nft chains.
-#
-# This means pbr's teardown at migrate step 14 (pbr stop + opkg remove) is a
-# no-op for ip rules — it cannot remove rules it never installed.
-#
-# To test the REAL teardown scenario (pbr's cleanup code vs. our fwmark rules),
-# we manually install ip rules in pbr's priority range (29745–30000) to simulate
-# what pbr WOULD have installed if its interface detection had worked. pbr's
-# stop_service cleanup() removes rules in that priority range by design.
-# Then we verify our fwmark rules (at the kernel-default priority ~32765) survive.
-#
-# This is the correct simulation of the hardware failure scenario.
-ssh_run "/etc/init.d/pbr enable 2>/dev/null || true"
-ssh_run "/etc/init.d/pbr start 2>/dev/null || true; sleep 3"
-ssh_run "/etc/init.d/pbr status 2>/dev/null | head -5; echo '---'"
+  log "enabling and starting pbr (basic, without active policy)"
+  # Note: pbr 1.2.2-r14 on armsr does NOT install ip rules for a 'static' proto
+  # interface (it requires proto=wireguard/openvpn/etc. for tunnel detection, and
+  # the awg1 dummy does not have a real WG kernel module). pbr also fails to create
+  # its nft file because /usr/share/nftables.d/ruleset-post/ is absent in the base
+  # image. As a result, pbr's start succeeds (finds WAN uplink) but installs zero
+  # ip rules and zero nft chains.
+  #
+  # This means pbr's teardown at migrate step 14 (pbr stop + opkg remove) is a
+  # no-op for ip rules — it cannot remove rules it never installed.
+  #
+  # To test the REAL teardown scenario (pbr's cleanup code vs. our fwmark rules),
+  # we manually install ip rules in pbr's priority range (29745–30000) to simulate
+  # what pbr WOULD have installed if its interface detection had worked. pbr's
+  # stop_service cleanup() removes rules in that priority range by design.
+  # Then we verify our fwmark rules (at the kernel-default priority ~32765) survive.
+  #
+  # This is the correct simulation of the hardware failure scenario.
+  ssh_run "/etc/init.d/pbr enable 2>/dev/null || true"
+  ssh_run "/etc/init.d/pbr start 2>/dev/null || true; sleep 3"
+  ssh_run "/etc/init.d/pbr status 2>/dev/null | head -5; echo '---'"
 
-log "installing simulated pbr ip rules (pbr priority range 29800-30000)"
-# pbr's cleanup removes rules with priorities in [uplink_ip_rules_priority - max_ifaces,
-# uplink_ip_rules_priority] = [29745, 30000] with fw_mask=0xff0000, uplink_mark=0x010000.
-# We install rules in that range to simulate pbr's real ip rules.
-# These are at priorities 29800 and 29999 (within pbr's range).
-ssh_run "
-  # Add a fake 'uplink routing' rule in pbr's priority range.
-  # pbr typically adds: fwmark <ifaceMark>/<fw_mask> lookup pbr_<iface>
-  # We add rules that look like pbr installed them.
-  ip rule add fwmark 0x010000/0xff0000 lookup main priority 30000 2>/dev/null || true
-  ip rule add fwmark 0x020000/0xff0000 lookup main priority 29999 2>/dev/null || true
-  echo 'Simulated pbr ip rules installed'
-  ip rule show
-"
+  log "installing simulated pbr ip rules (pbr priority range 29800-30000)"
+  # pbr's cleanup removes rules with priorities in [uplink_ip_rules_priority - max_ifaces,
+  # uplink_ip_rules_priority] = [29745, 30000] with fw_mask=0xff0000, uplink_mark=0x010000.
+  # We install rules in that range to simulate pbr's real ip rules.
+  # These are at priorities 29800 and 29999 (within pbr's range).
+  ssh_run "
+    # Add a fake 'uplink routing' rule in pbr's priority range.
+    # pbr typically adds: fwmark <ifaceMark>/<fw_mask> lookup pbr_<iface>
+    # We add rules that look like pbr installed them.
+    ip rule add fwmark 0x010000/0xff0000 lookup main priority 30000 2>/dev/null || true
+    ip rule add fwmark 0x020000/0xff0000 lookup main priority 29999 2>/dev/null || true
+    echo 'Simulated pbr ip rules installed'
+    ip rule show
+  "
 
-log "capturing pbr ip rules BEFORE migrate (stored in /tmp/pbr_rules_before.txt)"
-ssh_run "
-  ip rule show > /tmp/pbr_rules_before.txt
-  echo '=== ip rule show BEFORE migrate ==='
-  cat /tmp/pbr_rules_before.txt
-"
+  log "capturing pbr ip rules BEFORE migrate (stored in /tmp/pbr_rules_before.txt)"
+  ssh_run "
+    ip rule show > /tmp/pbr_rules_before.txt
+    echo '=== ip rule show BEFORE migrate ==='
+    cat /tmp/pbr_rules_before.txt
+  "
 
-# Identify which priorities pbr installed (pbr uses priorities in ~3000-30999 range).
-# We capture these so test-migrate.sh can verify they are gone AFTER pbr removal.
-log "extracting pbr rule priorities"
-ssh_run "
-  # pbr installs rules at priorities not used by the kernel default (0=local,32766=main,32767=default).
-  # Filter out the standard kernel rules to find what pbr added.
-  # Use awk instead of grep -v to avoid non-zero exit when all lines match.
-  ip rule show | awk -F: '\$1 != 0 && \$1 != 32766 && \$1 != 32767 {print}' > /tmp/pbr_own_rules.txt
-  echo '=== pbr own rules (non-kernel priorities) ==='
-  cat /tmp/pbr_own_rules.txt || echo '(none)'
-  _count=\$(wc -l < /tmp/pbr_own_rules.txt | tr -d ' ')
-  echo '=== count: '"'"'\${_count}'"'"' ==='
-"
+  # Identify which priorities pbr installed (pbr uses priorities in ~3000-30999 range).
+  # We capture these so test-migrate.sh can verify they are gone AFTER pbr removal.
+  log "extracting pbr rule priorities"
+  ssh_run "
+    # pbr installs rules at priorities not used by the kernel default (0=local,32766=main,32767=default).
+    # Filter out the standard kernel rules to find what pbr added.
+    # Use awk instead of grep -v to avoid non-zero exit when all lines match.
+    ip rule show | awk -F: '\$1 != 0 && \$1 != 32766 && \$1 != 32767 {print}' > /tmp/pbr_own_rules.txt
+    echo '=== pbr own rules (non-kernel priorities) ==='
+    cat /tmp/pbr_own_rules.txt || echo '(none)'
+    _count=\$(wc -l < /tmp/pbr_own_rules.txt | tr -d ' ')
+    echo '=== count: '"'"'\${_count}'"'"' ==='
+  "
+else
+  log "=== Phase D: SKIPPED (first-install mode — no pbr) ==="
+fi
 
 # ── e) Push repo's openwrt/ tree to VM ───────────────────────────────────────
 log "=== Phase E: push openwrt/ tree to VM at /root/cutover ==="
@@ -424,14 +452,20 @@ ssh_run "chmod +x /root/cutover/install-amnezia-pbr.sh 2>/dev/null || true"
 ssh_run "chmod +x /root/cutover/amnezia-failover 2>/dev/null || true"
 ssh_run "chmod +x /root/cutover/*.sh 2>/dev/null || true"
 
-log "=== Provision complete ==="
+log "=== Provision complete (mode: ${PROVISION_MODE}) ==="
 log "VM is ready for test-migrate.sh or test-first-install.sh"
 log ""
 log "Quick sanity:"
 ssh_run "ip link show awg1; ip link show awg2"
 ssh_run "uci -q get amnezia.globals.mode"
-ssh_run "/etc/init.d/pbr status 2>/dev/null && echo 'pbr: running' || echo 'pbr: not running (check FIRST_BOOT_TWEAK)'"
-log "ip rules at end of provision (pbr should have its own rules installed):"
-ssh_run "ip rule show"
-log "pbr own rules (non-kernel priorities, should be non-empty for a genuine teardown test):"
-ssh_run "cat /tmp/pbr_own_rules.txt 2>/dev/null || echo '(not captured — pbr may not have installed rules)'"
+if [ "$PROVISION_MODE" = "pbr" ]; then
+  ssh_run "/etc/init.d/pbr status 2>/dev/null && echo 'pbr: running' || echo 'pbr: not running (check FIRST_BOOT_TWEAK)'"
+  log "ip rules at end of provision (pbr should have its own rules installed):"
+  ssh_run "ip rule show"
+  log "pbr own rules (non-kernel priorities, should be non-empty for a genuine teardown test):"
+  ssh_run "cat /tmp/pbr_own_rules.txt 2>/dev/null || echo '(not captured — pbr may not have installed rules)'"
+else
+  log "pbr NOT installed (first-install mode) -- verifying:"
+  ssh_run "opkg list-installed 2>/dev/null | grep '^pbr ' && echo 'WARN: pbr unexpectedly present' || echo 'OK: pbr absent'"
+  ssh_run "ip rule show"
+fi

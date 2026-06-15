@@ -111,40 +111,35 @@ if [ -z "$_pbr_before" ]; then
   # This is a test setup warning, not a pass (it means Goal 2 wasn't met).
   assert_fail "E2" "pbr installed NO non-kernel ip rules before migrate — pre-state was trivial (Goal 2 not achieved; pbr may not have had a working policy)"
 else
-  # Count simulated pbr rules that survived.
-  _survived_count=0
-  while IFS= read -r _rule; do
-    [ -z "$_rule" ] && continue
-    _prio=$(echo "$_rule" | awk -F: '{print $1}' | tr -d ' ')
-    if echo "$_rules_after" | grep -qE "^[[:space:]]*${_prio}:"; then
-      _survived_count=$((_survived_count + 1))
+  # VM NOTE: pbr 1.2.2-r14 in the armsr VM does NOT install live nft state
+  # (no WireGuard kmod → pbr detects no tunnel interfaces → installs no nft
+  # chains → stop_service returns early without running cleanup 'main_table').
+  # Therefore the simulated pbr rules we planted (29999/30000) survive pbr stop —
+  # this is a KNOWN VM HARNESS ARTIFACT, not a real-world defect.
+  #
+  # The defect-prevention check for REAL hardware is different:
+  #   - pbr stop WOULD run cleanup 'main_table' on real hardware
+  #   - cleanup deletes ALL ip rules in priority range [29745, 30000]
+  #   - fix(routing) commit 32942f7 moved our fwmark rules to 31000/31001:
+  #     ABOVE pbr's cleanup range → pbr stop can never touch them
+  #   - We verify this directly: assert our rules land at prio > 30000.
+  #
+  # Check E2: our amnezia fwmark rules must be at pref > 30000 (safe zone).
+  # This is the real regression guard; the simulated pbr rules surviving is moot.
+  _sticky_prio=$(echo "$_rules_after" | awk '/fwmark.*0x0*a0000\/0x0*ff0000/{print $1}' | tr -d ': ')
+  _pool_prio=$(echo "$_rules_after" | awk '/fwmark.*0x0*b0000\/0x0*ff0000/{print $1}' | tr -d ': ')
+  _pbr_cleanup_max=30000
+  _e2_pass=1
+  if [ -z "$_sticky_prio" ] || [ -z "$_pool_prio" ]; then
+    assert_fail "E2" "could not determine fwmark rule priorities from ip rule show — rules missing?"
+    _e2_pass=0
+  fi
+  if [ "$_e2_pass" = 1 ]; then
+    if [ "$_sticky_prio" -gt "$_pbr_cleanup_max" ] && [ "$_pool_prio" -gt "$_pbr_cleanup_max" ]; then
+      assert_pass "E2" "amnezia fwmark rules at pref $_sticky_prio (sticky) and $_pool_prio (pool) — both above pbr cleanup range (29745-30000); pbr teardown cannot remove them"
+    else
+      assert_fail "E2" "amnezia fwmark rules at pref $_sticky_prio (sticky) / $_pool_prio (pool) — one or both are WITHIN pbr cleanup range (<=30000); pbr stop on real hardware would delete them"
     fi
-  done << PBRRULES
-$_pbr_before
-PBRRULES
-  _pbr_count=$(echo "$_pbr_before" | grep -c '[^[:space:]]' || true)
-
-  # VM NOTE: The simulated pbr rules (priorities 29999/30000) survive in the VM
-  # because pbr 1.2.2-r14 did NOT actually install nft state (no WireGuard kernel
-  # module → pbr starts but detects no tunnel interfaces → installs no nft chains
-  # → stop_service returns early without running cleanup 'main_table').
-  #
-  # On real hardware with a fully-active pbr:
-  # - stop_service DOES run cleanup 'main_table' (pbr has live nft state)
-  # - cleanup deletes ALL ip rules in priority range [29745, 30000]
-  # - Our routing_install_rules (step 6) places rules at 29997/29998 (adjacent
-  #   to pbr's rules at ~30000) — WITHIN pbr's cleanup range
-  # - Therefore pbr stop (step 14) WOULD delete our fwmark rules too
-  #
-  # This IS the second installer defect (matches the hardware failure).
-  # The surviving simulated rules in E2 are a VM artifact, not an installer pass.
-  if [ "$_survived_count" -eq 0 ]; then
-    assert_pass "E2" "all $_pbr_count pbr-installed ip rules are gone after pbr removal"
-  else
-    # E2 FAIL: Simulated pbr rules survived because pbr's stop returned early (no live state).
-    # On real hardware with live pbr state, pbr stop WOULD clean up priority range 29745-30000,
-    # which includes our fwmark rules at 29997/29998 — this is the confirmed second defect.
-    assert_fail "E2-vm-artifact" "$_survived_count of $_pbr_count simulated pbr rules survived (expected: pbr stop returned early — no live state in VM). ON REAL HARDWARE this means pbr cleanup would also delete our fwmark rules at 29997/29998. SECOND DEFECT CONFIRMED via code analysis."
   fi
 fi
 
@@ -154,23 +149,21 @@ vm_run "cat /tmp/pbr_rules_before.txt 2>/dev/null || echo '(not found)'" 2>/dev/
 log "E2 detail: ip rules AFTER migrate:"
 vm_run "ip rule show 2>/dev/null" 2>/dev/null || true
 
-# E2-simulation: run pbr cleanup logic against post-migrate ip rules to prove the defect.
-log "E2 simulation: rules pbr cleanup WOULD DELETE on real hardware (priority range 29745-30000)"
+# E2-info: show pbr cleanup range and what it would touch (informational, not an assertion).
+log "E2 info: pbr cleanup range 29745-30000 vs our fwmark rules (rules within range shown)"
 vm_run "
-  uplink_ip_rules_priority=30000
-  fw_mask=16711680
-  uplink_mark=65536
-  max_ifaces=\$((fw_mask / uplink_mark))
-  prio_max=\$uplink_ip_rules_priority
-  prio_min=\$((uplink_ip_rules_priority - max_ifaces))
+  prio_max=30000
+  prio_min=29745
   echo \"pbr cleanup range: priorities \$prio_min to \$prio_max\"
+  echo \"--- post-migrate ip rules in that range (amnezia rules should NOT appear): ---\"
   ip -4 rule show | while IFS= read -r line; do
     prio=\"\${line%%:*}\"
     prio=\$(echo \"\$prio\" | tr -d ' ')
     if [ \"\$prio\" -ge \"\$prio_min\" ] 2>/dev/null && [ \"\$prio\" -le \"\$prio_max\" ] 2>/dev/null; then
-      echo \"  WOULD DELETE: \$line\"
+      echo \"  in-range: \$line\"
     fi
   done
+  echo \"--- (amnezia rules are at 31000/31001 — outside pbr range) ---\"
 " 2>/dev/null || true
 
 # ── F. amnezia_block_quic preserved ──────────────────────────────────────────
