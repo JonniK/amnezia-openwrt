@@ -70,3 +70,57 @@ load '../lib/harness.bash'
   [ "$pos_classifier" -lt "$pos_dnsmasq" ]
   [ "$pos_dnsmasq" -lt "$pos_remove" ]
 }
+
+# ---------------------------------------------------------------------------
+# New test: real-path wiring completeness (catches BUG 1 + BUG 2).
+# ---------------------------------------------------------------------------
+@test "migrate (real path): ru4 set declared before ru-cidr runs, full failover stack wired, fw4 before pbr removal" {
+  # Plant a fake amnezia-ru-cidr.sh in /tmp so resolve_dep finds it and
+  # we can verify its invocation order relative to the nft add set call.
+  printf '#!/bin/sh\necho "amnezia-ru-cidr:run" >> "${STUB_LOG:-/dev/null}"\n' \
+    > /tmp/amnezia-ru-cidr.sh
+  chmod +x /tmp/amnezia-ru-cidr.sh
+
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+
+  # --- BUG 1: amnezia_ru4 set must be DECLARED before ru-cidr populates it ---
+  grep -q "nft add set inet fw4 amnezia_ru4" "$STUB_LOG" \
+    || { echo "FAIL: nft add set amnezia_ru4 never called"; false; }
+  grep -q "amnezia-ru-cidr:run" "$STUB_LOG" \
+    || { echo "FAIL: amnezia-ru-cidr never invoked"; false; }
+  # Line-number ordering: set declaration must precede ru-cidr invocation.
+  pos_nft_set=$(grep -n "nft add set inet fw4 amnezia_ru4" "$STUB_LOG" | head -1 | cut -d: -f1)
+  pos_rucidr=$(grep -n "amnezia-ru-cidr:run" "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ "$pos_nft_set" -lt "$pos_rucidr" ] \
+    || { echo "FAIL: nft add set (line $pos_nft_set) must precede ru-cidr (line $pos_rucidr)"; false; }
+
+  # --- BUG 2: full failover stack must be wired ---
+  # rt_tables installed (logger stub captures amz_log "install:rt_tables")
+  grep -q "install:rt_tables" "$STUB_LOG" \
+    || { echo "FAIL: install:rt_tables not found in STUB_LOG"; false; }
+  # ip rules installed (routing_install_rules calls ip rule add)
+  grep -q "ip rule add fwmark" "$STUB_LOG" \
+    || { echo "FAIL: ip rule add fwmark not found — routing_install_rules not called"; false; }
+  # Fail-closed blackhole routes installed
+  grep -q "ip route replace blackhole default table" "$STUB_LOG" \
+    || { echo "FAIL: fail-closed blackhole routes not installed"; false; }
+  # amnezia-failover monitor enabled
+  grep -q "amnezia-failover:enable" "$STUB_LOG" \
+    || { echo "FAIL: amnezia-failover enable not called"; false; }
+
+  # --- Step 13 before 14: fw4/firewall reload must precede opkg remove pbr ---
+  # At least one of fw4 reload or /etc/init.d/firewall reload must appear.
+  ( grep -q "^fw4 reload" "$STUB_LOG" || grep -q "firewall reload" "$STUB_LOG" ) \
+    || { echo "FAIL: no fw4/firewall reload found before pbr removal"; false; }
+  grep -q "opkg remove pbr" "$STUB_LOG" \
+    || { echo "FAIL: opkg remove pbr not found"; false; }
+  # Ordering: classifier activation before pbr removal.
+  pos_fw4=$(grep -n "fw4 reload\|firewall reload" "$STUB_LOG" | head -1 | cut -d: -f1)
+  pos_pbr_remove=$(grep -n "opkg remove pbr" "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ "$pos_fw4" -lt "$pos_pbr_remove" ] \
+    || { echo "FAIL: fw4/firewall reload (line $pos_fw4) must precede opkg remove pbr (line $pos_pbr_remove)"; false; }
+
+  # Cleanup
+  rm -f /tmp/amnezia-ru-cidr.sh
+}

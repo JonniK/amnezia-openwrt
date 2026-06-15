@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "fw4 $*" >> "${STUB_LOG:-/dev/null}"
+exit 0
