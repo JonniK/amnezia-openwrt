@@ -24,10 +24,12 @@ rm -rf "$PBR_PKG" "$LUCI_PKG"
 mkdir -p \
 	"$PBR_PKG/usr/bin" \
 	"$PBR_PKG/usr/sbin" \
-	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d" \
+	"$PBR_PKG/usr/lib/amnezia" \
 	"$PBR_PKG/etc/amnezia" \
 	"$PBR_PKG/etc/config" \
-	"$PBR_PKG/etc/pbr.d" \
+	"$PBR_PKG/etc/nftables.d" \
+	"$PBR_PKG/etc/iproute2/rt_tables.d" \
+	"$PBR_PKG/etc/init.d" \
 	"$PBR_PKG/etc/uci-defaults" \
 	"$LUCI_PKG/usr/share/luci/menu.d" \
 	"$LUCI_PKG/usr/share/rpcd/acl.d" \
@@ -37,44 +39,61 @@ mkdir -p \
 # Runtime CLI wrappers go to /usr/bin/ (no .sh -- OpenWrt convention).
 for src in \
 	awg-toggle.sh awg-ru-update.sh \
-	pbr-status.sh pbr-reload.sh \
 	zapret-toggle.sh zapret-status.sh zapret-blockcheck.sh \
-	zapret-apply.sh zapret-probe.sh zapret-verify.sh
+	zapret-apply.sh zapret-probe.sh zapret-verify.sh \
+	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh
 do
 	cp "$SRC/$src" "$PBR_PKG/usr/bin/${src%.sh}"
 	chmod 0755 "$PBR_PKG/usr/bin/${src%.sh}"
 done
 
-# /usr/sbin/ holds admin tools the first-run setup uses internally. These
-# are PATH-resolvable so install-amnezia-pbr.sh's find_helper() picks them
-# up automatically when /tmp/install-*.sh isn't there (the .ipk path).
+# /usr/sbin/ holds admin tools the first-run setup uses internally.
 cp "$SRC/install-amnezia-pbr.sh"           "$PBR_PKG/usr/sbin/amnezia-pbr-setup"
 cp "$SRC/install-zapret.sh"                "$PBR_PKG/usr/sbin/install-zapret"
 cp "$SRC/install-dnsmasq-full.sh"          "$PBR_PKG/usr/sbin/install-dnsmasq-full"
 cp "$SRC/configure-dnsmasq-ru-nftset.sh"   "$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset"
+cp "$SRC/configure-dnsmasq-amnezia.sh"     "$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia"
+cp "$SRC/amnezia-failover"                 "$PBR_PKG/usr/sbin/amnezia-failover"
 chmod 0755 \
 	"$PBR_PKG/usr/sbin/amnezia-pbr-setup" \
 	"$PBR_PKG/usr/sbin/install-zapret" \
 	"$PBR_PKG/usr/sbin/install-dnsmasq-full" \
-	"$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset"
+	"$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset" \
+	"$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia" \
+	"$PBR_PKG/usr/sbin/amnezia-failover"
 
-# Reference data and PBR includes.
-cp "$SRC/seed-must-tunnel.list"   "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
-cp "$SRC/config/amnezia"          "$PBR_PKG/etc/config/amnezia"
-cp "$SRC/pbr.d/ru-direct.sh"      "$PBR_PKG/etc/pbr.d/ru-direct.sh"
-# Templates ship OUT of /etc/pbr.d/ -- pbr globs that dir and would execute
-# them with the literal __LAN__ placeholder. install-amnezia-pbr.sh reads
-# them from here and writes the LAN-substituted result to /etc/pbr.d/99-lan-vpn.sh.
-cp "$SRC/pbr.d/99-lan-vpn-full.sh"     "$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-full.sh"
-cp "$SRC/pbr.d/99-lan-vpn-vpn-only.sh" "$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-vpn-only.sh"
-chmod 0755 "$PBR_PKG/etc/pbr.d/ru-direct.sh"
+# Shared library: amnezia-common.sh and amnezia-routing.sh
+cp "$SRC/lib/amnezia-common.sh"   "$PBR_PKG/usr/lib/amnezia/amnezia-common.sh"
+cp "$SRC/lib/amnezia-routing.sh"  "$PBR_PKG/usr/lib/amnezia/amnezia-routing.sh"
 chmod 0644 \
-	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-full.sh" \
-	"$PBR_PKG/usr/share/amnezia-pbr/pbr.d/99-lan-vpn-vpn-only.sh"
+	"$PBR_PKG/usr/lib/amnezia/amnezia-common.sh" \
+	"$PBR_PKG/usr/lib/amnezia/amnezia-routing.sh"
+
+# nftables classifier
+cp "$SRC/nftables.d/30-amnezia-classify.nft" \
+   "$PBR_PKG/etc/nftables.d/30-amnezia-classify.nft"
+chmod 0644 "$PBR_PKG/etc/nftables.d/30-amnezia-classify.nft"
+
+# iproute2 routing tables
+cp "$SRC/iproute2-amnezia-rt_tables.conf" \
+   "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
+chmod 0644 "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
+
+# procd init script
+cp "$SRC/amnezia-failover.init" "$PBR_PKG/etc/init.d/amnezia-failover"
+chmod 0755 "$PBR_PKG/etc/init.d/amnezia-failover"
+
+# Reference data and config.
+cp "$SRC/seed-must-tunnel.list"    "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
+cp "$SRC/seed-sticky-domains.list" "$PBR_PKG/etc/amnezia/seed-sticky-domains.list"
+cp "$SRC/config/amnezia"           "$PBR_PKG/etc/config/amnezia"
+chmod 0644 \
+	"$PBR_PKG/etc/amnezia/seed-must-tunnel.list" \
+	"$PBR_PKG/etc/amnezia/seed-sticky-domains.list" \
+	"$PBR_PKG/etc/config/amnezia"
 
 # uci-defaults: runs once after package install to populate UCI from the
 # shipped /etc/config/amnezia template + record the install timestamp.
-# Convention: numeric prefix sets ordering relative to other packages.
 cat > "$PBR_PKG/etc/uci-defaults/90-amnezia-pbr" <<'UCIDEF'
 #!/bin/sh
 # uci-defaults: stamp the install timestamp. /etc/config/amnezia ships as the
