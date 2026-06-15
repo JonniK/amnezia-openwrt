@@ -497,6 +497,56 @@ function paintBlockcheckLog(text) {
 	pre.scrollTop = pre.scrollHeight;
 }
 
+function parseFailoverState(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+function renderTunnelTable(state) {
+	if (!state || !state.tunnels || !state.tunnels.length) {
+		return E('div', { 'style': 'color:#888;font-style:italic;' },
+			_('No tunnel state available. Start the amnezia-failover service.'));
+	}
+	var table = E('table', {
+		'style': 'border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed;'
+	});
+	var head = E('tr', {}, [
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Tunnel')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('State')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Role')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Metric')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Weight')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:16%;' }, _('Handshake')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;' }, _('Exit IP'))
+	]);
+	table.appendChild(head);
+	for (var i = 0; i < state.tunnels.length; i++) {
+		var t = state.tunnels[i];
+		var upColor = t.up ? '#3c763d' : '#a94442';
+		var upText = t.up ? _('UP') : _('DOWN');
+		var role = t.carrying ? _('active') : (t.enabled ? _('standby') : _('disabled'));
+		var roleColor = t.carrying ? '#3c763d' : (t.enabled ? '#666' : '#888');
+		var row = E('tr', {}, [
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;font-weight:bold;' },
+				t.label ? (t.name + ' (' + t.label + ')') : t.name),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + upColor + ';font-weight:bold;' },
+				upText),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + roleColor + ';' },
+				role),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+				t.metric !== undefined ? t.metric : ''),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+				t.weight !== undefined ? t.weight : ''),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#666;font-family:monospace;font-size:11px;' },
+				t.handshake_age !== undefined ? fmtAge(t.handshake_age ? (Math.floor(Date.now() / 1000) - t.handshake_age) : 0) : _('never')),
+			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
+				t.exit_ip || '')
+		]);
+		table.appendChild(row);
+	}
+	return table;
+}
+
 function paintRuStamp(stamp) {
 	var when = document.getElementById('awg-ru-when');
 	var count = document.getElementById('awg-ru-count');
@@ -946,7 +996,15 @@ return view.extend({
 		var p6 = L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }).then(function(res) {
 			paintPbr(parsePbr((res && res.stdout) || ''));
 		});
-		return Promise.all([p1, p2, p3, p4, p5, p6]);
+		var p7 = L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), '').then(function(text) {
+			var st = parseFailoverState(text);
+			var tableEl = document.getElementById('failover-tunnel-table');
+			if (tableEl) {
+				tableEl.innerHTML = '';
+				tableEl.appendChild(renderTunnelTable(st));
+			}
+		});
+		return Promise.all([p1, p2, p3, p4, p5, p6, p7]);
 	},
 
 	load: function() {
@@ -959,7 +1017,8 @@ return view.extend({
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), '')
+			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), ''),
+			L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), '')
 		]);
 	},
 
@@ -973,6 +1032,7 @@ return view.extend({
 		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
 		var pbr = parsePbr((data && data[7] && data[7].stdout) || '');
 		var seedList = parseSeedList((data && data[8]) || '');
+		var failoverState = parseFailoverState((data && data[9]) || '');
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
@@ -980,6 +1040,77 @@ return view.extend({
 			E('h2', {}, _('AmneziaWG')),
 			E('div', { 'class': 'cbi-map-descr' },
 				_('Toggle the AmneziaWG tunnel and policy-based routing together. Status refreshes every 5 seconds.')),
+
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Failover tunnels')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Per-tunnel status. Mode and sticky target are applied via amnezia-failover-ctl.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Mode')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('select', {
+								'id': 'failover-mode-select',
+								'class': 'cbi-input-select',
+								'style': 'width:160px;margin-right:8px;',
+								'change': ui.createHandlerFn(this, function(ev) {
+									var sel = document.getElementById('failover-mode-select');
+									if (!sel) return Promise.resolve();
+									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-mode', sel.value]).then(L.bind(function(res) {
+										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+											res.code === 0 ? 'info' : 'warning');
+									}, this)).catch(function(err) {
+										ui.addNotification(null, E('p', {}, _('set-mode failed: ') + err), 'danger');
+									});
+								})
+							}, [
+								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
+								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
+							]),
+							E('span', { 'style': 'color:#666;font-size:11px;' },
+								failoverState ? ('all_down: ' + (failoverState.all_down ? _('YES') : _('no'))) : '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Sticky target')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'failover-sticky-input',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:120px;margin-right:8px;',
+								'value': (failoverState && failoverState.active_sticky) || '',
+								'placeholder': 'awg1'
+							}),
+							E('button', {
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(this, function(ev) {
+									var inp = document.getElementById('failover-sticky-input');
+									var val = inp ? inp.value.trim() : '';
+									if (!val) {
+										ui.addNotification(null, E('p', {}, _('Enter a tunnel name (e.g. awg1)')), 'warning');
+										return Promise.resolve();
+									}
+									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-sticky', val]).then(function(res) {
+										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+											res.code === 0 ? 'info' : 'warning');
+									}).catch(function(err) {
+										ui.addNotification(null, E('p', {}, _('set-sticky failed: ') + err), 'danger');
+									});
+								})
+							}, _('Set sticky'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Tunnels')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'id': 'failover-tunnel-table' }, renderTunnelTable(failoverState))
+						])
+					])
+				])
+			]),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Tunnel')),
