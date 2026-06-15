@@ -61,12 +61,20 @@ USAGE
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# Preserve any caller-supplied CONF_DIR before sourcing amnezia-common.sh.
+# amnezia-common.sh hard-sets `export CONF_DIR=/etc/amnezia`, which would
+# otherwise overwrite an env var injected by the test harness or a sysadmin.
+_saved_conf_dir="${CONF_DIR:-}"
+
 # Source the shared lib if present (POSIX-safe guard: no failed-`.` exit).
 if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
   . /usr/lib/amnezia/amnezia-common.sh
 elif [ -f "$SCRIPT_DIR/lib/amnezia-common.sh" ]; then
   . "$SCRIPT_DIR/lib/amnezia-common.sh"
 fi
+
+# Restore caller-supplied CONF_DIR if it was set before the source.
+[ -n "$_saved_conf_dir" ] && CONF_DIR="$_saved_conf_dir"
 
 # Source the routing lib if present.
 if [ -f /usr/lib/amnezia/amnezia-routing.sh ]; then

@@ -33,3 +33,21 @@ load '../lib/harness.bash'
   grep -q "uci add_list firewall.vpn.network=awg1" "$STUB_LOG"
   grep -q "uci add_list firewall.vpn.network=awg2" "$STUB_LOG"
 }
+@test "first-install per-tunnel network apply: uci batch and ifup invoked for each conf-backed tunnel" {
+  # Verify the per-tunnel bring-up loop: for each tunnel whose .conf exists,
+  # the installer must call 'uci batch' (to apply network UCI) and 'ifup <tunnel>'.
+  # Prior to the CONF_DIR save/restore fix, amnezia-common.sh hard-overwrote
+  # CONF_DIR=/etc/amnezia and the conf files were never found, silently skipping
+  # the uci batch + ifup block for every tunnel.
+  _conf_dir="$BATS_TEST_TMPDIR/confs"
+  mkdir -p "$_conf_dir"
+  cp "$HARNESS_DIR/../test/fixtures/awg-sample.conf" "$_conf_dir/awg1.conf"
+  cp "$HARNESS_DIR/../test/fixtures/awg2.conf"       "$_conf_dir/awg2.conf"
+  CONF_DIR="$_conf_dir" UCI_FAKE_TUNNELS="awg1 awg2" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  # uci batch must have been called for both tunnels (two separate pipe invocations).
+  [ "$(grep -c "^uci batch" "$STUB_LOG")" -ge 2 ]
+  # ifup must have been invoked once per tunnel.
+  grep -q "ifup awg1" "$STUB_LOG"
+  grep -q "ifup awg2" "$STUB_LOG"
+}
