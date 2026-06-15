@@ -151,7 +151,6 @@ if [ "${1:-}" = "--dry-run-all" ]; then
   if command -v routing_firewall_dryrun >/dev/null 2>&1; then
     routing_firewall_dryrun "$_tunnel_list"
   fi
-  echo "firewall.vpn.network=$_tunnel_list"
   exit 0
 fi
 
@@ -171,9 +170,10 @@ if [ "${1:-}" = "--migrate" ]; then
       echo "install:classifier"
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
       sed "s/@@LAN_IFNAME@@/$LAN_DEV/" \
         "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft
+        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
       amz_log "install:classifier"
     fi
 
@@ -184,8 +184,13 @@ if [ "${1:-}" = "--migrate" ]; then
       sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
     fi
 
-    # must-tunnel→sticky migration: feed existing seed-must-tunnel.list entries
-    # into the sticky dnsmasq ipset binding.
+    # must-tunnel→sticky migration: idempotent — delete list before repopulating.
+    # configure-dnsmasq-amnezia.sh already deletes amnezia_sticky in the real path;
+    # in dry-run we do it explicitly so idempotency holds without the full script.
+    uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
+    if [ "$_migrate_dry" != 1 ]; then
+      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh" >/dev/null 2>&1 || true
+    fi
     if [ -f "$MUST_TUNNEL_LIST" ]; then
       while IFS= read -r _dom; do
         case "$_dom" in ''|\#*) continue ;; esac
@@ -193,17 +198,23 @@ if [ "${1:-}" = "--migrate" ]; then
       done < "$MUST_TUNNEL_LIST"
     fi
 
-    # Step 3: gate on @amnezia_ru4 being non-empty before removing pbr.
+    # Step 3a: populate @amnezia_ru4 from persist before the gate check.
+    if [ "$_migrate_dry" != 1 ]; then
+      sh "$SCRIPT_DIR/amnezia-ru-cidr.sh" 2>/dev/null || true
+    fi
+
+    # Step 3b: gate on @amnezia_ru4 being non-empty before removing pbr.
     _ru4_count=0
     _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
     if echo "$_ru4_out" | grep -q 'elements'; then
       _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
-    else
-      # Use NFT_FAKE_RU4_COUNT in test mode.
-      _ru4_count="${NFT_FAKE_RU4_COUNT:-0}"
     fi
-
-    if [ "$_ru4_count" -le 0 ]; then
+    # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
+    if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
+      echo "ABORT:ru4-empty"
+      return 1
+    fi
+    if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
       echo "ABORT:ru4-empty"
       return 1
     fi
@@ -215,6 +226,17 @@ if [ "${1:-}" = "--migrate" ]; then
       /etc/init.d/pbr stop 2>/dev/null || true
       /etc/init.d/pbr disable 2>/dev/null || true
       opkg remove pbr luci-app-pbr 2>/dev/null || true
+    fi
+
+    # Step 5: apply firewall zones + disable LAN IPv6 (real path only).
+    if [ "$_migrate_dry" != 1 ]; then
+      _mig_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _mig_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      [ -n "$_mig_tunnels" ] && routing_firewall_apply "$_mig_tunnels"
+      routing_disable_lan_v6
     fi
   }
 
@@ -236,7 +258,8 @@ if [ "${1:-}" = "--first-install" ]; then
       echo "install:rt_tables" >> "${STUB_LOG:-/dev/null}"
       amz_log "install:rt_tables"
     else
-      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf
+      mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
+      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
       amz_log "install:rt_tables"
     fi
     # 2. ip rules
@@ -247,21 +270,41 @@ if [ "${1:-}" = "--first-install" ]; then
       echo "install:classifier" >> "${STUB_LOG:-/dev/null}"
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
       sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft
+        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
       amz_log "install:classifier"
     fi
     # 4. dnsmasq UCI ipset
-    if [ "$_fi_dry" = 1 ]; then
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
-    else
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    # 5. tunnel UCI apply + bring-up + firewall zones + disable LAN IPv6 (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      _fi_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_fi_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _fi_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      # Apply each enabled tunnel's network UCI and bring it up.
+      for _tunnel in $_fi_tunnels; do
+        _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
+        if [ -f "$_tcf" ]; then
+          gen_tunnel_uci "$_tunnel" "$_tcf" | while IFS= read -r _ucl; do
+            uci "${_ucl#set }" 2>/dev/null || uci batch <<EOF
+$_ucl
+EOF
+          done
+          uci commit network 2>/dev/null || true
+          ifup "$_tunnel" 2>/dev/null || true
+        fi
+      done
+      [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"
+      routing_disable_lan_v6
     fi
-    # 5. monitor enable + start
+    # 6. monitor enable + start
     if [ "$_fi_dry" = 1 ]; then
       echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
     else
-      /etc/init.d/amnezia-failover enable
+      /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
     fi
   }

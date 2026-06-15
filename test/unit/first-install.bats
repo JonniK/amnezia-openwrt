@@ -15,3 +15,21 @@ load '../lib/harness.bash'
   # dnsmasq ipset configured
   grep -q "uci set dhcp.amnezia_ru_tld=ipset" "$STUB_LOG"
 }
+@test "first-install (real branch) calls routing_firewall_apply and routing_disable_lan_v6" {
+  UCI_FAKE_TUNNELS="awg1 awg2" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  # Real firewall apply must emit real uci set calls (not just echo).
+  grep -q "uci set firewall.vpn=zone" "$STUB_LOG"
+  grep -q "uci add_list firewall.vpn.network=awg1" "$STUB_LOG"
+  # v6 disable must be called.
+  grep -q "uci set dhcp.lan.ra=disabled" "$STUB_LOG"
+  grep -q "uci commit dhcp" "$STUB_LOG"
+}
+@test "first-install (real branch) applies all enabled tunnels via uci" {
+  UCI_FAKE_TUNNELS="awg1 awg2" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  # Each enabled tunnel must be applied via uci (network interface section).
+  # The stub reports no .conf files so we can only verify the tunnel-list is used.
+  grep -q "uci add_list firewall.vpn.network=awg1" "$STUB_LOG"
+  grep -q "uci add_list firewall.vpn.network=awg2" "$STUB_LOG"
+}

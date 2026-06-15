@@ -30,7 +30,8 @@ nft flush set inet fw4 "$SET_RU4" 2>/dev/null
 _n=0; _buf=""
 while IFS= read -r _c; do
   case "$_c" in */*) ;; *) continue ;; esac
-  _buf="$_buf $_c,"; _n=$((_n+1))
+  if [ -z "$_buf" ]; then _buf="$_c,"; else _buf="${_buf} ${_c},"; fi
+  _n=$((_n+1))
   if [ "$_n" -ge 256 ]; then
     nft add element inet fw4 "$SET_RU4" "{ ${_buf%,} }" 2>/dev/null
     _buf=""; _n=0

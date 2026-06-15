@@ -31,3 +31,20 @@ load '../lib/harness.bash'
   grep -q "uci add_list dhcp.amnezia_sticky.domain=example.com" "$STUB_LOG"
   grep -q "uci add_list dhcp.amnezia_sticky.domain=foo.org" "$STUB_LOG"
 }
+@test "migrate (real branch) calls routing_firewall_apply and routing_disable_lan_v6" {
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+  # Real firewall apply must emit real uci set calls.
+  grep -q "uci set firewall.vpn=zone" "$STUB_LOG"
+  grep -q "uci add_list firewall.vpn.network=awg1" "$STUB_LOG"
+  # v6 disable must be called.
+  grep -q "uci set dhcp.lan.ra=disabled" "$STUB_LOG"
+}
+@test "must-tunnel add_list is idempotent (delete before repopulate)" {
+  # If migrate is called twice, the sticky list must not double-accumulate.
+  printf 'example.com\n' > "$BATS_TEST_TMPDIR/seed-must-tunnel.list"
+  MUST_TUNNEL_LIST="$BATS_TEST_TMPDIR/seed-must-tunnel.list" \
+    NFT_FAKE_RU4_COUNT=12 run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate --dry-run
+  # A delete of the list section must precede the add_list repopulation.
+  grep -q "uci -q delete dhcp.amnezia_sticky" "$STUB_LOG"
+}

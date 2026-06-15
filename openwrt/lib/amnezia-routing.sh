@@ -34,6 +34,7 @@ routing_set_sticky_default() {
 }
 # Emit the firewall UCI plan for the given tunnel list (space-separated awgN).
 # The amnezia_block_quic rule is NEVER touched — it is preserved as-is.
+# This is the shared plan source used by both dryrun (echo) and apply (uci set).
 routing_firewall_dryrun() {
   echo "set firewall.vpn=zone"
   echo "set firewall.vpn.name=vpn"
@@ -57,8 +58,41 @@ routing_firewall_dryrun() {
   # amnezia_block_quic is intentionally NOT touched here.
   # The migration function asserts via negative-space test that no delete or re-set occurs.
 }
+# Apply the firewall UCI plan via real uci calls. Mirrors routing_firewall_dryrun exactly.
+# firewall.vpn.network is a UCI list (uci add_list per member, not a scalar).
+# amnezia_block_quic is NEVER touched.
+routing_firewall_apply() {
+  _tlist=$1
+  uci set firewall.vpn=zone
+  uci set firewall.vpn.name=vpn
+  uci -q delete firewall.vpn.network 2>/dev/null || true
+  for _t in $_tlist; do
+    uci add_list firewall.vpn.network="$_t"
+  done
+  uci set firewall.vpn.input=REJECT
+  uci set firewall.vpn.output=ACCEPT
+  uci set firewall.vpn.forward=REJECT
+  uci set firewall.vpn.masq=1
+  uci set firewall.vpn.mtu_fix=1
+  uci set firewall.vpn_fwd=forwarding
+  uci set firewall.vpn_fwd.src=lan
+  uci set firewall.vpn_fwd.dest=vpn
+  # IPv6 fail-closed (forward-drop): drop forwarded lan->wan v6 only.
+  uci set firewall.amnezia_v6_drop=rule
+  uci set firewall.amnezia_v6_drop.name=amnezia-drop-v6-forward
+  uci set firewall.amnezia_v6_drop.src=lan
+  uci set firewall.amnezia_v6_drop.dest=wan
+  uci set firewall.amnezia_v6_drop.family=ipv6
+  uci set firewall.amnezia_v6_drop.proto=all
+  uci set firewall.amnezia_v6_drop.target=DROP
+  uci commit firewall
+  # Reload firewall to activate new rules.
+  /etc/init.d/firewall reload 2>/dev/null || fw4 reload 2>/dev/null || true
+}
 routing_nexthop_supported() {
-  [ -n "$IP_NEXTHOP_OK" ] && return "$([ "$IP_NEXTHOP_OK" = 1 ] && echo 0 || echo 1)"
+  if [ -n "${IP_NEXTHOP_OK:-}" ]; then
+    [ "$IP_NEXTHOP_OK" = 1 ] && return 0 || return 1
+  fi
   ip nexthop help >/dev/null 2>&1 && [ -e /proc/sys/net/ipv4/fib_multipath_hash_policy ]
 }
 # $1 = "devA:weightA devB:weightB ..." (healthy members, highest priority first)
@@ -69,7 +103,8 @@ routing_set_pool_balance() {
   sysctl -w net.ipv4.fib_multipath_hash_policy=1 >/dev/null 2>&1 || true
   _grp=""; _id=10
   for _m in $1; do
-    _dev=${_m%%:*}; _w=${_m##*:}
+    _dev=${_m%%:*}
+    case "$_m" in *:*) _w=${_m##*:} ;; *) _w=1 ;; esac
     ip nexthop replace id "$_id" dev "$_dev"
     _grp="${_grp}${_id},${_w}/"; _id=$((_id+1))
   done
