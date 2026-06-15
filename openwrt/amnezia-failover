@@ -1,6 +1,8 @@
 #!/bin/sh
 # AmneziaWG multi-tunnel failover monitor daemon.
 # POSIX sh / BusyBox ash only — no bashisms.
+# shellcheck source=lib/amnezia-common.sh
+# shellcheck source=lib/amnezia-routing.sh
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
   . "$AMNEZIA_LIB/amnezia-common.sh"
@@ -112,7 +114,7 @@ reconcile() {
       _is_healthy "$_n" && _list="$_list $_n:$_w"
       _idx=$((_idx+1))
     done
-    [ -n "$_list" ] && routing_set_pool_balance "$_list" || routing_set_pool_default ""
+    if [ -n "$_list" ]; then routing_set_pool_balance "$_list"; else routing_set_pool_default ""; fi
     # Flush only members that DEPARTED the healthy set (member-scoped by conntrack mark)
     if [ "$_changed" = 1 ]; then
       for _m in $MEMBERS; do _n=${_m%%:*}
@@ -186,7 +188,7 @@ run_loop() {
     for _m in $MEMBERS; do _n=${_m%%:*}
       _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
       if tunnel_healthy "$_n" "$_track"; then
-        if debounce "$_n" 1; then amz_log "tunnel $n came up"; fi
+        if debounce "$_n" 1; then amz_log "tunnel $_n came up"; fi
         HEALTHY="$HEALTHY $_n"
       else
         if debounce "$_n" 0; then amz_log "tunnel $_n went down"; fi
