@@ -23,6 +23,31 @@ routing_set_sticky_default() {
   if [ -z "$1" ]; then ip route replace blackhole default table "$TBL_STICKY"
   else ip route replace default dev "$1" table "$TBL_STICKY"; fi
 }
+# Emit the firewall UCI plan for the given tunnel list (space-separated awgN).
+# The amnezia_block_quic rule is NEVER touched — it is preserved as-is.
+routing_firewall_dryrun() {
+  echo "set firewall.vpn=zone"
+  echo "set firewall.vpn.name=vpn"
+  echo "set firewall.vpn.network=$1"
+  echo "set firewall.vpn.input=REJECT"
+  echo "set firewall.vpn.output=ACCEPT"
+  echo "set firewall.vpn.forward=REJECT"
+  echo "set firewall.vpn.masq=1"
+  echo "set firewall.vpn.mtu_fix=1"
+  echo "set firewall.vpn_fwd=forwarding"
+  echo "set firewall.vpn_fwd.src=lan"
+  echo "set firewall.vpn_fwd.dest=vpn"
+  # IPv6 fail-closed (forward-drop): drop forwarded lan->wan v6 only.
+  echo "set firewall.amnezia_v6_drop=rule"
+  echo "set firewall.amnezia_v6_drop.name=amnezia-drop-v6-forward"
+  echo "set firewall.amnezia_v6_drop.src=lan"
+  echo "set firewall.amnezia_v6_drop.dest=wan"
+  echo "set firewall.amnezia_v6_drop.family=ipv6"
+  echo "set firewall.amnezia_v6_drop.proto=all"
+  echo "set firewall.amnezia_v6_drop.target=DROP"
+  # amnezia_block_quic is intentionally NOT touched here.
+  # The migration function asserts via negative-space test that no delete or re-set occurs.
+}
 routing_nexthop_supported() {
   [ -n "$IP_NEXTHOP_OK" ] && return "$([ "$IP_NEXTHOP_OK" = 1 ] && echo 0 || echo 1)"
   ip nexthop help >/dev/null 2>&1 && [ -e /proc/sys/net/ipv4/fib_multipath_hash_policy ]
