@@ -307,7 +307,20 @@ EOF
       [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"
       routing_disable_lan_v6
     fi
-    # 6. monitor enable + start
+    # 6. RU boot loader: install init + firewall hotplug hook (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      if [ -f "$SCRIPT_DIR/amnezia-ru-load.init" ]; then
+        cp "$SCRIPT_DIR/amnezia-ru-load.init" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+        chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+        /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      fi
+      if [ -f "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" ]; then
+        mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+        cp "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+      fi
+    fi
+    # 7. monitor enable + start
     if [ "$_fi_dry" = 1 ]; then
       echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
     else
