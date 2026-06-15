@@ -1,0 +1,12 @@
+#!/bin/sh
+echo "uci $*" >> "${STUB_LOG:-/dev/null}"
+case "$1 $2" in
+  "show network") echo "network.@interface[0]=interface" ;;
+  "get amnezia") exit 0 ;;
+  "show amnezia")
+    # UCI_FAKE_TUNNELS: space-separated list of tunnel names to report as enabled.
+    if [ -n "$UCI_FAKE_TUNNELS" ]; then
+      for _t in $UCI_FAKE_TUNNELS; do echo "amnezia.${_t}=tunnel"; echo "amnezia.${_t}.enabled=1"; done
+    fi ;;
+esac
+exit 0

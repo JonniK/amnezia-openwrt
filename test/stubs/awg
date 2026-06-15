@@ -1,0 +1,12 @@
+#!/bin/sh
+echo "awg $*" >> "${STUB_LOG:-/dev/null}"
+case "$1" in
+  show)
+    _now=$(date +%s 2>/dev/null || echo 9999999999)
+    case "${AWG_FAKE_HS:-stale}" in
+      now)   printf 'PUBKEY\t%s\n' "$_now" ;;
+      stale) printf 'PUBKEY\t0\n' ;;
+      *)     printf 'PUBKEY\t%s\n' "${AWG_FAKE_HS}" ;;
+    esac ;;
+esac
+exit 0

@@ -1,0 +1,9 @@
+#!/bin/sh
+echo "nft $*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  "list set inet fw4 amnezia_ru4")
+    # NFT_FAKE_RU4_COUNT: number of elements to emit (0 = empty set).
+    _n=${NFT_FAKE_RU4_COUNT:-0}
+    if [ "$_n" -gt 0 ]; then printf 'elements = { '; i=0; while [ $i -lt $_n ]; do printf '10.0.%d.0/24, ' $i; i=$((i+1)); done; printf '}\n'; fi ;;
+esac
+exit 0

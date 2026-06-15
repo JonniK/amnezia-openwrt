@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "ping $*" >> "${STUB_LOG:-/dev/null}"
+exit "${PING_FAKE_OK:-0}"
