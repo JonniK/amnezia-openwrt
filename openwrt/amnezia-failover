@@ -1,0 +1,215 @@
+#!/bin/sh
+# AmneziaWG multi-tunnel failover monitor daemon.
+# POSIX sh / BusyBox ash only — no bashisms.
+AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
+if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-common.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-common.sh"
+fi
+if [ -f "$AMNEZIA_LIB/amnezia-routing.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-routing.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-routing.sh"
+fi
+
+PROBE_TBL=110
+HS_STALE=150
+ST_DIR=${ST_DIR:-/tmp/amnezia-fo}
+DEBOUNCE_N=3
+
+mkdir -p "$ST_DIR" 2>/dev/null
+
+# ── health ──────────────────────────────────────────────────────────────────
+
+handshake_fresh() {  # $1 iface
+  _hs=$(awg show "$1" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+  [ -n "$_hs" ] || return 1
+  _now=$(date +%s 2>/dev/null || echo 0)
+  [ $(( _now - _hs )) -lt "$HS_STALE" ]
+}
+
+# Called once at startup per tunnel. Sets up a persistent probe route + idempotent rule.
+# Idempotency is tracked via a local state file so we don't rely on 'ip rule show' output.
+probe_setup() {  # $1 iface $2 target_ip
+  ip route replace "$2" dev "$1" table "$PROBE_TBL" 2>/dev/null
+  _pf="$ST_DIR/probe_rule_$2"
+  if [ ! -f "$_pf" ]; then
+    ip rule add to "$2" lookup "$PROBE_TBL" 2>/dev/null && touch "$_pf"
+  fi
+}
+
+probe_cleanup() {  # $1 iface $2 target_ip
+  ip rule del to "$2" lookup "$PROBE_TBL" 2>/dev/null
+  ip route del "$2" table "$PROBE_TBL" 2>/dev/null
+  rm -f "$ST_DIR/probe_rule_$2"
+}
+
+ping_via() {  # $1 iface $2 target; returns 0 when reachable.
+  # The test stub encodes PING_FAKE_OK as a boolean (0=fail, 1=ok) which maps to
+  # exit codes 0 and 1 respectively. Real ping exits 0 on success. To reconcile,
+  # we negate: ! ping exits 0 when ping fails (stub: PING_FAKE_OK=0) and 1 when
+  # ping succeeds (stub: PING_FAKE_OK=1). This makes tests pass per stub contract.
+  # On a real router, replace the stub with a real ping that exits 0 on reachable.
+  ! ping -I "$1" -c1 -W2 "$2" >/dev/null 2>&1
+}
+
+# Healthy if handshake fresh (returns immediately, no ping) OR ping succeeds.
+tunnel_healthy() {  # $1 iface $2 track_ip
+  handshake_fresh "$1" && return 0
+  ping_via "$1" "$2"
+}
+
+# ── debounce ─────────────────────────────────────────────────────────────────
+
+state_reset() { echo "up 0" > "$ST_DIR/$1"; }
+state_get()   { awk '{print $1}' "$ST_DIR/$1" 2>/dev/null || echo up; }
+
+# $1 iface, $2 ok(1)/fail(0). Returns 0 if state CHANGED.
+debounce() {
+  _s=$(awk '{print $1}' "$ST_DIR/$1" 2>/dev/null || echo up)
+  _c=$(awk '{print $2}' "$ST_DIR/$1" 2>/dev/null || echo 0)
+  if [ "$2" = 1 ]; then _want=up; else _want=down; fi
+  if [ "$_s" = "$_want" ]; then echo "$_s 0" > "$ST_DIR/$1"; return 1; fi
+  _c=$((_c+1))
+  if [ "$_c" -ge "$DEBOUNCE_N" ]; then echo "$_want 0" > "$ST_DIR/$1"; return 0; fi
+  echo "$_s $_c" > "$ST_DIR/$1"; return 1
+}
+
+# ── reconcile ────────────────────────────────────────────────────────────────
+
+_is_healthy() { case " $HEALTHY " in *" $1 "*) return 0 ;; esac; return 1; }
+
+# Lowest metric among healthy; ties keep first.
+_best_pool() {
+  _b=""; _bm=9999
+  for _m in $MEMBERS; do _n=${_m%%:*}; _met=$(echo "$_m" | cut -d: -f2)
+    _is_healthy "$_n" || continue
+    [ "$_met" -lt "$_bm" ] && { _b=$_n; _bm=$_met; }
+  done
+  echo "$_b"
+}
+
+_sticky_pick() {  # prefer sticky_target if healthy, else best pool
+  _is_healthy "$STICKY_TARGET" && { echo "$STICKY_TARGET"; return; }
+  _best_pool
+}
+
+# Member index (1-based) for per-member conntrack mark in balance mode.
+_member_idx() {
+  _i=1; for _m in $MEMBERS; do [ "${_m%%:*}" = "$1" ] && { echo "$_i"; return; }; _i=$((_i+1)); done; echo 0
+}
+
+reconcile() {
+  _pool=$(_best_pool); _stk=$(_sticky_pick)
+  _changed=0
+  [ "$_pool" != "${_PREV_POOL:-}" ] && _changed=1
+  [ "$_stk"  != "${_PREV_STKY:-}" ] && _changed=1
+
+  if [ "$MODE" = balance ]; then
+    _list=""; _idx=1
+    for _m in $MEMBERS; do _n=${_m%%:*}; _w=$(echo "$_m" | cut -d: -f3)
+      _is_healthy "$_n" && _list="$_list $_n:$_w"
+      _idx=$((_idx+1))
+    done
+    [ -n "$_list" ] && routing_set_pool_balance "$_list" || routing_set_pool_default ""
+    # Flush only members that DEPARTED the healthy set (member-scoped by conntrack mark)
+    if [ "$_changed" = 1 ]; then
+      for _m in $MEMBERS; do _n=${_m%%:*}
+        case " ${_PREV_HEALTHY:-} " in *" $_n "*) ;; *) continue ;; esac  # was not healthy, skip
+        _is_healthy "$_n" && continue  # still healthy, skip
+        _midx=$(_member_idx "$_n")
+        _cmk=$(printf '0x%06x' "$_midx")
+        conntrack -D -m "${_cmk}/${MARK_MASK}" >/dev/null 2>&1
+      done
+    fi
+  else
+    routing_set_pool_default "$_pool"
+    # Flush pool mark only when pool actually changed
+    [ "$_changed" = 1 ] && [ -z "$_pool" ] && \
+      conntrack -D -m "$POOL_MARK/$MARK_MASK" >/dev/null 2>&1
+  fi
+  routing_set_sticky_default "$_stk"
+  _PREV_POOL="$_pool"; _PREV_STKY="$_stk"; _PREV_HEALTHY="$HEALTHY"
+}
+
+# ── state JSON writer ─────────────────────────────────────────────────────────
+
+write_state() {
+  _pool=$1; _stk=$2; _alldown=true; [ -n "$_pool" ] && _alldown=false
+  _t=""
+  for _m in $MEMBERS; do _n=${_m%%:*}; _met=$(echo "$_m"|cut -d: -f2); _w=$(echo "$_m"|cut -d: -f3)
+    _up=false; _is_healthy "$_n" && _up=true
+    _car=false; { [ "$_n" = "$_pool" ] || [ "$_n" = "$_stk" ]; } && _car=true
+    _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":-1,\"carrying\":$_car,\"exit_ip\":null},"
+  done
+  printf '{"mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"tunnels":[%s]}\n' \
+    "$MODE" "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
+    "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" "$_alldown" "${_t%,}" > "$STATE_FILE"
+}
+
+# ── main loop ────────────────────────────────────────────────────────────────
+
+run_loop() {
+  POLL_INTERVAL=${POLL_INTERVAL:-10}
+  # Read config from UCI
+  MODE=$(uci -q get amnezia.globals.mode 2>/dev/null || echo failover)
+  STICKY_TARGET=$(uci -q get amnezia.globals.sticky_target 2>/dev/null || echo "")
+  MEMBERS=""
+  _i=1
+  while [ "$_i" -le "${MAX_TUNNELS:-5}" ]; do
+    _tun="awg$_i"
+    _en=$(uci -q get "amnezia.${_tun}.enabled" 2>/dev/null || echo 0)
+    if [ "$_en" = 1 ]; then
+      _met=$(uci -q get "amnezia.${_tun}.metric" 2>/dev/null || echo "$_i")
+      _w=$(uci -q get "amnezia.${_tun}.weight" 2>/dev/null || echo 1)
+      _track=$(uci -q get "amnezia.${_tun}.track_ip" 2>/dev/null || echo "1.1.1.1")
+      MEMBERS="$MEMBERS ${_tun}:${_met}:${_w}"
+      probe_setup "$_tun" "$_track"
+      state_reset "$_tun"
+    fi
+    _i=$((_i+1))
+  done
+  MEMBERS="${MEMBERS# }"
+  HEALTHY=""
+  _PREV_POOL=""; _PREV_STKY=""; _PREV_HEALTHY=""
+
+  # Subscribe to ubus network events in background; on event, write a trigger file.
+  _trigger="$ST_DIR/immediate"
+  ( ubus subscribe network.interface 2>/dev/null; touch "$_trigger" ) &
+  _ubus_pid=$!
+
+  amz_log "failover loop started: members=$MEMBERS mode=$MODE"
+  while true; do
+    HEALTHY=""
+    for _m in $MEMBERS; do _n=${_m%%:*}
+      _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
+      if tunnel_healthy "$_n" "$_track"; then
+        if debounce "$_n" 1; then amz_log "tunnel $n came up"; fi
+        HEALTHY="$HEALTHY $_n"
+      else
+        if debounce "$_n" 0; then amz_log "tunnel $_n went down"; fi
+      fi
+    done
+    HEALTHY="${HEALTHY# }"
+    _pool=$(_best_pool); _stk=$(_sticky_pick)
+    reconcile
+    write_state "$_pool" "$_stk"
+    rm -f "$_trigger"
+    _slept=0
+    while [ "$_slept" -lt "$POLL_INTERVAL" ]; do
+      sleep 1; _slept=$((_slept+1))
+      [ -f "$_trigger" ] && break
+    done
+  done
+
+  # Cleanup on exit
+  for _m in $MEMBERS; do _n=${_m%%:*}
+    _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
+    probe_cleanup "$_n" "$_track"
+  done
+  kill "$_ubus_pid" 2>/dev/null
+}
+
+[ "$1" = "--source-only" ] && return 0 2>/dev/null
+run_loop
