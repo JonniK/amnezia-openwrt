@@ -83,6 +83,30 @@ elif [ -f "$SCRIPT_DIR/lib/amnezia-routing.sh" ]; then
   . "$SCRIPT_DIR/lib/amnezia-routing.sh"
 fi
 
+# ---------------------------------------------------------------------------
+# resolve_dep <installed_path> <tmp_name> <script_dir_rel>
+#   Returns (via stdout) the first path that exists among:
+#     1. <installed_path>        -- .ipk-installed location (no .sh extension)
+#     2. /tmp/<tmp_name>         -- install.sh staging (with .sh extension)
+#     3. $SCRIPT_DIR/<script_dir_rel> -- dev/deploy staging (relative to script)
+#   Returns empty string (and exit 1) when none is found so callers can guard.
+# ---------------------------------------------------------------------------
+resolve_dep() {
+  _rd_installed="$1"
+  _rd_tmp="/tmp/$2"
+  _rd_src="$SCRIPT_DIR/$3"
+  if [ -f "$_rd_installed" ]; then
+    echo "$_rd_installed"; return 0
+  fi
+  if [ -f "$_rd_tmp" ]; then
+    echo "$_rd_tmp"; return 0
+  fi
+  if [ -f "$_rd_src" ]; then
+    echo "$_rd_src"; return 0
+  fi
+  return 1
+}
+
 # gen_tunnel_uci <tunnel_name> <conf_file>
 # Prints the UCI lines that describe one AmneziaWG tunnel (interface + peer).
 # Emits allowed_ips=0.0.0.0/0 ONLY — never ::/0 (IPv4-only policy).
@@ -179,9 +203,21 @@ if [ "${1:-}" = "--migrate" ]; then
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
       mkdir -p /etc/nftables.d 2>/dev/null || true
-      sed "s/@@LAN_IFNAME@@/$LAN_DEV/" \
-        "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      # If the .ipk already installed the classifier, skip copying (it's up-to-date).
+      if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
+        amz_log "install:classifier (already present, skipping copy)"
+      else
+        _nft_src=$(resolve_dep \
+          /etc/nftables.d/30-amnezia-classify.nft \
+          30-amnezia-classify.nft \
+          nftables.d/30-amnezia-classify.nft) || true
+        if [ -n "$_nft_src" ] && [ "$_nft_src" != /etc/nftables.d/30-amnezia-classify.nft ]; then
+          sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" \
+            > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+        elif [ -z "$_nft_src" ]; then
+          amz_log "WARN: 30-amnezia-classify.nft not found; skipping classifier install"
+        fi
+      fi
       amz_log "install:classifier"
     fi
 
@@ -189,7 +225,15 @@ if [ "${1:-}" = "--migrate" ]; then
     # Moved before dnsmasq repoint so that an abort here leaves dnsmasq
     # still pointing at the old pbr nftsets — no partial-migration state.
     if [ "$_migrate_dry" != 1 ]; then
-      sh "$SCRIPT_DIR/amnezia-ru-cidr.sh" 2>/dev/null || true
+      _rucidr=$(resolve_dep \
+        /usr/bin/amnezia-ru-cidr \
+        amnezia-ru-cidr.sh \
+        amnezia-ru-cidr.sh) || true
+      if [ -n "$_rucidr" ]; then
+        sh "$_rucidr" 2>/dev/null || true
+      else
+        amz_log "WARN: amnezia-ru-cidr not found; skipping RU CIDR populate"
+      fi
     fi
 
     # Step 3: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
@@ -221,7 +265,15 @@ if [ "${1:-}" = "--migrate" ]; then
     if [ "$_migrate_dry" = 1 ]; then
       echo "repoint:dnsmasq"
     else
-      sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+      _dns_helper=$(resolve_dep \
+        /usr/sbin/configure-dnsmasq-amnezia \
+        configure-dnsmasq-amnezia.sh \
+        configure-dnsmasq-amnezia.sh) || true
+      if [ -n "$_dns_helper" ]; then
+        sh "$_dns_helper"
+      else
+        amz_log "WARN: configure-dnsmasq-amnezia not found; skipping dnsmasq repoint"
+      fi
     fi
 
     # must-tunnel→sticky migration: append old must-tunnel domains to the sticky section
@@ -278,7 +330,15 @@ if [ "${1:-}" = "--first-install" ]; then
       amz_log "install:rt_tables"
     else
       mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
-      cp "$SCRIPT_DIR/iproute2-amnezia-rt_tables.conf" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
+      _rtt_src=$(resolve_dep \
+        /etc/iproute2/rt_tables.d/amnezia.conf \
+        iproute2-amnezia-rt_tables.conf \
+        iproute2-amnezia-rt_tables.conf) || true
+      if [ -n "$_rtt_src" ] && [ "$_rtt_src" != /etc/iproute2/rt_tables.d/amnezia.conf ]; then
+        cp "$_rtt_src" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
+      elif [ -z "$_rtt_src" ]; then
+        amz_log "WARN: iproute2-amnezia-rt_tables.conf not found; skipping rt_tables install"
+      fi
       amz_log "install:rt_tables"
     fi
     # 2. ip rules
@@ -290,12 +350,33 @@ if [ "${1:-}" = "--first-install" ]; then
     else
       LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
       mkdir -p /etc/nftables.d 2>/dev/null || true
-      sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$SCRIPT_DIR/nftables.d/30-amnezia-classify.nft" \
-        > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      # If .ipk already installed the classifier, skip copying.
+      if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
+        amz_log "install:classifier (already present, skipping copy)"
+      else
+        _nft_src=$(resolve_dep \
+          /etc/nftables.d/30-amnezia-classify.nft \
+          30-amnezia-classify.nft \
+          nftables.d/30-amnezia-classify.nft) || true
+        if [ -n "$_nft_src" ] && [ "$_nft_src" != /etc/nftables.d/30-amnezia-classify.nft ]; then
+          sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" \
+            > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+        elif [ -z "$_nft_src" ]; then
+          amz_log "WARN: 30-amnezia-classify.nft not found; skipping classifier install"
+        fi
+      fi
       amz_log "install:classifier"
     fi
     # 4. dnsmasq UCI ipset
-    sh "$SCRIPT_DIR/configure-dnsmasq-amnezia.sh"
+    _dns_helper=$(resolve_dep \
+      /usr/sbin/configure-dnsmasq-amnezia \
+      configure-dnsmasq-amnezia.sh \
+      configure-dnsmasq-amnezia.sh) || true
+    if [ -n "$_dns_helper" ]; then
+      sh "$_dns_helper"
+    else
+      amz_log "WARN: configure-dnsmasq-amnezia not found; skipping dnsmasq ipset config"
+    fi
     # 5. tunnel UCI apply + bring-up + firewall zones + disable LAN IPv6 (real path only).
     if [ "$_fi_dry" != 1 ]; then
       _fi_tunnels=$(uci show amnezia 2>/dev/null \
@@ -329,15 +410,38 @@ if [ "${1:-}" = "--first-install" ]; then
     fi
     # 6. RU boot loader: install init + firewall hotplug hook (real path only).
     if [ "$_fi_dry" != 1 ]; then
-      if [ -f "$SCRIPT_DIR/amnezia-ru-load.init" ]; then
-        cp "$SCRIPT_DIR/amnezia-ru-load.init" /etc/init.d/amnezia-ru-load 2>/dev/null || true
-        chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+      # If .ipk already installed the init script, it's already enabled by procd; skip copy.
+      if [ -f /etc/init.d/amnezia-ru-load ]; then
+        amz_log "amnezia-ru-load init already present (.ipk path)"
         /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      else
+        _ruload_src=$(resolve_dep \
+          /etc/init.d/amnezia-ru-load \
+          amnezia-ru-load.init \
+          amnezia-ru-load.init) || true
+        if [ -n "$_ruload_src" ] && [ "$_ruload_src" != /etc/init.d/amnezia-ru-load ]; then
+          cp "$_ruload_src" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+        elif [ -z "$_ruload_src" ]; then
+          amz_log "WARN: amnezia-ru-load.init not found; RU CIDR load on boot disabled"
+        fi
       fi
-      if [ -f "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" ]; then
-        mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
-        cp "$SCRIPT_DIR/99-amnezia-ru-load.hotplug" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
-        chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+      # Hotplug: skip if .ipk already installed it.
+      if [ -f /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+        amz_log "99-amnezia-ru-load hotplug already present (.ipk path)"
+      else
+        _hotplug_src=$(resolve_dep \
+          /etc/hotplug.d/firewall/99-amnezia-ru-load \
+          99-amnezia-ru-load.hotplug \
+          99-amnezia-ru-load.hotplug) || true
+        if [ -n "$_hotplug_src" ] && [ "$_hotplug_src" != /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+          cp "$_hotplug_src" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        elif [ -z "$_hotplug_src" ]; then
+          amz_log "WARN: 99-amnezia-ru-load.hotplug not found; firewall reload trigger disabled"
+        fi
       fi
     fi
     # 7. monitor enable + start

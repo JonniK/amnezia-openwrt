@@ -1,0 +1,5 @@
+#!/bin/sh
+# Hotplug script: repopulate amnezia_ru4 nft set after firewall reload.
+# Placed in /etc/hotplug.d/firewall/ by the installer.
+[ "$ACTION" = "reload" ] || exit 0
+/usr/bin/amnezia-ru-cidr 2>/dev/null || true
