@@ -489,7 +489,16 @@ function renderTunnelTable(state) {
 			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
 				t.weight !== undefined ? t.weight : ''),
 			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#666;font-family:monospace;font-size:11px;' },
-				t.handshake_age !== undefined ? fmtAge(t.handshake_age ? (Math.floor(Date.now() / 1000) - t.handshake_age) : 0) : _('never')),
+				(function(age) {
+					// age is seconds-since-handshake from the daemon (-1 = never).
+					// Do NOT convert via Date.now() — the value is already an age, not an epoch.
+					if (age === undefined || age === null) return _('never');
+					if (age < 0) return _('never');
+					if (age < 60) return age + 's ago';
+					if (age < 3600) return Math.floor(age / 60) + 'm ago';
+					if (age < 86400) return Math.floor(age / 3600) + 'h ago';
+					return Math.floor(age / 86400) + 'd ago';
+				})(t.handshake_age)),
 			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
 				t.exit_ip || '')
 		]);
