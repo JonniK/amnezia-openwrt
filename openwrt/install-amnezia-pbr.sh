@@ -210,12 +210,19 @@ if [ "${1:-}" = "--migrate" ]; then
       _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
     fi
     # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
+    _ru4_abort=0
     if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
-      echo "ABORT:ru4-empty"
-      return 1
+      _ru4_abort=1
     fi
     if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ "$_ru4_abort" = 1 ]; then
       echo "ABORT:ru4-empty"
+      # Roll back: remove classifier so pbr does not run alongside new classifier.
+      if [ "$_migrate_dry" != 1 ]; then
+        rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      fi
       return 1
     fi
 
