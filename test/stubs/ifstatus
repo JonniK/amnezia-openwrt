@@ -1,0 +1,5 @@
+#!/bin/sh
+echo "ifstatus $*" >> "${STUB_LOG:-/dev/null}"
+# Return a JSON-like blob that jsonfilter can parse for .up=true.
+printf '{"up":true}\n'
+exit 0

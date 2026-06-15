@@ -491,7 +491,7 @@ if ! opkg list-installed | grep -q '^kmod-amneziawg '; then
   done
   rm -rf "$DIR"
 fi
-opkg install pbr luci-app-pbr resolveip ip-full 2>/dev/null || true
+opkg install conntrack-tools 2>/dev/null || true
 
 IF_PRIV="$(get Interface PrivateKey)"
 IF_ADDR="$(get Interface Address)"
@@ -641,113 +641,40 @@ if [ "$STEPS" -lt 2 ]; then
   exit 0
 fi
 
-# --- Step 2: PBR base (LAN -> VPN) ---
-log "Step 2: PBR base"
-LAN="$(lan_cidr)"
-[ -n "$LAN" ] || LAN="192.168.1.0/24"
-mkdir -p /etc/pbr.d
-# Step 2's PBR config is "LAN -> VPN, nothing direct yet". The .ru
-# direct rule lands in Step 3 if STEPS=3, so we drop it here so a
-# re-run isn't reading a stale file.
-rm -f /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-vpn-only.sh) || fail "missing 99-lan-vpn-vpn-only.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-while uci -q delete pbr.@policy[0]; do :; done
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci set pbr.config.enabled='1'
-uci set pbr.config.strict_enforcement='0'
-uci set pbr.config.resolver_set='none'
-uci -q delete pbr.config.supported_interface 2>/dev/null || true
-uci add_list pbr.config.supported_interface='awg1'
-uci commit pbr
-
-/etc/init.d/pbr enable
-/etc/init.d/pbr restart
-sleep 8
-pbr_nft_ok || fail "pbr.nft syntax error (step2)"
-need_wan
-need_dns
-ok "2 pbr_base"
+# --- Steps 2+3: failover stack (classifier + ip rules + monitor + RU bypass) ---
+# Replaces the old pbr/pbr.d-based Steps 2+3.  Detects whether this is a
+# fresh install (pbr absent) or a pbr-to-failover upgrade, and dispatches to
+# the appropriate wiring function.  Both functions live at the top of this
+# script (under --first-install / --migrate sections).
+log "Step 2: dnsmasq-full"
+if _dnsmasq=$(find_helper install-dnsmasq-full); then
+  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
+else
+  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
+fi
+need_dns || fail "DNS broken after dnsmasq-full"
+ok "2 dnsmasq_full"
 
 if [ "$STEPS" -lt 3 ]; then
   log "DEPLOY_DONE steps=$STEPS"
   exit 0
 fi
 
-# --- Step 3: RU bypass (ipdeny + dnsmasq nftset) ---
-log "Step 3: RU bypass"
+log "Step 3: failover stack wiring"
+if /etc/init.d/pbr status >/dev/null 2>&1 || opkg list-installed 2>/dev/null | grep -q '^pbr '; then
+  # pbr is still present: run ordered migration so RU sets are live before pbr is removed.
+  log "Step 3: pbr detected — running migrate_from_pbr"
+  # Inline the migrate_from_pbr logic using the flags the top-of-script block accepts.
+  # Re-exec ourselves with --migrate so the already-defined function runs cleanly,
+  # inheriting SCRIPT_DIR, CONF_DIR, and all sourced libs.
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --migrate || fail "migrate_from_pbr failed"
+else
+  # Fresh install: wire classifier, ip rules, monitor, firewall zones.
+  log "Step 3: no pbr found — running first_install_wiring"
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --first-install || fail "first_install_wiring failed"
+fi
 
-mkdir -p /etc/nftables.d
-cat > /etc/nftables.d/15-pbr-ru-tld4.nft <<'NFTFRAG'
-	set pbr_ru_tld4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-NFTFRAG
 /etc/init.d/firewall reload 2>/dev/null || true
-sleep 2
 
-if _dnsmasq=$(find_helper install-dnsmasq-full); then
-  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
-else
-  # .ipk path declares dnsmasq-full as a hard DEPENDS, so opkg already has
-  # it installed. No-op.
-  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
-fi
-need_dns || fail "DNS broken after dnsmasq-full"
-
-if _nftset=$(find_helper configure-dnsmasq-ru-nftset); then
-  $_nftset 2>/dev/null || fail "dnsmasq .ru nftset config"
-else
-  log "WARN: configure-dnsmasq-ru-nftset helper missing; .ru nftset not wired"
-fi
-
-# ru-direct + full LAN rules (idempotent — no duplicate nft rules on pbr restart).
-# ru-direct.sh ships at /etc/pbr.d/ in .ipk; copy from /tmp/ only when present.
-if [ -f /tmp/ru-direct.sh ]; then
-  cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
-fi
-chmod 755 /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-full.sh) || fail "missing 99-lan-vpn-full.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci commit pbr
-
-/etc/init.d/pbr restart
-sleep 10
-pbr_nft_ok || fail "pbr.nft syntax error (step3 ru-direct)"
-logread 2>/dev/null | tail -20 | grep -qi "FAILED TO START" && fail "PBR failed to start step3"
-
-/etc/init.d/dnsmasq restart 2>/dev/null || true
-sleep 3
-need_wan
-need_dns
-nslookup -type=A mail.ru 127.0.0.1 >/dev/null 2>&1 || log "WARN: mail.ru lookup failed (may need time)"
-
-_ipdeny=$(nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l)
-_ipdeny=$(printf '%s' "$_ipdeny" | tr -d ' ')
-log "ipdeny entries: $_ipdeny"
-[ "$_ipdeny" -gt 100 ] || fail "ipdeny set too small ($_ipdeny)"
-
-ok "3 ru_bypass"
+ok "3 failover_wiring"
 log "DEPLOY_DONE steps=$STEPS"

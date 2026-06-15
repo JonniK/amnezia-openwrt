@@ -1,0 +1,13 @@
+#!/bin/sh
+echo "opkg $*" >> "${STUB_LOG:-/dev/null}"
+case "$1 $2" in
+  "list-installed"*)
+    # dnsmasq-full is present by default (new stack requires it).
+    # Set OPKG_NO_DNSMASQ_FULL=1 to simulate it missing.
+    [ "${OPKG_NO_DNSMASQ_FULL:-0}" != 1 ] && echo "dnsmasq-full - 2.89"
+    # kmod-amneziawg: set OPKG_HAS_AWG=1 to simulate already installed.
+    if [ "${OPKG_HAS_AWG:-0}" = 1 ]; then echo "kmod-amneziawg - 1.0"; fi
+    # pbr: set OPKG_HAS_PBR=1 to simulate pbr present (upgrade scenario).
+    if [ "${OPKG_HAS_PBR:-0}" = 1 ]; then echo "pbr - 0.9.1"; fi ;;
+esac
+exit 0

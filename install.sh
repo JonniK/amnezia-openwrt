@@ -84,13 +84,13 @@ tar xzf payload.tar.gz -C payload --strip-components=1 || fail "extract failed"
 # --- Stage files where install-amnezia-pbr.sh expects them ---
 echo "install: staging payload to /tmp/"
 SRC=payload/openwrt
-for _f in pbr.d/ru-direct.sh pbr.d/99-lan-vpn-full.sh pbr.d/99-lan-vpn-vpn-only.sh \
-          install-dnsmasq-full.sh configure-dnsmasq-ru-nftset.sh \
-          awg-toggle.sh pbr-status.sh pbr-reload.sh install-luci-toggle.sh \
+for _f in install-dnsmasq-full.sh configure-dnsmasq-amnezia.sh \
+          awg-toggle.sh install-luci-toggle.sh \
           zapret-toggle.sh zapret-status.sh zapret-blockcheck.sh \
           zapret-apply.sh zapret-probe.sh zapret-verify.sh \
-          seed-must-tunnel.list install-zapret.sh install-luci-app-amnezia.sh \
-          install-amnezia-pbr.sh awg-ru-update.sh awg-status.sh; do
+          seed-must-tunnel.list seed-sticky-domains.list install-zapret.sh \
+          install-luci-app-amnezia.sh install-amnezia-pbr.sh \
+          awg-ru-update.sh awg-status.sh; do
 	[ -f "$SRC/$_f" ] && cp "$SRC/$_f" "/tmp/$(basename "$_f")" || \
 		err "WARN: $_f missing from payload; some functionality may degrade"
 done
