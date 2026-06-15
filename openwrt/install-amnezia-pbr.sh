@@ -185,7 +185,39 @@ if [ "${1:-}" = "--migrate" ]; then
       amz_log "install:classifier"
     fi
 
-    # Step 2: repoint dnsmasq to amnezia nftsets.
+    # Step 2: populate @amnezia_ru4 from persist before the gate check.
+    # Moved before dnsmasq repoint so that an abort here leaves dnsmasq
+    # still pointing at the old pbr nftsets — no partial-migration state.
+    if [ "$_migrate_dry" != 1 ]; then
+      sh "$SCRIPT_DIR/amnezia-ru-cidr.sh" 2>/dev/null || true
+    fi
+
+    # Step 3: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
+    # If this gate fails we roll back only the classifier; dnsmasq is untouched.
+    _ru4_count=0
+    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
+    if echo "$_ru4_out" | grep -q 'elements'; then
+      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
+    fi
+    # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
+    _ru4_abort=0
+    if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ "$_ru4_abort" = 1 ]; then
+      echo "ABORT:ru4-empty"
+      # Roll back: remove classifier so pbr does not run alongside new classifier.
+      # dnsmasq has NOT been repointed yet, so no dnsmasq rollback is needed.
+      if [ "$_migrate_dry" != 1 ]; then
+        rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      fi
+      return 1
+    fi
+
+    # Step 4: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
     if [ "$_migrate_dry" = 1 ]; then
       echo "repoint:dnsmasq"
     else
@@ -206,35 +238,7 @@ if [ "${1:-}" = "--migrate" ]; then
       done < "$MUST_TUNNEL_LIST"
     fi
 
-    # Step 3a: populate @amnezia_ru4 from persist before the gate check.
-    if [ "$_migrate_dry" != 1 ]; then
-      sh "$SCRIPT_DIR/amnezia-ru-cidr.sh" 2>/dev/null || true
-    fi
-
-    # Step 3b: gate on @amnezia_ru4 being non-empty before removing pbr.
-    _ru4_count=0
-    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
-    if echo "$_ru4_out" | grep -q 'elements'; then
-      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
-    fi
-    # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
-    _ru4_abort=0
-    if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
-      _ru4_abort=1
-    fi
-    if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
-      _ru4_abort=1
-    fi
-    if [ "$_ru4_abort" = 1 ]; then
-      echo "ABORT:ru4-empty"
-      # Roll back: remove classifier so pbr does not run alongside new classifier.
-      if [ "$_migrate_dry" != 1 ]; then
-        rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
-      fi
-      return 1
-    fi
-
-    # Step 4: remove pbr (AFTER classifier is installed and ru4 is populated).
+    # Step 5: remove pbr (AFTER classifier is installed, ru4 is populated, dnsmasq repointed).
     if [ "$_migrate_dry" = 1 ]; then
       echo "remove:pbr"
     else
@@ -243,7 +247,7 @@ if [ "${1:-}" = "--migrate" ]; then
       opkg remove pbr luci-app-pbr 2>/dev/null || true
     fi
 
-    # Step 5: apply firewall zones + disable LAN IPv6 (real path only).
+    # Step 6: apply firewall zones + disable LAN IPv6 (real path only).
     if [ "$_migrate_dry" != 1 ]; then
       _mig_tunnels=$(uci show amnezia 2>/dev/null \
         | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')

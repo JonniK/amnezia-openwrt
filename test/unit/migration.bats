@@ -48,3 +48,25 @@ load '../lib/harness.bash'
   # A delete of the list section must precede the add_list repopulation.
   grep -q "uci -q delete dhcp.amnezia_sticky" "$STUB_LOG"
 }
+@test "aborted migration (ru4-empty) does NOT leave dnsmasq repointed" {
+  # When @amnezia_ru4 is empty the migration must abort before touching dnsmasq.
+  # In dry-run the 'repoint:dnsmasq' marker must NOT appear in stdout.
+  NFT_FAKE_RU4_COUNT=0 run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate --dry-run
+  echo "$output" | grep -q "ABORT:ru4-empty"
+  ! echo "$output" | grep -q "repoint:dnsmasq"
+  # In the real (non-dry-run) path, configure-dnsmasq-amnezia.sh must not be called.
+  ! grep -q "configure-dnsmasq-amnezia" "$STUB_LOG"
+}
+@test "successful migration repoints dnsmasq AFTER the ru4 gate (ordering)" {
+  NFT_FAKE_RU4_COUNT=12 run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate --dry-run
+  o="$output"
+  echo "$o" | grep -q "install:classifier"
+  echo "$o" | grep -q "repoint:dnsmasq"
+  echo "$o" | grep -q "remove:pbr"
+  # install:classifier must appear before repoint:dnsmasq
+  pos_classifier=$(echo "$o" | grep -n "install:classifier" | head -1 | cut -d: -f1)
+  pos_dnsmasq=$(echo "$o"    | grep -n "repoint:dnsmasq"    | head -1 | cut -d: -f1)
+  pos_remove=$(echo "$o"     | grep -n "remove:pbr"          | head -1 | cut -d: -f1)
+  [ "$pos_classifier" -lt "$pos_dnsmasq" ]
+  [ "$pos_dnsmasq" -lt "$pos_remove" ]
+}
