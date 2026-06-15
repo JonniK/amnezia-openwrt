@@ -23,3 +23,22 @@ routing_set_sticky_default() {
   if [ -z "$1" ]; then ip route replace blackhole default table "$TBL_STICKY"
   else ip route replace default dev "$1" table "$TBL_STICKY"; fi
 }
+routing_nexthop_supported() {
+  [ -n "$IP_NEXTHOP_OK" ] && return "$([ "$IP_NEXTHOP_OK" = 1 ] && echo 0 || echo 1)"
+  ip nexthop help >/dev/null 2>&1 && [ -e /proc/sys/net/ipv4/fib_multipath_hash_policy ]
+}
+# $1 = "devA:weightA devB:weightB ..." (healthy members, highest priority first)
+routing_set_pool_balance() {
+  if ! routing_nexthop_supported; then
+    set -- $1; _first=${1%%:*}; routing_set_pool_default "$_first"; return
+  fi
+  sysctl -w net.ipv4.fib_multipath_hash_policy=1 >/dev/null 2>&1 || true
+  _grp=""; _id=10
+  for _m in $1; do
+    _dev=${_m%%:*}; _w=${_m##*:}
+    ip nexthop replace id "$_id" dev "$_dev"
+    _grp="${_grp}${_id},${_w}/"; _id=$((_id+1))
+  done
+  ip nexthop replace id "$TBL_POOL" group "${_grp%/}" type resilient buckets 128 idle_timer 120
+  ip route replace default nhid "$TBL_POOL" table "$TBL_POOL"
+}

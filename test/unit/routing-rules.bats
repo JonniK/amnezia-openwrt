@@ -19,3 +19,12 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; . "$HARNESS_DIR/../
   routing_set_pool_default "awg2"
   grep -q "ip route replace default dev awg2 table 101" "$STUB_LOG"
 }
+@test "balance mode builds a resilient weighted nexthop group when supported" {
+  IP_NEXTHOP_OK=1 routing_set_pool_balance "awg1:2 awg2:1"
+  grep -q "ip nexthop replace id 101 group" "$STUB_LOG"
+  grep -q "ip route replace default nhid 101 table 101" "$STUB_LOG"
+}
+@test "balance mode falls back to single dev when nexthop unsupported" {
+  IP_NEXTHOP_OK=0 routing_set_pool_balance "awg1:2 awg2:1"
+  grep -q "ip route replace default dev awg1 table 101" "$STUB_LOG"
+}
