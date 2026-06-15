@@ -124,10 +124,18 @@ reconcile() {
 write_state() {
   _pool=$1; _stk=$2; _alldown=true; [ -n "$_pool" ] && _alldown=false
   _t=""
+  _now=$(date +%s 2>/dev/null || echo 0)
   for _m in $MEMBERS; do _n=${_m%%:*}; _met=$(echo "$_m"|cut -d: -f2); _w=$(echo "$_m"|cut -d: -f3)
     _up=false; _is_healthy "$_n" && _up=true
     _car=false; { [ "$_n" = "$_pool" ] || [ "$_n" = "$_stk" ]; } && _car=true
-    _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":-1,\"carrying\":$_car,\"exit_ip\":null},"
+    # exit_ip is deferred to a future enhancement (requires a bound external probe, throttled).
+    _hs=$(awg show "$_n" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
+    if [ -n "$_hs" ] && [ "$_hs" -gt 0 ] 2>/dev/null; then
+      _hs_age=$(( _now - _hs ))
+    else
+      _hs_age=-1
+    fi
+    _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":$_hs_age,\"carrying\":$_car,\"exit_ip\":null},"
   done
   printf '{"mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"tunnels":[%s]}\n' \
     "$MODE" "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
