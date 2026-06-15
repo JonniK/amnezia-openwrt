@@ -26,7 +26,7 @@
 # This script intentionally has no SSH knowledge -- the maintainer wrapper
 # (dev/deploy-openwrt-safe.sh) handles SSH, the public bootstrap
 # (install.sh) handles tarball download. Both end up here.
-# shellcheck disable=SC2039
+# shellcheck disable=SC2039,SC2154
 set -eu
 
 usage() {
