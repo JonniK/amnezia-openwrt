@@ -14,3 +14,10 @@ setup() {
   grep -q "\"name\":\"awg1\"" "$BATS_TEST_TMPDIR/s.json"
   grep -q "\"up\":false" "$BATS_TEST_TMPDIR/s.json"   # awg1 not in HEALTHY
 }
+@test "state write is atomic: no .tmp file left behind after write_state" {
+  # Issue LOW: write to tmp then mv so LuCI reader never sees partial JSON.
+  MODE=failover MEMBERS="awg1:1:1" HEALTHY="awg1" STATE_FILE="$BATS_TEST_TMPDIR/atomic.json"
+  write_state awg1 awg1
+  [ -f "$BATS_TEST_TMPDIR/atomic.json" ]          # final file present
+  ! ls "$BATS_TEST_TMPDIR"/atomic.json.tmp.* 2>/dev/null  # no leftover tmp
+}

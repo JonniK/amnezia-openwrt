@@ -159,9 +159,13 @@ write_state() {
     fi
     _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":$_hs_age,\"carrying\":$_car,\"exit_ip\":null},"
   done
+  # Write to a temp file on the same filesystem then atomically rename so the
+  # LuCI reader never sees a partial/truncated JSON.
+  _sf_tmp="${STATE_FILE}.tmp.$$"
   printf '{"mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"tunnels":[%s]}\n' \
     "$MODE" "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
-    "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" "$_alldown" "${_t%,}" > "$STATE_FILE"
+    "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" "$_alldown" "${_t%,}" > "$_sf_tmp"
+  mv "$_sf_tmp" "$STATE_FILE"
 }
 
 # ── main loop ────────────────────────────────────────────────────────────────
