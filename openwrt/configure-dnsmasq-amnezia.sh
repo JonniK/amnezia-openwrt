@@ -1,0 +1,29 @@
+#!/bin/sh
+# Configure dnsmasq to populate amnezia nftsets via UCI ipset sections.
+# Requires dnsmasq-full with nftset support. Safe to re-run.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+STICKY_LIST="${STICKY_LIST:-$SCRIPT_DIR/seed-sticky-domains.list}"
+
+# RU TLD -> amnezia_ru_tld4
+uci -q delete dhcp.amnezia_ru_tld 2>/dev/null || true
+uci set dhcp.amnezia_ru_tld='ipset'
+uci add_list dhcp.amnezia_ru_tld.name='amnezia_ru_tld4'
+uci add_list dhcp.amnezia_ru_tld.domain='.ru'
+uci set dhcp.amnezia_ru_tld.table='fw4'
+uci set dhcp.amnezia_ru_tld.table_family='inet'
+
+# Sticky domains -> amnezia_sticky4
+uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
+uci set dhcp.amnezia_sticky='ipset'
+uci add_list dhcp.amnezia_sticky.name='amnezia_sticky4'
+uci set dhcp.amnezia_sticky.table='fw4'
+uci set dhcp.amnezia_sticky.table_family='inet'
+while IFS= read -r _dom; do
+  case "$_dom" in ''|\#*) continue ;; esac
+  uci add_list dhcp.amnezia_sticky.domain="$_dom"
+done < "$STICKY_LIST"
+
+uci commit dhcp
+( sleep 1 && /etc/init.d/dnsmasq restart ) &
