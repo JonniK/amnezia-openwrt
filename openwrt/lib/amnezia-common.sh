@@ -21,6 +21,13 @@ amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBU
 # Parse an AmneziaWG client .conf into AWG_<Key> vars. Endpoint split into host/port.
 parse_awg_conf() {
   _f=$1; [ -f "$_f" ] || { amz_log "conf missing: $_f"; return 1; }
+  # Clear all optional fields so a PSK-bearing conf never leaks into a PSK-less one.
+  AWG_PrivateKey=""; AWG_Address=""; AWG_Jc=""; AWG_Jmin=""; AWG_Jmax=""
+  AWG_S1=""; AWG_S2=""; AWG_S3=""; AWG_S4=""
+  AWG_H1=""; AWG_H2=""; AWG_H3=""; AWG_H4=""
+  AWG_I1=""; AWG_I2=""; AWG_I3=""; AWG_I4=""; AWG_I5=""
+  AWG_PublicKey=""; AWG_PresharedKey=""; AWG_Endpoint_host=""; AWG_Endpoint_port=""
+  AWG_PersistentKeepalive=""
   _sec=""
   while IFS= read -r _line; do
     _line=$(printf '%s' "$_line" | tr -d '\r')

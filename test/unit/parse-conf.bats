@@ -21,3 +21,11 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; }
   run parse_awg_conf /no/such/file
   [ "$status" -ne 0 ]
 }
+@test "parse_awg_conf does not leak PSK from first conf into second PSK-less conf" {
+  # Parse a conf that HAS a PresharedKey first.
+  parse_awg_conf "$HARNESS_DIR/../test/fixtures/awg-sample.conf"
+  [ "$AWG_PresharedKey" = "CCC_psk" ]
+  # Now parse a conf that has NO PresharedKey -- AWG_PresharedKey must be empty.
+  parse_awg_conf "$HARNESS_DIR/../test/fixtures/awg-nopsk.conf"
+  [ -z "${AWG_PresharedKey:-}" ]
+}
