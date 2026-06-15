@@ -120,7 +120,8 @@ reconcile() {
         _is_healthy "$_n" && continue  # still healthy, skip
         _midx=$(_member_idx "$_n")
         _cmk=$(printf '0x%06x' "$_midx")
-        conntrack -D -m "${_cmk}/${MARK_MASK}" >/dev/null 2>&1
+        _msk=$(printf '%s' "$MARK_MASK" | tr 'A-F' 'a-f')
+        conntrack -D -m "${_cmk}/${_msk}" >/dev/null 2>&1
       done
     fi
   else
