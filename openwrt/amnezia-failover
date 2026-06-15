@@ -160,9 +160,21 @@ run_loop() {
   HEALTHY=""
   _PREV_POOL=""; _PREV_STKY=""; _PREV_HEALTHY=""
 
-  # Subscribe to ubus network events in background; on event, write a trigger file.
+  # Subscribe to netifd interface events and touch the trigger on each event so the
+  # poll loop wakes up early.  The inner loop re-arms the listener if it dies (e.g.
+  # ubus restart or netifd reload).  NOTE: the exact ubus object/method name for
+  # OpenWrt 24.10 must be confirmed in the Tier-3 hardware spike; "network.interface"
+  # is the canonical netifd event bus object.  Periodic polling remains the fallback.
   _trigger="$ST_DIR/immediate"
-  ( ubus subscribe network.interface 2>/dev/null; touch "$_trigger" ) &
+  (
+    while true; do
+      ubus listen network.interface 2>/dev/null | while IFS= read -r _evt; do
+        touch "$_trigger"
+      done
+      # Listener exited (ubus unavailable or restarted); brief pause before re-arm.
+      sleep 2
+    done
+  ) &
   _ubus_pid=$!
 
   amz_log "failover loop started: members=$MEMBERS mode=$MODE"
