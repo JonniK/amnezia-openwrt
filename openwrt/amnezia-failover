@@ -177,6 +177,10 @@ run_loop() {
   # OpenWrt 24.10 must be confirmed in the Tier-3 hardware spike; "network.interface"
   # is the canonical netifd event bus object.  Periodic polling remains the fallback.
   _trigger="$ST_DIR/immediate"
+  # Spawn the listener in its own process group (setsid) so that killing the
+  # subshell PID also delivers SIGTERM to the child "ubus listen" process.
+  # BusyBox kill on just the subshell PID does not automatically reap its exec'd
+  # child, but killing the process group (-$_ubus_pid) does.
   (
     while true; do
       ubus listen network.interface 2>/dev/null | while IFS= read -r _evt; do
@@ -187,6 +191,29 @@ run_loop() {
     done
   ) &
   _ubus_pid=$!
+
+  # ── cleanup trap ─────────────────────────────────────────────────────────────
+  # Must be defined after _ubus_pid is assigned so the variable is in scope.
+  # Registered for TERM (procd stop/restart), INT (manual Ctrl-C), and EXIT
+  # (any other exit path).  The EXIT trap fires even when TERM/INT are caught,
+  # so we guard with a flag to avoid running cleanup twice.
+  _cleanup_done=0
+  _daemon_cleanup() {
+    [ "$_cleanup_done" = 1 ] && return
+    _cleanup_done=1
+    # Kill the listener subshell and its child "ubus listen".  Try process-group
+    # kill first (works when the subshell did not exec away); fall back to direct
+    # PID kill.  Silence errors in case the process already exited.
+    kill -- "-${_ubus_pid}" 2>/dev/null || kill -- "$_ubus_pid" 2>/dev/null
+    # Free the per-member probe route + ip rule that probe_setup installed.
+    for _m in $MEMBERS; do _n=${_m%%:*}
+      _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
+      probe_cleanup "$_n" "$_track"
+    done
+    amz_log "failover daemon stopped"
+    exit 0
+  }
+  trap '_daemon_cleanup' TERM INT EXIT
 
   amz_log "failover loop started: members=$MEMBERS mode=$MODE"
   while true; do
@@ -211,13 +238,6 @@ run_loop() {
       [ -f "$_trigger" ] && break
     done
   done
-
-  # Cleanup on exit
-  for _m in $MEMBERS; do _n=${_m%%:*}
-    _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
-    probe_cleanup "$_n" "$_track"
-  done
-  kill "$_ubus_pid" 2>/dev/null
 }
 
 [ "$1" = "--source-only" ] && return 0 2>/dev/null
