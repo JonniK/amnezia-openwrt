@@ -3,24 +3,25 @@
 		"description": "AmneziaWG tunnel toggle, RU IP list refresh, and live status",
 		"read": {
 			"file": {
-				"/etc/amnezia/ru-update.json":      [ "read" ],
-				"/etc/amnezia/blockcheck.json":     [ "read" ],
-				"/etc/amnezia/seed-must-tunnel.list":[ "read" ]
+				"/etc/amnezia/ru-update.json":          [ "read" ],
+				"/etc/amnezia/blockcheck.json":         [ "read" ],
+				"/etc/amnezia/seed-must-tunnel.list":   [ "read" ],
+				"/var/run/amnezia-failover.json":        [ "read" ]
 			}
 		},
 		"write": {
 			"file": {
-				"/usr/bin/awg-toggle":       [ "exec" ],
-				"/usr/bin/awg-status":       [ "exec" ],
-				"/usr/bin/awg-ru-update":    [ "exec" ],
-				"/usr/bin/zapret-toggle":    [ "exec" ],
-				"/usr/bin/zapret-status":    [ "exec" ],
-				"/usr/bin/zapret-blockcheck":[ "exec" ],
-				"/usr/bin/zapret-apply":     [ "exec" ],
-				"/usr/bin/zapret-probe":     [ "exec" ],
-				"/usr/bin/zapret-verify":    [ "exec" ],
-				"/usr/bin/pbr-status":       [ "exec" ],
-				"/usr/bin/pbr-reload":       [ "exec" ]
+				"/usr/bin/awg-toggle":              [ "exec" ],
+				"/usr/bin/awg-status":              [ "exec" ],
+				"/usr/bin/awg-ru-update":           [ "exec" ],
+				"/usr/bin/zapret-toggle":           [ "exec" ],
+				"/usr/bin/zapret-status":           [ "exec" ],
+				"/usr/bin/zapret-blockcheck":       [ "exec" ],
+				"/usr/bin/zapret-apply":            [ "exec" ],
+				"/usr/bin/zapret-probe":            [ "exec" ],
+				"/usr/bin/zapret-verify":           [ "exec" ],
+				"/usr/bin/amnezia-failover-ctl":    [ "exec" ],
+				"/usr/bin/amnezia-status":          [ "exec" ]
 			}
 		}
 	}
