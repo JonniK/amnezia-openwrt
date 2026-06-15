@@ -14,12 +14,21 @@ setup() {
   grep -q "ip route replace default dev awg2 table 101" "$STUB_LOG"      # pool -> only healthy
   grep -q "ip route replace default dev awg2 table 100" "$STUB_LOG"      # sticky re-pinned (awg1 down)
 }
-@test "all down -> blackhole both tables + selective flush only on change" {
+@test "all down -> blackhole both tables + flush on change" {
   MODE=failover MEMBERS="awg1:1:1" HEALTHY=""
   _PREV_POOL="awg1" _PREV_STKY="awg1"  # was up, now going down -> change
   run reconcile
   grep -q "ip route replace blackhole default table 101" "$STUB_LOG"
   grep -q "ip route replace blackhole default table 100" "$STUB_LOG"
+  grep -q "conntrack -D" "$STUB_LOG"
+}
+@test "hot failover awg1->awg2: conntrack flush fires (non-empty pool, _changed=1)" {
+  # Regression guard for issue #7: flush must run on a live tunnel switch,
+  # not only when the new pool is empty (blackhole/all-down).
+  MODE=failover MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg2"
+  _PREV_POOL="awg1" _PREV_STKY="awg1"  # switch from awg1 (down) to awg2 (up)
+  run reconcile
+  grep -q "ip route replace default dev awg2 table 101" "$STUB_LOG"
   grep -q "conntrack -D" "$STUB_LOG"
 }
 @test "no flush when pool does NOT change (no-change path)" {

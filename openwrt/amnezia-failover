@@ -131,8 +131,10 @@ reconcile() {
     # which is not yet implemented.
   else
     routing_set_pool_default "$_pool"
-    # Flush pool mark only when pool actually changed
-    [ "$_changed" = 1 ] && [ -z "$_pool" ] && \
+    # Flush conntrack pool-mark entries on every switch (including awg1→awg2
+    # hot failover, not just all-down/blackhole).  Masqueraded flows SNAT'd
+    # through the old tunnel would otherwise stay pinned to the dead interface.
+    [ "$_changed" = 1 ] && \
       conntrack -D -m "$POOL_MARK/$MARK_MASK" >/dev/null 2>&1
   fi
   routing_set_sticky_default "$_stk"
