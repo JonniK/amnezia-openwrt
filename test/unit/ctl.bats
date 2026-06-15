@@ -29,10 +29,22 @@ load '../lib/harness.bash'
   run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" set-weight awg1
   [ "$status" -ne 0 ]
 }
+@test "ctl set-weight rejects invalid tunnel name" {
+  run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" set-weight "../../etc/passwd" 3
+  [ "$status" -ne 0 ]
+}
+@test "ctl set-weight rejects non-integer weight" {
+  run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" set-weight awg1 "3;rm -rf /"
+  [ "$status" -ne 0 ]
+}
 @test "ctl toggle enables a tunnel" {
   run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" toggle awg2
   [ "$status" -eq 0 ]
   grep -q "uci commit amnezia" "$STUB_LOG"
+}
+@test "ctl toggle rejects invalid tunnel name" {
+  run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" toggle "../../etc/passwd"
+  [ "$status" -ne 0 ]
 }
 @test "ctl rejects unknown command" {
   run sh "$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh" frobnicate
