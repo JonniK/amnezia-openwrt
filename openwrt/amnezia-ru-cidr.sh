@@ -3,8 +3,10 @@
 _RU_SRC_OVERRIDE="${RU_SRC:-}"
 _RU_CIDR_OVERRIDE="${RU_CIDR_PERSIST:-}"
 if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
+  # shellcheck disable=SC1091
   . /usr/lib/amnezia/amnezia-common.sh
 else
+  # shellcheck disable=SC1091
   . "$(dirname "$0")/lib/amnezia-common.sh"
 fi
 # Caller env vars take precedence over lib defaults.

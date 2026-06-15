@@ -1,16 +1,17 @@
 # Shared constants + helpers for amnezia multi-tunnel. POSIX sh (BusyBox ash).
-STICKY_MARK=0x0A0000
-POOL_MARK=0x0B0000
-MARK_MASK=0x0FF0000
-TBL_STICKY=100
-TBL_POOL=101
-SET_RU4=amnezia_ru4
-SET_RU_TLD4=amnezia_ru_tld4
-SET_STICKY4=amnezia_sticky4
-STATE_FILE=/var/run/amnezia-failover.json
-CONF_DIR=/etc/amnezia
-RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
-MAX_TUNNELS=5
+# shellcheck disable=SC2034  # These are library exports; consumers source this file.
+export STICKY_MARK=0x0A0000
+export POOL_MARK=0x0B0000
+export MARK_MASK=0x0FF0000
+export TBL_STICKY=100
+export TBL_POOL=101
+export SET_RU4=amnezia_ru4
+export SET_RU_TLD4=amnezia_ru_tld4
+export SET_STICKY4=amnezia_sticky4
+export STATE_FILE=/var/run/amnezia-failover.json
+export CONF_DIR=/etc/amnezia
+export RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
+export MAX_TUNNELS=5
 
 # Per-member conntrack mark (balance mode): low byte only, never the selector nibble.
 member_ctmark() { printf '0x%06x\n' "$1"; }
@@ -33,6 +34,7 @@ parse_awg_conf() {
     _v=$(printf '%s' "${_line#*=}" | sed 's/^[ \t]*//; s/[ \t]*$//')
     [ -n "$_sec" ] || continue
     if [ "$_k" = Endpoint ]; then
+      # shellcheck disable=SC2034  # Set for caller inspection after parse_awg_conf.
       AWG_Endpoint_host=${_v%:*}; AWG_Endpoint_port=${_v##*:}
     fi
     eval "AWG_${_k}=\$_v"

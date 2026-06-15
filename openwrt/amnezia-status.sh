@@ -1,8 +1,10 @@
 #!/bin/sh
 # Emits the monitor state JSON. With --emit-empty, prints a valid empty doc (for tests/boot).
 if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
+  # shellcheck disable=SC1091
   . /usr/lib/amnezia/amnezia-common.sh
 else
+  # shellcheck disable=SC1091
   . "$(dirname "$0")/lib/amnezia-common.sh"
 fi
 emit_empty() {
@@ -12,5 +14,10 @@ JSON
 }
 case "$1" in
   --emit-empty) emit_empty ;;
-  *) [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || emit_empty ;;
+  *)
+    if [ -f "$STATE_FILE" ]; then
+      cat "$STATE_FILE"
+    else
+      emit_empty
+    fi ;;
 esac
