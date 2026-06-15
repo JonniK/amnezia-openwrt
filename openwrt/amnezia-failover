@@ -92,11 +92,6 @@ _sticky_pick() {  # prefer sticky_target if healthy, else best pool
   _best_pool
 }
 
-# Member index (1-based) for per-member conntrack mark in balance mode.
-_member_idx() {
-  _i=1; for _m in $MEMBERS; do [ "${_m%%:*}" = "$1" ] && { echo "$_i"; return; }; _i=$((_i+1)); done; echo 0
-}
-
 reconcile() {
   _pool=$(_best_pool); _stk=$(_sticky_pick)
   _changed=0
@@ -104,23 +99,16 @@ reconcile() {
   [ "$_stk"  != "${_PREV_STKY:-}" ] && _changed=1
 
   if [ "$MODE" = balance ]; then
-    _list=""; _idx=1
+    _list=""
     for _m in $MEMBERS; do _n=${_m%%:*}; _w=$(echo "$_m" | cut -d: -f3)
       _is_healthy "$_n" && _list="$_list $_n:$_w"
-      _idx=$((_idx+1))
     done
     if [ -n "$_list" ]; then routing_set_pool_balance "$_list"; else routing_set_pool_default ""; fi
-    # Flush only members that DEPARTED the healthy set (member-scoped by conntrack mark)
-    if [ "$_changed" = 1 ]; then
-      for _m in $MEMBERS; do _n=${_m%%:*}
-        case " ${_PREV_HEALTHY:-} " in *" $_n "*) ;; *) continue ;; esac  # was not healthy, skip
-        _is_healthy "$_n" && continue  # still healthy, skip
-        _midx=$(_member_idx "$_n")
-        _cmk=$(printf '0x%06x' "$_midx")
-        _msk=$(printf '%s' "$MARK_MASK" | tr 'A-F' 'a-f')
-        conntrack -D -m "${_cmk}/${_msk}" >/dev/null 2>&1
-      done
-    fi
+    # Balance-mode flow migration off a departed member is handled by the resilient
+    # nexthop group (idle_timer + bucket reassignment in routing_set_pool_balance).
+    # Per-member surgical conntrack flushing (by low-byte ctmark) is a documented
+    # future enhancement: it requires a classifier that stamps per-member marks,
+    # which is not yet implemented.
   else
     routing_set_pool_default "$_pool"
     # Flush pool mark only when pool actually changed

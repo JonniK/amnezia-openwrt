@@ -28,12 +28,13 @@ setup() {
   run reconcile
   ! grep -q "conntrack -D" "$STUB_LOG"
 }
-@test "balance mode flushes only departed member marks, not whole pool" {
+@test "balance mode does NOT emit a member-scoped conntrack flush (flow migration via resilient nexthop)" {
+  # Per-member surgical conntrack flushing is a future enhancement; balance mode
+  # relies on the resilient nexthop group idle_timer/bucket reassignment instead.
   MODE=balance MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1"
-  _PREV_HEALTHY="awg1 awg2"  # awg2 departed
+  _PREV_POOL="" _PREV_STKY="" _PREV_HEALTHY="awg1 awg2"  # awg2 departed
   run reconcile
-  grep -q "conntrack -D -m 0x000002/0x0ff0000" "$STUB_LOG"  # awg2 = member index 2
-  ! grep -q "conntrack -D -m 0x0b0000" "$STUB_LOG"
+  ! grep -q "conntrack -D" "$STUB_LOG"
 }
 @test "sticky stays on healthy sticky_target when it is up" {
   MODE=failover MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1 awg2" STICKY_TARGET=awg1
