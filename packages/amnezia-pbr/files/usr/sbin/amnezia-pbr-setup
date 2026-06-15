@@ -197,7 +197,13 @@ if [ "${1:-}" = "--migrate" ]; then
   MUST_TUNNEL_LIST="${MUST_TUNNEL_LIST:-/etc/amnezia/seed-must-tunnel.list}"
 
   migrate_from_pbr() {
-    # Step 1: declare/install classifier.
+    # -----------------------------------------------------------------------
+    # GATE PHASE: classifier file is installed and ru4 set populated, but the
+    # marking rules are NOT yet active and pbr stays intact — clean abort is
+    # possible up to and including the gate check.
+    # -----------------------------------------------------------------------
+
+    # Step 1: install classifier file (no fw4 reload — not activated yet).
     if [ "$_migrate_dry" = 1 ]; then
       echo "install:classifier"
     else
@@ -221,7 +227,17 @@ if [ "${1:-}" = "--migrate" ]; then
       amz_log "install:classifier"
     fi
 
-    # Step 2: populate @amnezia_ru4 from persist before the gate check.
+    # Step 2: declare @amnezia_ru4 in the live ruleset so that amnezia-ru-cidr
+    # can populate it via `nft add element`.  Without this declaration the set
+    # does not exist and every element add is silently discarded, leaving the
+    # set empty and the gate below always aborting on real hardware.
+    if [ "$_migrate_dry" != 1 ]; then
+      nft add table inet fw4 2>/dev/null || true
+      nft add set inet fw4 amnezia_ru4 \
+        '{ type ipv4_addr; flags interval; auto-merge; }' 2>/dev/null || true
+    fi
+
+    # Step 3: populate @amnezia_ru4 from persist before the gate check.
     # Moved before dnsmasq repoint so that an abort here leaves dnsmasq
     # still pointing at the old pbr nftsets — no partial-migration state.
     if [ "$_migrate_dry" != 1 ]; then
@@ -236,7 +252,7 @@ if [ "${1:-}" = "--migrate" ]; then
       fi
     fi
 
-    # Step 3: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
+    # Step 4: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
     # If this gate fails we roll back only the classifier; dnsmasq is untouched.
     _ru4_count=0
     _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
@@ -253,15 +269,118 @@ if [ "${1:-}" = "--migrate" ]; then
     fi
     if [ "$_ru4_abort" = 1 ]; then
       echo "ABORT:ru4-empty"
-      # Roll back: remove classifier so pbr does not run alongside new classifier.
-      # dnsmasq has NOT been repointed yet, so no dnsmasq rollback is needed.
+      # Roll back: remove classifier and the set declaration so pbr does not
+      # run alongside the new classifier.  dnsmasq has NOT been repointed yet.
       if [ "$_migrate_dry" != 1 ]; then
+        nft delete set inet fw4 amnezia_ru4 2>/dev/null || true
         rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
       fi
       return 1
     fi
 
-    # Step 4: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
+    # -----------------------------------------------------------------------
+    # CUTOVER PHASE: gate passed — wire the full failover stack, then cut over.
+    # -----------------------------------------------------------------------
+
+    # Step 5: install rt_tables (mirror first_install_wiring step 1).
+    if [ "$_migrate_dry" = 1 ]; then
+      amz_log "install:rt_tables"
+    else
+      mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
+      _rtt_src=$(resolve_dep \
+        /etc/iproute2/rt_tables.d/amnezia.conf \
+        iproute2-amnezia-rt_tables.conf \
+        iproute2-amnezia-rt_tables.conf) || true
+      if [ -n "$_rtt_src" ] && [ "$_rtt_src" != /etc/iproute2/rt_tables.d/amnezia.conf ]; then
+        cp "$_rtt_src" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
+      elif [ -z "$_rtt_src" ]; then
+        amz_log "WARN: iproute2-amnezia-rt_tables.conf not found; skipping rt_tables install"
+      fi
+      amz_log "install:rt_tables"
+    fi
+
+    # Step 6: install ip rules (fwmark→table mapping).
+    if [ "$_migrate_dry" != 1 ]; then
+      routing_install_rules
+    fi
+
+    # Step 7: fail-closed blackhole default routes BEFORE any traffic can be marked.
+    if [ "$_migrate_dry" != 1 ]; then
+      routing_set_sticky_default ""
+      routing_set_pool_default ""
+    fi
+
+    # Step 8: enumerate enabled tunnels (needed for bring-up + firewall steps).
+    # Compute early so the list is available for all remaining steps.
+    _mig_tunnels=""
+    if [ "$_migrate_dry" != 1 ]; then
+      _mig_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _mig_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      # Apply each enabled tunnel's network UCI and bring it up.
+      for _tunnel in $_mig_tunnels; do
+        _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
+        if [ -f "$_tcf" ]; then
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
+          _gen_rc=$?
+          if [ "$_gen_rc" -ne 0 ]; then
+            amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
+            rm -f /tmp/amnezia-tunnel-uci.$$
+          else
+            uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+            rm -f /tmp/amnezia-tunnel-uci.$$
+            uci commit network 2>/dev/null || true
+            ifup "$_tunnel" 2>/dev/null || true
+          fi
+        fi
+      done
+    fi
+
+    # Step 9: install ru-load init + hotplug (mirror first_install_wiring step 6).
+    if [ "$_migrate_dry" != 1 ]; then
+      if [ -f /etc/init.d/amnezia-ru-load ]; then
+        amz_log "amnezia-ru-load init already present (.ipk path)"
+        /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      else
+        _ruload_src=$(resolve_dep \
+          /etc/init.d/amnezia-ru-load \
+          amnezia-ru-load.init \
+          amnezia-ru-load.init) || true
+        if [ -n "$_ruload_src" ] && [ "$_ruload_src" != /etc/init.d/amnezia-ru-load ]; then
+          cp "$_ruload_src" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+        elif [ -z "$_ruload_src" ]; then
+          amz_log "WARN: amnezia-ru-load.init not found; RU CIDR load on boot disabled"
+        fi
+      fi
+      if [ -f /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+        amz_log "99-amnezia-ru-load hotplug already present (.ipk path)"
+      else
+        _hotplug_src=$(resolve_dep \
+          /etc/hotplug.d/firewall/99-amnezia-ru-load \
+          99-amnezia-ru-load.hotplug \
+          99-amnezia-ru-load.hotplug) || true
+        if [ -n "$_hotplug_src" ] && [ "$_hotplug_src" != /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+          cp "$_hotplug_src" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        elif [ -z "$_hotplug_src" ]; then
+          amz_log "WARN: 99-amnezia-ru-load.hotplug not found; firewall reload trigger disabled"
+        fi
+      fi
+    fi
+
+    # Step 10: enable + start the monitor (replaces blackhole with real tunnel routes).
+    if [ "$_migrate_dry" != 1 ]; then
+      echo "amnezia-failover:enable" >> "${STUB_LOG:-/dev/null}"
+      /etc/init.d/amnezia-failover enable 2>/dev/null || true
+      ( sleep 1 && /etc/init.d/amnezia-failover start ) &
+    fi
+
+    # Step 11: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
     if [ "$_migrate_dry" = 1 ]; then
       echo "repoint:dnsmasq"
     else
@@ -276,8 +395,7 @@ if [ "${1:-}" = "--migrate" ]; then
       fi
     fi
 
-    # must-tunnel→sticky migration: append old must-tunnel domains to the sticky section
-    # that configure-dnsmasq-amnezia.sh already created above (no second call needed).
+    # Step 12: must-tunnel→sticky migration.
     # In dry-run: delete amnezia_sticky explicitly so idempotency holds (the real path
     # relies on configure-dnsmasq-amnezia.sh having already done the delete+recreate).
     if [ "$_migrate_dry" = 1 ]; then
@@ -290,7 +408,14 @@ if [ "${1:-}" = "--migrate" ]; then
       done < "$MUST_TUNNEL_LIST"
     fi
 
-    # Step 5: remove pbr (AFTER classifier is installed, ru4 is populated, dnsmasq repointed).
+    # Step 13: activate the classifier via fw4 reload BEFORE removing pbr so
+    # there is a brief both-active overlap (both route to VPN) rather than a
+    # neither-active gap (which would leak LAN traffic to WAN cleartext).
+    if [ "$_migrate_dry" != 1 ]; then
+      fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    fi
+
+    # Step 14: remove pbr (AFTER classifier activated at step 13).
     if [ "$_migrate_dry" = 1 ]; then
       echo "remove:pbr"
     else
@@ -299,13 +424,8 @@ if [ "${1:-}" = "--migrate" ]; then
       opkg remove pbr luci-app-pbr 2>/dev/null || true
     fi
 
-    # Step 6: apply firewall zones + disable LAN IPv6 (real path only).
+    # Step 15: apply firewall zones + disable LAN IPv6 (real path only).
     if [ "$_migrate_dry" != 1 ]; then
-      _mig_tunnels=$(uci show amnezia 2>/dev/null \
-        | awk -F'[.=]' '/\.enabled=1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
-      if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
-        _mig_tunnels="$UCI_FAKE_TUNNELS"
-      fi
       [ -n "$_mig_tunnels" ] && routing_firewall_apply "$_mig_tunnels"
       routing_disable_lan_v6
     fi
