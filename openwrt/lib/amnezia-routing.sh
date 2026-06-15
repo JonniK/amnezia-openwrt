@@ -67,3 +67,10 @@ routing_set_pool_balance() {
   ip nexthop replace id "$TBL_POOL" group "${_grp%/}" type resilient buckets 128 idle_timer 120
   ip route replace default nhid "$TBL_POOL" table "$TBL_POOL"
 }
+# Disable LAN RA/DHCPv6/NDP so LAN clients stay IPv4-only (v6 fail-closed part b).
+routing_disable_lan_v6() {
+  uci set dhcp.lan.ra='disabled'
+  uci set dhcp.lan.dhcpv6='disabled'
+  uci set dhcp.lan.ndp='disabled'
+  uci commit dhcp
+}
