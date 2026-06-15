@@ -21,6 +21,17 @@ setup() { . "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"; }
   run parse_awg_conf /no/such/file
   [ "$status" -ne 0 ]
 }
+@test "parse_awg_conf allowlist: unknown/malicious keys are ignored, no command execution" {
+  # A conf with keys like '$(touch /tmp/...)' must not execute commands.
+  rm -f /tmp/amnezia-injected /tmp/amnezia-injected2
+  parse_awg_conf "$HARNESS_DIR/../test/fixtures/awg-malicious-key.conf" || true
+  # Injection files must NOT have been created.
+  [ ! -f /tmp/amnezia-injected ]
+  [ ! -f /tmp/amnezia-injected2 ]
+  # Legitimate keys must still be parsed correctly.
+  [ "$AWG_PrivateKey" = "AAA_priv" ]
+  [ "$AWG_PublicKey" = "BBB_pub" ]
+}
 @test "parse_awg_conf does not leak PSK from first conf into second PSK-less conf" {
   # Parse a conf that HAS a PresharedKey first.
   parse_awg_conf "$HARNESS_DIR/../test/fixtures/awg-sample.conf"

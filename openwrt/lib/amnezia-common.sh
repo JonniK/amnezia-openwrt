@@ -40,6 +40,15 @@ parse_awg_conf() {
     _k=$(printf '%s' "${_line%%=*}" | tr -d ' \t')
     _v=$(printf '%s' "${_line#*=}" | sed 's/^[ \t]*//; s/[ \t]*$//')
     [ -n "$_sec" ] || continue
+    # Allowlist: only known AmneziaWG/WireGuard keys are accepted.
+    # Any key not on this list is silently skipped to prevent command
+    # injection via eval with attacker-controlled key names.
+    case "$_k" in
+      PrivateKey|PublicKey|PresharedKey|Address|Endpoint|\
+PersistentKeepalive|Jc|Jmin|Jmax|S1|S2|S3|S4|\
+H1|H2|H3|H4|I1|I2|I3|I4|I5) ;;
+      *) continue ;;
+    esac
     if [ "$_k" = Endpoint ]; then
       # shellcheck disable=SC2034  # Set for caller inspection after parse_awg_conf.
       AWG_Endpoint_host=${_v%:*}; AWG_Endpoint_port=${_v##*:}
