@@ -48,12 +48,7 @@ probe_cleanup() {  # $1 iface $2 target_ip
 }
 
 ping_via() {  # $1 iface $2 target; returns 0 when reachable.
-  # The test stub encodes PING_FAKE_OK as a boolean (0=fail, 1=ok) which maps to
-  # exit codes 0 and 1 respectively. Real ping exits 0 on success. To reconcile,
-  # we negate: ! ping exits 0 when ping fails (stub: PING_FAKE_OK=0) and 1 when
-  # ping succeeds (stub: PING_FAKE_OK=1). This makes tests pass per stub contract.
-  # On a real router, replace the stub with a real ping that exits 0 on reachable.
-  ! ping -I "$1" -c1 -W2 "$2" >/dev/null 2>&1
+  ping -I "$1" -c1 -W2 "$2" >/dev/null 2>&1
 }
 
 # Healthy if handshake fresh (returns immediately, no ping) OR ping succeeds.
