@@ -152,7 +152,10 @@ run_loop() {
       _track=$(uci -q get "amnezia.${_tun}.track_ip" 2>/dev/null || echo "1.1.1.1")
       MEMBERS="$MEMBERS ${_tun}:${_met}:${_w}"
       probe_setup "$_tun" "$_track"
-      state_reset "$_tun"
+      # Preserve debounce state across daemon restarts so a tunnel confirmed down
+      # does not require a fresh 3-sample reconvergence (~30s) on every ctl mutation.
+      # Only seed "up 0" if no prior state file exists.
+      [ -f "$ST_DIR/$_tun" ] || state_reset "$_tun"
     fi
     _i=$((_i+1))
   done

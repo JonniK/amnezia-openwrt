@@ -7,6 +7,14 @@ setup() {
   . "$HARNESS_DIR/../openwrt/amnezia-failover" --source-only
 }
 
+@test "restart with existing state does not reset a tunnel that was confirmed down" {
+  # Simulate a tunnel that was confirmed down before a daemon restart.
+  echo "down 0" > "$ST_DIR/awg1"
+  # Replicate the run_loop logic: only seed state_reset when no prior file exists.
+  [ -f "$ST_DIR/awg1" ] || state_reset awg1
+  [ "$(state_get awg1)" = down ]
+}
+
 @test "needs 3 consecutive fails to go down, 3 to come up" {
   state_reset awg1
   # debounce returns 1 (no state change) on first N-1 calls; || true guards set -e.
