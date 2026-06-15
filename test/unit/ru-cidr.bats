@@ -30,6 +30,16 @@ load '../lib/harness.bash'
   [ -f "$HARNESS_DIR/../openwrt/amnezia-ru-load.init" ]
   [ -f "$HARNESS_DIR/../openwrt/99-amnezia-ru-load.hotplug" ]
 }
+@test "amnezia-ru-load.init invokes /usr/bin/amnezia-ru-cidr (not /usr/sbin)" {
+  F="$HARNESS_DIR/../openwrt/amnezia-ru-load.init"
+  grep -q "/usr/bin/amnezia-ru-cidr" "$F"
+  ! grep -q "/usr/sbin/amnezia-ru-cidr" "$F"
+}
+@test "99-amnezia-ru-load.hotplug invokes /usr/bin/amnezia-ru-cidr (not /usr/sbin)" {
+  F="$HARNESS_DIR/../openwrt/99-amnezia-ru-load.hotplug"
+  grep -q "/usr/bin/amnezia-ru-cidr" "$F"
+  ! grep -q "/usr/sbin/amnezia-ru-cidr" "$F"
+}
 @test "does not overwrite persist file when nft add element fails" {
   # Provide a valid source but simulate nft failure via stub exit 1.
   printf '5.0.0.0/8\n' > "$BATS_TEST_TMPDIR/ru.zone"

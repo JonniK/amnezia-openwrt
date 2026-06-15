@@ -7,7 +7,7 @@ STOP=9
 
 boot() {
   # Repopulate amnezia_ru4 from persist (or fetch fresh) once the set exists.
-  /usr/sbin/amnezia-ru-cidr 2>/dev/null || true
+  /usr/bin/amnezia-ru-cidr 2>/dev/null || true
 }
 
 start() { boot; }
