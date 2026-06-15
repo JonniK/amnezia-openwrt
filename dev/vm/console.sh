@@ -25,14 +25,29 @@ _usage() {
 # socat: commonly available via brew (brew install socat).
 _send_line() {
   _line="$1"
+  # macOS BSD nc supports -U (unix socket) but NOT -q (Linux-only flag).
+  # Use -w 1 (wait 1s for data then close) instead of -q 1.
   if command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q '\-U'; then
-    printf '%s\n' "$_line" | nc -q 1 -U "$SERIAL_SOCK" 2>/dev/null && return 0
+    printf '%s\n' "$_line" | nc -w 1 -U "$SERIAL_SOCK" 2>/dev/null && return 0
   fi
   if command -v socat >/dev/null 2>&1; then
     printf '%s\n' "$_line" | socat - "UNIX-CONNECT:${SERIAL_SOCK}" 2>/dev/null && return 0
   fi
   echo "ERROR: neither 'nc -U' nor 'socat' is available." >&2
   echo "       Install socat: brew install socat" >&2
+  exit 1
+}
+
+# _send_raw: pipe stdin directly to the unix socket (no appended newline).
+# Used by console_bootstrap to send a pre-built batch all in one nc invocation.
+_send_raw() {
+  if command -v nc >/dev/null 2>&1 && nc -h 2>&1 | grep -q '\-U'; then
+    nc -w 2 -U "$SERIAL_SOCK" 2>/dev/null && return 0
+  fi
+  if command -v socat >/dev/null 2>&1; then
+    socat - "UNIX-CONNECT:${SERIAL_SOCK}" 2>/dev/null && return 0
+  fi
+  echo "ERROR: neither 'nc -U' nor 'socat' is available." >&2
   exit 1
 }
 
@@ -48,6 +63,14 @@ case "$CMD" in
       exit 1
     fi
     _send_line "$2"
+    ;;
+  send-raw)
+    # Read from stdin, pipe to socket as-is.
+    if [ ! -S "$SERIAL_SOCK" ]; then
+      echo "ERROR: serial socket not found: $SERIAL_SOCK" >&2
+      exit 1
+    fi
+    _send_raw
     ;;
   read)
     # Dump current serial log if it exists; otherwise try to cat the socket once.

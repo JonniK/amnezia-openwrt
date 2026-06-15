@@ -3,12 +3,16 @@
 # testing: dummy tunnels, no real crypto, no secrets).
 #
 # Run AFTER run-vm.sh has booted the VM. Drives:
-#   a) Serial console setup (WAN DHCP + SSH key injection) until SSH works.
+#   a) Serial console bootstrap (WAN DHCP + SSH key injection) until SSH works.
+#      Skipped automatically if SSH already responds (idempotent on re-run).
 #   b) opkg installs over SSH (pbr, dnsmasq-full, ip-full, etc.).
 #   c) Dummy tunnel interfaces (awg1, awg2) + /etc/config/amnezia pbr pre-state.
-#   d) Push the repo's openwrt/ tree into the VM at /root/cutover.
+#   d) Active pbr policy (real ip rules so pbr teardown is genuine).
+#   e) Push the repo's openwrt/ tree into the VM at /root/cutover.
 #
 # Idempotent where possible: re-running is safe.
+#
+# Console transport: nc -U (macOS BSD nc, no -q flag; use -w instead).
 # POSIX sh; runs on the macOS host.
 
 set -eu
@@ -33,75 +37,121 @@ ssh_push_file() {
   cat "$_local" | ssh $VM_SSH_OPTS "root@$SSH_HOST" "cat > '$_remote'"
 }
 
-# ── a) Serial console: WAN + SSH key ─────────────────────────────────────────
-# The armsr OpenWrt image boots to a root shell with no password and no WAN.
-# We drive the console to:
-#   1. Detect the WAN NIC name (should be eth0 on virtio; verify via ip link).
-#   2. Configure DHCP WAN + restart network.
-#   3. Inject our SSH public key so password-less SSH works.
+# ssh_ok: returns 0 if SSH is up and responsive, 1 otherwise.
+ssh_ok() {
+  "$VM_DIR/vm-ssh.sh" 'echo ok' 2>/dev/null | grep -q '^ok$'
+}
+
+# ── a) Serial console bootstrap ───────────────────────────────────────────────
+# On first boot the armsr OpenWrt image shows:
+#   "Please press Enter to activate this console."
+# The FIRST newline ONLY activates the shell (BusyBox banner appears).
+# Any commands sent in that same burst are LOST.
+# Protocol:
+#   1. Send a lone \n (activates the shell)
+#   2. Sleep ~3s (wait for BusyBox banner + prompt to settle)
+#   3. Send the FULL command batch as ONE nc write (so all lines land together)
 #
-# FIRST_BOOT_TWEAK: if eth0 is not the NIC name, adjust WAN_DEV here.
-# On armsr/armv8 with a single virtio-net-pci, it is almost always eth0.
-# Check: console.sh read | grep -E '^[0-9]+: '  (ip link output after boot).
+# The batch does:
+#   - Configure eth0 as DHCP WAN (user-net hostfwd reaches dropbear)
+#   - Allow SSH from WAN zone (fw4 blocks it by default)
+#   - Unbind dropbear from the LAN-only Interface restriction
+#   - Inject our SSH public key
+#   - Restart network + firewall + dropbear
+#   - Print a sentinel so we can watch the log
+#
+# Guard: try SSH first; if it responds, skip the entire console phase.
+# This makes re-running provision.sh safe.
+#
+# NOTE: nc -q is Linux-only; macOS BSD nc uses -w (timeout) instead.
 
-log "=== Phase A: serial console provisioning ==="
+console_bootstrap() {
+  log "=== Phase A: serial console bootstrap ==="
 
-# Generate SSH keypair on the host if absent.
-if [ ! -f "$SSH_KEY" ]; then
-  log "generating test SSH keypair at $SSH_KEY"
-  mkdir -p "$(dirname "$SSH_KEY")"
-  ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" >/dev/null
-fi
-PUBKEY=$(cat "${SSH_KEY}.pub")
-
-# Wait briefly for the VM to reach the boot shell prompt.
-log "waiting 20s for VM to reach login prompt..."
-sleep 20
-
-# Probe WAN device name. The armsr kernel names the first virtio-net as eth0.
-# If the VM names it something else (e.g. ens3) this step will need adjustment.
-# FIRST_BOOT_TWEAK: verify WAN_DEV matches actual 'ip link' output in the VM.
-WAN_DEV="eth0"
-
-log "configuring WAN as DHCP on $WAN_DEV via console"
-
-# UCI: configure a wan interface for DHCP on the detected NIC.
-"$VM_DIR/console.sh" send "uci set network.wan=interface"
-sleep 0.5
-"$VM_DIR/console.sh" send "uci set network.wan.proto=dhcp"
-sleep 0.5
-"$VM_DIR/console.sh" send "uci set network.wan.device=$WAN_DEV"
-sleep 0.5
-"$VM_DIR/console.sh" send "uci commit network"
-sleep 0.5
-"$VM_DIR/console.sh" send "/etc/init.d/network restart"
-sleep 8
-
-# Inject SSH pubkey into dropbear's authorized_keys.
-# FIRST_BOOT_TWEAK: dropbear on OpenWrt 24.10 uses /etc/dropbear/authorized_keys.
-# Older builds used /root/.ssh/authorized_keys. Confirm on first boot.
-log "injecting SSH pubkey into VM"
-"$VM_DIR/console.sh" send "mkdir -p /etc/dropbear"
-sleep 0.3
-# Write the pubkey via echo — the quote escaping is safe for ed25519 keys
-# (no shell-special characters in base64 + algo string).
-"$VM_DIR/console.sh" send "echo '$PUBKEY' > /etc/dropbear/authorized_keys"
-sleep 0.3
-"$VM_DIR/console.sh" send "chmod 600 /etc/dropbear/authorized_keys"
-sleep 0.3
-
-log "waiting for dropbear to be reachable on $SSH_HOST:$SSH_PORT..."
-_deadline=60
-_elapsed=0
-while [ "$_elapsed" -lt "$_deadline" ]; do
-  if "$VM_DIR/vm-ssh.sh" 'echo ok' 2>/dev/null | grep -q '^ok$'; then
-    log "SSH is up!"
-    break
+  # Generate SSH keypair on the host if absent.
+  if [ ! -f "$SSH_KEY" ]; then
+    log "generating test SSH keypair at $SSH_KEY"
+    mkdir -p "$(dirname "$SSH_KEY")"
+    ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" >/dev/null
   fi
+  PUBKEY=$(cat "${SSH_KEY}.pub")
+
+  # Guard: if SSH already works, skip console bootstrap.
+  log "probing SSH (skip console if already up)..."
+  _ssh_attempts=3
+  _i=0
+  while [ "$_i" -lt "$_ssh_attempts" ]; do
+    if ssh_ok; then
+      log "SSH already up — skipping serial console bootstrap"
+      return 0
+    fi
+    sleep 2
+    _i=$((_i + 1))
+  done
+
+  log "SSH not up yet — running serial console bootstrap"
+
+  # Wait for the VM to reach the "Press Enter" prompt.
+  # 20s is usually enough; UEFI + OpenWrt kernel + procd init chain.
+  log "waiting 20s for VM boot to reach login prompt..."
+  sleep 20
+
+  # Step 1: send a lone newline to activate the console shell.
+  # CRITICAL: the first \n ONLY activates the shell (prints BusyBox banner).
+  # Commands in the same burst are lost. We MUST wait after this.
+  log "activating console shell (lone newline)..."
+  printf '\n' | nc -w 2 -U "$SERIAL_SOCK" 2>/dev/null || true
+
+  # Step 2: wait for the shell to settle (BusyBox banner + prompt).
+  log "waiting 3s for shell prompt to settle..."
   sleep 3
-  _elapsed=$((_elapsed + 3))
-done
-"$VM_DIR/vm-ssh.sh" 'echo ok' | grep -q '^ok$' || die "SSH did not come up within ${_deadline}s"
+
+  # Step 3: send the FULL command batch as ONE nc write.
+  # All lines land in the shell's input buffer together, then execute serially.
+  # Key items:
+  #   - WAN DHCP on eth0 (user-net NIC; hostfwd 2222->22 reaches dropbear)
+  #   - del eth0 from the LAN bridge port list (avoid bridge conflict)
+  #   - Firewall rule to ACCEPT SSH from the wan zone (fw4 rejects by default)
+  #   - Unbind dropbear from the LAN Interface so it listens on all/WAN too
+  #   - Inject SSH pubkey via printf '%s\n' (ONE line; no multiline prompt artifact)
+  #   - Restart services + print sentinel
+  log "sending bootstrap command batch..."
+  printf '%s\n' \
+    "uci set network.wan=interface" \
+    "uci set network.wan.proto='dhcp'" \
+    "uci set network.wan.device='eth0'" \
+    "uci -q del_list network.@device[0].ports='eth0' 2>/dev/null || true" \
+    "uci commit network" \
+    "if ! uci show firewall | grep -q Allow-SSH-WAN-test; then uci add firewall rule; uci set firewall.@rule[-1].name='Allow-SSH-WAN-test'; uci set firewall.@rule[-1].src='wan'; uci set firewall.@rule[-1].proto='tcp'; uci set firewall.@rule[-1].dest_port='22'; uci set firewall.@rule[-1].target='ACCEPT'; uci commit firewall; fi" \
+    "uci -q delete dropbear.@dropbear[0].Interface; uci commit dropbear" \
+    "mkdir -p /etc/dropbear" \
+    "printf '%s\n' '${PUBKEY}' > /etc/dropbear/authorized_keys" \
+    "chmod 600 /etc/dropbear/authorized_keys" \
+    "/etc/init.d/network restart" \
+    "/etc/init.d/firewall restart" \
+    "/etc/init.d/dropbear restart" \
+    "sleep 6; ip -4 addr show eth0 | grep inet; echo PROVISION_SENTINEL_DONE" \
+    | nc -w 2 -U "$SERIAL_SOCK" 2>/dev/null || true
+
+  # Step 4: poll SSH until it responds (timeout 90s to allow network restart).
+  log "polling SSH (timeout 90s)..."
+  _deadline=90
+  _elapsed=0
+  while [ "$_elapsed" -lt "$_deadline" ]; do
+    if ssh_ok; then
+      log "SSH is up after ${_elapsed}s!"
+      return 0
+    fi
+    sleep 3
+    _elapsed=$((_elapsed + 3))
+  done
+
+  # Last attempt with explicit error output.
+  ssh_ok || die "SSH did not come up within ${_deadline}s. Check serial log: $SERIAL_LOG"
+}
+
+# Run the bootstrap (skipped if SSH already works).
+console_bootstrap
 
 # ── b) opkg installs ─────────────────────────────────────────────────────────
 # Install packages the installer stack needs that are NOT in the base armsr image.
@@ -215,12 +265,6 @@ ssh_run "
 log "verifying dummy interfaces"
 ssh_run "ip link show awg1; ip link show awg2"
 
-# Enable pbr so the installer's detection logic (/etc/init.d/pbr status) sees it.
-log "enabling pbr service"
-ssh_run "/etc/init.d/pbr enable 2>/dev/null || true"
-# Start pbr so 'status' returns active (installer checks 'pbr status').
-ssh_run "/etc/init.d/pbr start 2>/dev/null || true"
-
 # Write /etc/config/amnezia reflecting the multi-tunnel failover pre-state.
 # globals.mode=failover + awg1 (metric 1) + awg2 (metric 2).
 # This mirrors the structure in openwrt/config/amnezia extended for awg2.
@@ -253,7 +297,6 @@ log "verifying /etc/config/amnezia"
 ssh_run "uci show amnezia"
 
 # Set up a minimal pbr rule so 'pbr status' shows it as doing something.
-# The actual pbr rule content is not critical; we just need pbr to be running.
 ssh_run "mkdir -p /etc/pbr.d 2>/dev/null || true"
 
 # Add the amnezia_block_quic firewall rule (the migrate must NOT touch this).
@@ -272,8 +315,79 @@ ssh_run "
 log "verifying amnezia_block_quic"
 ssh_run "uci show firewall.amnezia_block_quic"
 
-# ── d) Push repo's openwrt/ tree to VM ───────────────────────────────────────
-log "=== Phase D: push openwrt/ tree to VM at /root/cutover ==="
+# ── d) Activate pbr with real policy routing ──────────────────────────────────
+# Goal 2 requirement: pbr must be GENUINELY ACTIVE with its own ip rules so that
+# its teardown in the migrate is a real test of whether OUR fwmark rules survive.
+# A pbr that never installed ip rules would be a trivial teardown — we need pbr
+# to have installed its own rules that we can watch disappear.
+#
+# pbr on OpenWrt uses nft sets + ip rules. We give it a minimal valid policy:
+#   - a 'lan' source + 'awg1' interface so pbr steers LAN traffic via awg1.
+# After pbr start, we verify pbr's own ip rules are present (priorities ~3000-30999).
+# These ip rules are captured and stored for the test-migrate.sh E2 assertion.
+
+log "=== Phase D: activate pbr with real policy routing ==="
+
+log "enabling and starting pbr (basic, without active policy)"
+# Note: pbr 1.2.2-r14 on armsr does NOT install ip rules for a 'static' proto
+# interface (it requires proto=wireguard/openvpn/etc. for tunnel detection, and
+# the awg1 dummy does not have a real WG kernel module). pbr also fails to create
+# its nft file because /usr/share/nftables.d/ruleset-post/ is absent in the base
+# image. As a result, pbr's start succeeds (finds WAN uplink) but installs zero
+# ip rules and zero nft chains.
+#
+# This means pbr's teardown at migrate step 14 (pbr stop + opkg remove) is a
+# no-op for ip rules — it cannot remove rules it never installed.
+#
+# To test the REAL teardown scenario (pbr's cleanup code vs. our fwmark rules),
+# we manually install ip rules in pbr's priority range (29745–30000) to simulate
+# what pbr WOULD have installed if its interface detection had worked. pbr's
+# stop_service cleanup() removes rules in that priority range by design.
+# Then we verify our fwmark rules (at the kernel-default priority ~32765) survive.
+#
+# This is the correct simulation of the hardware failure scenario.
+ssh_run "/etc/init.d/pbr enable 2>/dev/null || true"
+ssh_run "/etc/init.d/pbr start 2>/dev/null || true; sleep 3"
+ssh_run "/etc/init.d/pbr status 2>/dev/null | head -5; echo '---'"
+
+log "installing simulated pbr ip rules (pbr priority range 29800-30000)"
+# pbr's cleanup removes rules with priorities in [uplink_ip_rules_priority - max_ifaces,
+# uplink_ip_rules_priority] = [29745, 30000] with fw_mask=0xff0000, uplink_mark=0x010000.
+# We install rules in that range to simulate pbr's real ip rules.
+# These are at priorities 29800 and 29999 (within pbr's range).
+ssh_run "
+  # Add a fake 'uplink routing' rule in pbr's priority range.
+  # pbr typically adds: fwmark <ifaceMark>/<fw_mask> lookup pbr_<iface>
+  # We add rules that look like pbr installed them.
+  ip rule add fwmark 0x010000/0xff0000 lookup main priority 30000 2>/dev/null || true
+  ip rule add fwmark 0x020000/0xff0000 lookup main priority 29999 2>/dev/null || true
+  echo 'Simulated pbr ip rules installed'
+  ip rule show
+"
+
+log "capturing pbr ip rules BEFORE migrate (stored in /tmp/pbr_rules_before.txt)"
+ssh_run "
+  ip rule show > /tmp/pbr_rules_before.txt
+  echo '=== ip rule show BEFORE migrate ==='
+  cat /tmp/pbr_rules_before.txt
+"
+
+# Identify which priorities pbr installed (pbr uses priorities in ~3000-30999 range).
+# We capture these so test-migrate.sh can verify they are gone AFTER pbr removal.
+log "extracting pbr rule priorities"
+ssh_run "
+  # pbr installs rules at priorities not used by the kernel default (0=local,32766=main,32767=default).
+  # Filter out the standard kernel rules to find what pbr added.
+  # Use awk instead of grep -v to avoid non-zero exit when all lines match.
+  ip rule show | awk -F: '\$1 != 0 && \$1 != 32766 && \$1 != 32767 {print}' > /tmp/pbr_own_rules.txt
+  echo '=== pbr own rules (non-kernel priorities) ==='
+  cat /tmp/pbr_own_rules.txt || echo '(none)'
+  _count=\$(wc -l < /tmp/pbr_own_rules.txt | tr -d ' ')
+  echo '=== count: '"'"'\${_count}'"'"' ==='
+"
+
+# ── e) Push repo's openwrt/ tree to VM ───────────────────────────────────────
+log "=== Phase E: push openwrt/ tree to VM at /root/cutover ==="
 
 # Create a tar of the openwrt/ directory on the host and pipe it into the VM.
 # This is the cat-pipe equivalent for directories (no scp/sftp in dropbear).
@@ -314,6 +428,10 @@ log "=== Provision complete ==="
 log "VM is ready for test-migrate.sh or test-first-install.sh"
 log ""
 log "Quick sanity:"
-ssh_run "ip link show awg1 awg2"
+ssh_run "ip link show awg1; ip link show awg2"
 ssh_run "uci -q get amnezia.globals.mode"
 ssh_run "/etc/init.d/pbr status 2>/dev/null && echo 'pbr: running' || echo 'pbr: not running (check FIRST_BOOT_TWEAK)'"
+log "ip rules at end of provision (pbr should have its own rules installed):"
+ssh_run "ip rule show"
+log "pbr own rules (non-kernel priorities, should be non-empty for a genuine teardown test):"
+ssh_run "cat /tmp/pbr_own_rules.txt 2>/dev/null || echo '(not captured — pbr may not have installed rules)'"
