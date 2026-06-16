@@ -438,10 +438,12 @@ log "pushing lib files to /usr/lib/amnezia/"
 ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-common.sh" "/usr/lib/amnezia/amnezia-common.sh"
 ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-routing.sh" "/usr/lib/amnezia/amnezia-routing.sh"
 
-log "installing amnezia-failover binary to /usr/sbin/ (required by amnezia-failover.init)"
-# The migrate's step 10 installs the init script which references /usr/sbin/amnezia-failover.
-# Pre-stage the binary so the init script can actually start the daemon.
-ssh_run "cp /root/cutover/amnezia-failover /usr/sbin/amnezia-failover && chmod +x /usr/sbin/amnezia-failover"
+# NOTE: amnezia-failover binary and amnezia-failover.init are intentionally NOT
+# pre-staged here. The installer (install-amnezia-pbr.sh) self-installs them via
+# resolve_dep in migrate step 10 and first_install step 7. Pre-staging them here
+# would mask the deploy gap (the original live-router failure). The openwrt/ tree
+# pushed above to /root/cutover already contains both files; the installer will
+# resolve them from $SCRIPT_DIR (= /root/cutover).
 
 log "verifying /root/cutover contents"
 ssh_run "ls /root/cutover/"

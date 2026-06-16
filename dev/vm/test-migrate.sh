@@ -170,5 +170,9 @@ vm_run "
 log "F: amnezia_block_quic preserved"
 assert_block_quic_preserved
 
+# ── G. monitor self-installed by installer (the original live-router gap) ────
+log "G: amnezia-failover binary + init self-installed by installer"
+assert_monitor_installed
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 print_summary
