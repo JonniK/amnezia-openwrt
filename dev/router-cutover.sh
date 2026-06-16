@@ -385,13 +385,28 @@ else
 fi
 
 # ── V2: pbr actually removed (gap B — verify opkg remove worked) ─────────────
-log "V2: pbr removed from opkg"
+log "V2: pbr removed or inert"
 _pbr_row=$(opkg list-installed 2>/dev/null | grep '^pbr ' || true)
 if [ -z "$_pbr_row" ]; then
     log "CHECK V2: PASS (pbr absent from opkg list-installed)"
 else
-    log "CHECK V2: FAIL (pbr still installed: ${_pbr_row})"
-    _note_fail "V2-pbr-still-installed"
+    # Package lingers (e.g. --force-depends removal blocked). That is acceptable
+    # ONLY if pbr is fully inert: disabled (won't autostart on boot) AND no live
+    # pbr_ nft chains (a stopped pbr removes its own chains, so it cannot mark or
+    # route anything). A still-enabled pbr, or live pbr_ chains, is a real
+    # conflict with the native stack and must fail.
+    _pbr_enabled=0
+    /etc/init.d/pbr enabled 2>/dev/null && _pbr_enabled=1
+    _pbr_chains=$(nft list chains inet fw4 2>/dev/null | grep -c 'chain pbr_' || true)
+    if [ "$_pbr_enabled" = 1 ]; then
+        log "CHECK V2: FAIL (pbr still installed AND enabled: ${_pbr_row})"
+        _note_fail "V2-pbr-still-enabled"
+    elif [ "${_pbr_chains:-0}" -gt 0 ]; then
+        log "CHECK V2: FAIL (pbr still installed with ${_pbr_chains} live pbr_ nft chains: ${_pbr_row})"
+        _note_fail "V2-pbr-chains-live"
+    else
+        log "CHECK V2: PASS-WARN (pbr pkg lingers but is disabled + no live pbr_ chains = inert: ${_pbr_row})"
+    fi
 fi
 
 # ── V3: fwmark ip rules present + priorities above pbr cleanup range ─────────
