@@ -470,7 +470,11 @@ if [ "${1:-}" = "--migrate" ]; then
     else
       /etc/init.d/pbr stop 2>/dev/null || true
       /etc/init.d/pbr disable 2>/dev/null || true
-      opkg remove pbr luci-app-pbr 2>/dev/null || true
+      # --force-depends: an older amnezia-pbr .ipk recorded a spurious
+      # "Depends: pbr" in opkg metadata, so a plain `opkg remove pbr` no-ops
+      # ("No packages removed"). Force past it. Do NOT discard opkg's output —
+      # surface it so a real removal failure is visible in the cutover log.
+      opkg remove pbr luci-app-pbr --force-depends 2>&1 || true
     fi
 
     # Step 15: apply firewall zones + disable LAN IPv6 (real path only).
