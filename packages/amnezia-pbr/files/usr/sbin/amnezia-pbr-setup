@@ -323,8 +323,11 @@ if [ "${1:-}" = "--migrate" ]; then
       for _tunnel in $_mig_tunnels; do
         _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
         if [ -f "$_tcf" ]; then
-          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
-          _gen_rc=$?
+          # Use _gen_rc=0; ...|| _gen_rc=$? to capture failure under set -eu
+          # without triggering the shell's -e exit on the gen_tunnel_uci line.
+          _gen_rc=0
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null \
+            || _gen_rc=$?
           if [ "$_gen_rc" -ne 0 ]; then
             amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
             rm -f /tmp/amnezia-tunnel-uci.$$
@@ -545,8 +548,11 @@ if [ "${1:-}" = "--first-install" ]; then
       for _tunnel in $_fi_tunnels; do
         _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
         if [ -f "$_tcf" ]; then
-          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null
-          _gen_rc=$?
+          # Use _gen_rc=0; ...|| _gen_rc=$? to capture failure under set -eu
+          # without triggering the shell's -e exit on the gen_tunnel_uci line.
+          _gen_rc=0
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null \
+            || _gen_rc=$?
           if [ "$_gen_rc" -ne 0 ]; then
             amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
             rm -f /tmp/amnezia-tunnel-uci.$$
