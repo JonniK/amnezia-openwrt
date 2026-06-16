@@ -286,36 +286,33 @@ ssh_run "
 log "verifying dummy interfaces"
 ssh_run "ip link show awg1; ip link show awg2"
 
-# Write /etc/config/amnezia reflecting the multi-tunnel failover pre-state.
-# globals.mode=failover + awg1 (metric 1) + awg2 (metric 2).
-# This mirrors the structure in openwrt/config/amnezia extended for awg2.
-log "writing /etc/config/amnezia"
+# Write /etc/config/amnezia — only the base config section.
+# In pbr mode we deliberately omit the globals/awg1/awg2 sections so that
+# deploy-cutover.sh's prep_prestate() is the one that builds them (that is
+# exactly what we are testing).  The migrator's migrate_from_pbr() reads
+# amnezia.globals.mode and amnezia.<name>.enabled — those will be absent until
+# prep runs, which is the realistic "fresh rollback" pre-state.
+log "writing /etc/config/amnezia (base config section only — no globals/awg sections)"
 ssh_run "mkdir -p /etc/amnezia"
 ssh_run 'cat > /etc/config/amnezia << '"'"'UCI_EOF'"'"'
 config amnezia '"'"'config'"'"'
 	option routing_mode '"'"'tunnel-default'"'"'
 	option installed_version '"'"'main'"'"'
 	option installed_ts '"'"''"'"'
-
-config globals '"'"'globals'"'"'
-	option mode '"'"'failover'"'"'
-	option sticky_target '"'"'awg1'"'"'
-
-config tunnel '"'"'awg1'"'"'
-	option enabled '"'"'1'"'"'
-	option label '"'"'Primary'"'"'
-	option metric '"'"'1'"'"'
-	option weight '"'"'1'"'"'
-
-config tunnel '"'"'awg2'"'"'
-	option enabled '"'"'1'"'"'
-	option label '"'"'Secondary'"'"'
-	option metric '"'"'2'"'"'
-	option weight '"'"'1'"'"'
 UCI_EOF
 '
-log "verifying /etc/config/amnezia"
+log "verifying /etc/config/amnezia (expect: only amnezia.config section)"
 ssh_run "uci show amnezia"
+
+# Write DUMMY /etc/amnezia/awg{1,2}.conf files so the launcher's keep-if-present
+# path runs (and does NOT push from local/).  The dummy confs contain no real keys;
+# the migrator's gen_tunnel_uci will fail to parse them → skips ifup → dummy
+# interface survives.  This is intentional for VM Tier-1 testing.
+log "writing dummy /etc/amnezia/awg{1,2}.conf (no real keys — keep-if-present path)"
+ssh_run 'printf "[Interface]\n# dummy — no real keys\nAddress = 10.8.1.15/32\n" > /etc/amnezia/awg1.conf'
+ssh_run 'printf "[Interface]\n# dummy — no real keys\nAddress = 10.8.1.4/32\n" > /etc/amnezia/awg2.conf'
+log "verifying dummy confs"
+ssh_run "ls -l /etc/amnezia/"
 
 # pbr-mode only: set up /etc/pbr.d stub and the amnezia_block_quic rule.
 if [ "$PROVISION_MODE" = "pbr" ]; then
@@ -459,7 +456,9 @@ log "VM is ready for test-migrate.sh or test-first-install.sh"
 log ""
 log "Quick sanity:"
 ssh_run "ip link show awg1; ip link show awg2"
-ssh_run "uci -q get amnezia.globals.mode"
+# Note: amnezia.globals is intentionally absent here in pbr mode — it is built
+# by deploy-cutover.sh's prep_prestate() as part of the launcher's own workflow.
+ssh_run "uci show amnezia"
 if [ "$PROVISION_MODE" = "pbr" ]; then
   ssh_run "/etc/init.d/pbr status 2>/dev/null && echo 'pbr: running' || echo 'pbr: not running (check FIRST_BOOT_TWEAK)'"
   log "ip rules at end of provision (pbr should have its own rules installed):"

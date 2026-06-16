@@ -2,10 +2,11 @@
 # deploy-cutover.sh — host-side launcher for the autonomous router cutover.
 # One command to:
 #   1. Pre-flight: verify router is in the expected pbr-active/amnezia-ready state.
-#   2. Stage: push openwrt/ tree + router-cutover.sh to the router.
-#   3. Launch: setsid-detached so the script survives SSH drops AND rollback reboots.
-#   4. Poll: reconnect loop tolerant of SSH drops AND the rollback reboot.
-#   5. Print: final RESULT + log tail.
+#   2. Prep: ensure tunnel confs + build amnezia UCI (idempotent, keep-if-present).
+#   3. Stage: push openwrt/ tree + router-cutover.sh to the router.
+#   4. Launch: setsid-detached so the script survives SSH drops AND rollback reboots.
+#   5. Poll: reconnect loop tolerant of SSH drops AND the rollback reboot.
+#   6. Print: final RESULT + log tail.
 #
 # Usage:
 #   SSH_HOST=openWRT ./dev/deploy-cutover.sh
@@ -14,6 +15,11 @@
 # SSH_HOST defaults to the user's 'openWRT' alias (see memory context).
 # Do NOT hardcode credentials — the router must already have your key in
 # authorized_keys.
+#
+# VM targeting (for validation):
+#   SSH_HOST=root@127.0.0.1 \
+#   SSH_OPTS="-p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i $PWD/dev/vm/run/id_vmtest" \
+#   SKIP_DATAPLANE=1 ./dev/deploy-cutover.sh
 #
 # POSIX sh; runs on the macOS host.
 set -eu
@@ -29,7 +35,17 @@ POLL_MAX="${POLL_MAX:-60}"
 RESULT_LOG_REMOTE=/root/cutover-result.log
 LOGS_DIR="$SCRIPT_DIR/logs"
 
-SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR"
+# SSH_OPTS: overridable for VM targeting.  Default: production router settings.
+SSH_OPTS="${SSH_OPTS:--o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR}"
+
+# Tunnel conf sources (host-side).  Override via env.
+AWG1_CONF="${AWG1_CONF:-$REPO_ROOT/local/awg.conf}"
+AWG2_CONF="${AWG2_CONF:-$REPO_ROOT/local/awg2.conf}"
+
+# amnezia UCI defaults — override via env for non-default deployments.
+AMZ_MODE="${AMZ_MODE:-failover}"
+AMZ_STICKY="${AMZ_STICKY:-awg1}"
+TRACK_IP="${TRACK_IP:-1.1.1.1}"
 
 log()  { echo "[deploy-cutover] $*"; }
 die()  { echo "[deploy-cutover] FATAL: $*" >&2; exit 1; }
@@ -60,15 +76,15 @@ ssh_wait() {
 }
 
 # ===========================================================================
-# 1. Pre-flight checks
+# 0. Basic reachability + pbr/internet checks (before prep)
 # ===========================================================================
-log "=== Pre-flight ==="
+log "=== Pre-flight (basic) ==="
 
 log "checking SSH reachability..."
 ssh_wait 6 5 || die "router $SSH_HOST not reachable over SSH"
 
-log "running remote pre-flight checks..."
-ssh_run 'sh -s' <<'PREFLIGHT' || die "pre-flight failed — see output above"
+log "running basic remote pre-flight checks..."
+ssh_run 'sh -s' <<'BASIC_PREFLIGHT' || die "basic pre-flight failed — see output above"
 set -eu
 
 _fail() { echo "PREFLIGHT FAIL: $*" >&2; exit 1; }
@@ -92,6 +108,97 @@ if ping -c 2 -W 3 1.1.1.1 >/dev/null 2>&1; then
 else
     _fail "no internet (ping 1.1.1.1 failed)"
 fi
+
+# 1e) classifier absent (this is the pre-migrate state)
+if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
+    _fail "30-amnezia-classify.nft already present — migrate already ran or partial state"
+fi
+_ok "classifier absent (pre-migrate)"
+
+echo "PREFLIGHT BASIC: all checks passed"
+BASIC_PREFLIGHT
+
+log "basic pre-flight passed"
+
+# ===========================================================================
+# prep_prestate: ensure tunnel confs + build amnezia UCI (idempotent).
+# Runs BEFORE the amnezia-specific assertions so those assertions then PASS.
+# ===========================================================================
+prep_prestate() {
+    log "=== Prep: pre-state ==="
+
+    # ── 1. Tunnel confs: keep-if-present, push from host if absent ────────────
+    for _entry in "awg1:$AWG1_CONF" "awg2:$AWG2_CONF"; do
+        _name="${_entry%%:*}"
+        _src="${_entry#*:}"
+        _remote="/etc/amnezia/${_name}.conf"
+
+        # Check if conf already exists on router.
+        if ssh_run "test -f '$_remote' && echo exists" 2>/dev/null | grep -q exists; then
+            log "prep: ${_remote} already present on router — keeping (not clobbering)"
+            continue
+        fi
+
+        # Conf absent on router — need to push from host.
+        if [ ! -f "$_src" ]; then
+            die "prep: ${_remote} absent on router AND host source missing: ${_src}
+Set ${_name%%[0-9]*^^}$(echo "$_name" | tr '[:lower:]' '[:upper:]')_CONF env to the path of the conf file."
+        fi
+
+        log "prep: pushing ${_src} → ${_remote} (never printing contents)"
+        ssh_run "mkdir -p /etc/amnezia"
+        # shellcheck disable=SC2086
+        cat "$_src" | ssh $SSH_OPTS "$SSH_HOST" "cat > '${_remote}'"
+        log "prep: ${_remote} pushed"
+    done
+
+    # ── 2. Build amnezia UCI idempotently ────────────────────────────────────
+    # Preserve amnezia.config section; build globals + awg1 + awg2.
+    log "prep: building amnezia UCI (globals + awg1 + awg2)..."
+    # Pass env vars as shell assignments so the heredoc can expand them on the router.
+    ssh_run "sh -s -- '$AMZ_MODE' '$AMZ_STICKY' '$TRACK_IP'" <<'UCI_BUILD'
+set -eu
+_mode="$1"
+_sticky="$2"
+_track="$3"
+
+uci batch <<UCIEOF
+set amnezia.globals=globals
+set amnezia.globals.mode=${_mode}
+set amnezia.globals.sticky_target=${_sticky}
+set amnezia.awg1=tunnel
+set amnezia.awg1.enabled=1
+set amnezia.awg1.metric=1
+set amnezia.awg1.weight=1
+set amnezia.awg1.track_ip=${_track}
+set amnezia.awg2=tunnel
+set amnezia.awg2.enabled=1
+set amnezia.awg2.metric=2
+set amnezia.awg2.weight=1
+set amnezia.awg2.track_ip=${_track}
+UCIEOF
+
+uci commit amnezia
+echo "UCI: amnezia committed"
+uci show amnezia
+UCI_BUILD
+
+    log "prep: amnezia UCI built"
+    log "=== Prep: complete ==="
+}
+
+prep_prestate
+
+# ===========================================================================
+# 1. Amnezia-specific pre-flight assertions (now guaranteed to pass after prep)
+# ===========================================================================
+log "=== Pre-flight (amnezia state) ==="
+
+ssh_run 'sh -s' <<'AMZ_PREFLIGHT' || die "amnezia pre-flight failed — see output above"
+set -eu
+
+_fail() { echo "PREFLIGHT FAIL: $*" >&2; exit 1; }
+_ok()   { echo "PREFLIGHT OK: $*"; }
 
 # 1c) amnezia UCI present (globals + awg1 + awg2 enabled)
 _amz=$(uci show amnezia 2>/dev/null || true)
@@ -120,16 +227,10 @@ for _cf in /etc/amnezia/awg1.conf /etc/amnezia/awg2.conf; do
     fi
 done
 
-# 1e) classifier absent (this is the pre-migrate state)
-if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
-    _fail "30-amnezia-classify.nft already present — migrate already ran or partial state"
-fi
-_ok "classifier absent (pre-migrate)"
+echo "PREFLIGHT AMZ: all checks passed"
+AMZ_PREFLIGHT
 
-echo "PREFLIGHT: all checks passed"
-PREFLIGHT
-
-log "pre-flight passed"
+log "amnezia pre-flight passed"
 
 # ===========================================================================
 # 2. Stage files
