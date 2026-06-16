@@ -29,8 +29,112 @@ ts()     { date '+%Y-%m-%dT%H:%M:%S'; }
 log()    { printf '%s [cutover] %s\n' "$(ts)" "$*"; }
 log_sep(){ printf '%s [cutover] ===== %s =====\n' "$(ts)" "$*"; }
 
+# ---------------------------------------------------------------------------
+# _redact: pipe helper — redacts long base64-like secrets (30+ chars).
+# Applied to all snapshot / syslog output before appending to the log.
+# ---------------------------------------------------------------------------
+_redact() { sed 's#[A-Za-z0-9+/]\{30,\}#<REDACTED>#g'; }
+
+# ---------------------------------------------------------------------------
+# snapshot_state <label>
+# Appends a labeled state dump (redacted) to the persistent log.
+# Each command is wrapped so failures produce "(none)"/"(error)" rather than
+# aborting the script.
+# ---------------------------------------------------------------------------
+snapshot_state() {
+    _snap_label="$1"
+    log_sep "SNAPSHOT: ${_snap_label}"
+
+    log "[snap] ip rule show"
+    ip rule show 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ip route show table main (head 20)"
+    ip route show table main 2>/dev/null | head -20 | _redact || echo "(none)"
+
+    log "[snap] ip route show table 100"
+    ip route show table 100 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ip route show table 101"
+    ip route show table 101 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ip route show table vpn_sticky"
+    ip route show table vpn_sticky 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ip route show table vpn_pool"
+    ip route show table vpn_pool 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] nft list table inet fw4 (chains+sets)"
+    nft list table inet fw4 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] uci show amnezia"
+    uci show amnezia 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] uci show firewall"
+    uci show firewall 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] uci show network (head 60)"
+    uci show network 2>/dev/null | head -60 | _redact || echo "(none)"
+
+    log "[snap] opkg list-installed (amnezia/pbr)"
+    opkg list-installed 2>/dev/null | grep -E 'pbr|amnezia' | _redact || echo "(none)"
+
+    log "[snap] awg show"
+    awg show 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ifstatus awg1"
+    ifstatus awg1 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] ifstatus awg2"
+    ifstatus awg2 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] pgrep amnezia-failover"
+    pgrep -fa amnezia-failover 2>/dev/null | _redact || echo "(none)"
+
+    log "[snap] /var/run/amnezia-failover.json"
+    if [ -f /var/run/amnezia-failover.json ]; then
+        _redact < /var/run/amnezia-failover.json || echo "(error)"
+    else
+        echo "(none)"
+    fi
+
+    log "[snap] /etc/init.d/pbr enabled state"
+    if [ -x /etc/init.d/pbr ]; then
+        /etc/init.d/pbr enabled 2>/dev/null && echo "pbr: enabled" || echo "pbr: disabled"
+    else
+        echo "pbr: /etc/init.d/pbr absent"
+    fi
+
+    log "[snap] ls /etc/nftables.d/"
+    ls -l /etc/nftables.d/ 2>/dev/null || echo "(none)"
+
+    log "[snap] ls /etc/init.d/amnezia-*"
+    ls -l /etc/init.d/amnezia-* 2>/dev/null || echo "(none)"
+
+    log "[snap] ls /usr/sbin/amnezia-failover"
+    ls -l /usr/sbin/amnezia-failover 2>/dev/null || echo "(none)"
+
+    log_sep "SNAPSHOT END: ${_snap_label}"
+}
+
+# ---------------------------------------------------------------------------
+# capture_syslog <label>
+# Appends recent amnezia/pbr/cutover/fw4/udhcp syslog lines (redacted) to log.
+# Captures the LAST 300 matching lines — enough to cover a full migrate run.
+# ---------------------------------------------------------------------------
+capture_syslog() {
+    _slog_label="$1"
+    log_sep "SYSLOG: ${_slog_label}"
+    logread 2>/dev/null \
+        | grep -iE 'amnezia|pbr|cutover|fw4|udhcp' \
+        | tail -300 \
+        | _redact \
+        || echo "(no syslog data)"
+    log_sep "SYSLOG END: ${_slog_label}"
+}
+
 log_sep "START"
 log "SKIP_DATAPLANE=${SKIP_DATAPLANE}"
+snapshot_state "after-start"
 
 # ---------------------------------------------------------------------------
 # _PHASE tracker.  Updated before each major section so the EXIT trap knows
@@ -99,6 +203,10 @@ KICK_EOF
 # ---------------------------------------------------------------------------
 do_rollback() {
     log_sep "ROLLBACK: ${_ROLLBACK_REASON}"
+
+    # Capture state and syslog BEFORE any teardown so the migrate trace is preserved.
+    capture_syslog "pre-rollback"
+    snapshot_state "pre-rollback"
 
     # 1) Stop + disable + remove failover-stack services.
     for _svc in amnezia-failover amnezia-ru-load; do
@@ -249,6 +357,9 @@ fi
 
 log "migrate completed; settling 5s..."
 sleep 5
+
+capture_syslog "post-migrate"
+snapshot_state "post-migrate"
 
 # ===========================================================================
 # Phase 3: Verify
@@ -437,6 +548,8 @@ else
         _note_fail "V10-awg1-ping-failed"
     fi
 fi
+
+snapshot_state "post-verify"
 
 # ===========================================================================
 # Phase 4/5: Success or Rollback

@@ -27,6 +27,7 @@ SKIP_DATAPLANE="${SKIP_DATAPLANE:-0}"
 POLL_MAX="${POLL_MAX:-60}"
 
 RESULT_LOG_REMOTE=/root/cutover-result.log
+LOGS_DIR="$SCRIPT_DIR/logs"
 
 SSH_OPTS="-o ConnectTimeout=8 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o LogLevel=ERROR"
 
@@ -258,6 +259,20 @@ echo ""
 # Determine exit code from the log.
 _final=$(ssh_run "grep '^RESULT:' $RESULT_LOG_REMOTE 2>/dev/null | tail -1" 2>/dev/null || true)
 log "Final token: ${_final:-<not found>}"
+
+# ---------------------------------------------------------------------------
+# Pull the full persistent log back to the host — guaranteed to survive
+# any subsequent router reboots or log rotation.
+# ---------------------------------------------------------------------------
+_log_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+_local_log="${LOGS_DIR}/cutover-${_log_stamp}.log"
+mkdir -p "$LOGS_DIR"
+# shellcheck disable=SC2086
+if ssh $SSH_OPTS "$SSH_HOST" "cat $RESULT_LOG_REMOTE" > "$_local_log" 2>/dev/null; then
+    log "Full router log saved to: ${_local_log}"
+else
+    warn "Could not pull router log — router may not be reachable; partial log at: ${_local_log}"
+fi
 
 case "$_final" in
     "RESULT: SUCCESS")
