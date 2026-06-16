@@ -144,9 +144,30 @@ if ! ssh $SSH_OPTS "$SSH_HOST" true 2>/dev/null; then
   exit 1
 fi
 
+# On boot after the restore, pbr (enabled) starts before awg1 has completed a
+# handshake, so it can't install its tunnel routes and sits idle until kicked.
+# Wait for awg1 to be up with a recent handshake, then restart pbr so it
+# (re)applies its policy routing -- otherwise LAN has no route until a manual
+# `/etc/init.d/pbr restart`.
+echo "Ensuring pbr is routing (it starts before awg1 is up on boot)..."
+ssh $SSH_OPTS "$SSH_HOST" 'sh -s' <<'PBRFIX'
+i=0
+while [ "$i" -lt 24 ]; do
+  hs=$(awg show awg1 latest-handshakes 2>/dev/null | awk '{print $2}')
+  now=$(date +%s)
+  [ "${hs:-0}" -gt 0 ] && [ $((now - hs)) -lt 180 ] && break
+  i=$((i + 1)); sleep 5
+done
+/etc/init.d/pbr enabled 2>/dev/null || /etc/init.d/pbr enable 2>/dev/null
+/etc/init.d/pbr restart 2>/dev/null || /etc/init.d/pbr start 2>/dev/null
+sleep 3
+echo "  pbr restarted (awg1 handshake age: $((now - ${hs:-0}))s)"
+PBRFIX
+
 echo "=== Post-rollback verification ==="
 ssh $SSH_OPTS "$SSH_HOST" 'sh -s' <<'VERIFY'
 echo -n "  pbr enabled:          "; /etc/init.d/pbr enabled 2>/dev/null && echo yes || echo "NO (!)"
+echo -n "  pbr routing applied:  "; ip rule show 2>/dev/null | grep -q 'lookup pbr_' && echo yes || echo "NO -- run /etc/init.d/pbr restart (!)"
 echo -n "  awg1 up:              "; ifstatus awg1 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null || echo "n/a"
 echo -n "  wan ping:             "; ping -c1 -W3 1.1.1.1 >/dev/null 2>&1 && echo OK || echo "FAIL (!)"
 echo -n "  classifier removed:   "; [ -f /etc/nftables.d/30-amnezia-classify.nft ] && echo "STILL PRESENT (!)" || echo yes
