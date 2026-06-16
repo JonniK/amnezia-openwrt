@@ -373,8 +373,41 @@ if [ "${1:-}" = "--migrate" ]; then
       fi
     fi
 
-    # Step 10: enable + start the monitor (replaces blackhole with real tunnel routes).
+    # Step 10: self-install the failover monitor daemon + init, then enable + start.
+    # The .ipk path pre-installs these; the install.sh/staged-tree path does not.
+    # Mirror the ru-load pattern: resolve binary + init from staged tree and copy
+    # to their installed paths before calling enable/start.
     if [ "$_migrate_dry" != 1 ]; then
+      # Install the monitor binary to /usr/sbin/amnezia-failover.
+      if [ -f /usr/sbin/amnezia-failover ]; then
+        amz_log "amnezia-failover binary already present (.ipk path)"
+      else
+        _failover_bin=$(resolve_dep \
+          /usr/sbin/amnezia-failover \
+          amnezia-failover \
+          amnezia-failover) || true
+        if [ -n "$_failover_bin" ] && [ "$_failover_bin" != /usr/sbin/amnezia-failover ]; then
+          cp "$_failover_bin" /usr/sbin/amnezia-failover 2>/dev/null || true
+          chmod +x /usr/sbin/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_bin" ]; then
+          amz_log "WARN: amnezia-failover binary not found; monitor will not run"
+        fi
+      fi
+      # Install the init script to /etc/init.d/amnezia-failover.
+      if [ -f /etc/init.d/amnezia-failover ]; then
+        amz_log "amnezia-failover init already present (.ipk path)"
+      else
+        _failover_init=$(resolve_dep \
+          /etc/init.d/amnezia-failover \
+          amnezia-failover.init \
+          amnezia-failover.init) || true
+        if [ -n "$_failover_init" ] && [ "$_failover_init" != /etc/init.d/amnezia-failover ]; then
+          cp "$_failover_init" /etc/init.d/amnezia-failover 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_init" ]; then
+          amz_log "WARN: amnezia-failover.init not found; monitor cannot be enabled"
+        fi
+      fi
       echo "amnezia-failover:enable" >> "${STUB_LOG:-/dev/null}"
       /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
@@ -564,10 +597,42 @@ if [ "${1:-}" = "--first-install" ]; then
         fi
       fi
     fi
-    # 7. monitor enable + start
+    # 7. self-install the failover monitor daemon + init, then enable + start.
+    # Mirror the ru-load pattern: resolve binary + init from staged tree and copy
+    # to their installed paths before calling enable/start.
     if [ "$_fi_dry" = 1 ]; then
       echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
     else
+      # Install the monitor binary to /usr/sbin/amnezia-failover.
+      if [ -f /usr/sbin/amnezia-failover ]; then
+        amz_log "amnezia-failover binary already present (.ipk path)"
+      else
+        _failover_bin=$(resolve_dep \
+          /usr/sbin/amnezia-failover \
+          amnezia-failover \
+          amnezia-failover) || true
+        if [ -n "$_failover_bin" ] && [ "$_failover_bin" != /usr/sbin/amnezia-failover ]; then
+          cp "$_failover_bin" /usr/sbin/amnezia-failover 2>/dev/null || true
+          chmod +x /usr/sbin/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_bin" ]; then
+          amz_log "WARN: amnezia-failover binary not found; monitor will not run"
+        fi
+      fi
+      # Install the init script to /etc/init.d/amnezia-failover.
+      if [ -f /etc/init.d/amnezia-failover ]; then
+        amz_log "amnezia-failover init already present (.ipk path)"
+      else
+        _failover_init=$(resolve_dep \
+          /etc/init.d/amnezia-failover \
+          amnezia-failover.init \
+          amnezia-failover.init) || true
+        if [ -n "$_failover_init" ] && [ "$_failover_init" != /etc/init.d/amnezia-failover ]; then
+          cp "$_failover_init" /etc/init.d/amnezia-failover 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_init" ]; then
+          amz_log "WARN: amnezia-failover.init not found; monitor cannot be enabled"
+        fi
+      fi
       /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
     fi
