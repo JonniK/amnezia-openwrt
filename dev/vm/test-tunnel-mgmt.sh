@@ -284,6 +284,11 @@ if [ "$_host_fetch_ok" = "1" ] && [ -s "$_HOST_FIXTURE_TMP" ]; then
       >/dev/null 2>&1 || true
     _fixture_staged=1
     log "fixture staged: ${_fixture_line_count} domains materialized via amnezia-force-load"
+    # Inject an authoritative address record into dnsmasq so the DNS-down probe is
+    # deterministic. dnsmasq answers /address/ records locally without any upstream
+    # forwarding, so the probe resolves instantly once dnsmasq is back up — no
+    # egress required, no 30-cycle timeout risk.
+    vm_run "uci -q add_list dhcp.@dnsmasq[0].address='/scale-probe.test/10.99.99.99' 2>/dev/null; uci -q commit dhcp 2>/dev/null || true" >/dev/null 2>&1 || true
   else
     log "WARN: host fetch returned only ${_fixture_line_count} lines (< ${_FIXTURE_MIN_LINES}), treating as fetch failure"
   fi
@@ -343,10 +348,12 @@ _elapsed_sec=$(echo "$_elapsed_sec" | tr -d ' \t\n\r')
 # Measure DNS-unavailable window by polling resolution from the VM itself.
 # We restart dnsmasq and count 1s poll cycles until it answers again.
 # BusyBox ash has no 0.5s sleep, so we use 1s granularity (safer bound).
-# We query "localhost" — dnsmasq resolves it directly from /etc/hosts (127.0.0.1)
-# without any upstream forwarding, so the metric is dnsmasq's own restart window,
-# not the egress latency.  (openwrt.lan would be forwarded upstream → times out
-# in egress-less VMs and produces a bogus 30s "DNS-down" reading.)
+# We query "scale-probe.test" — an authoritative /address/ record injected into
+# dnsmasq (10.99.99.99) before this block, so dnsmasq answers it locally without
+# any upstream forwarding. This makes the probe deterministic: it resolves the
+# instant dnsmasq is back up, regardless of egress availability.
+# (Querying "localhost" or any forwarded name in egress-less VMs produces a bogus
+# 30s "DNS-down" reading due to upstream timeout.)
 log "measuring DNS-unavailable window during dnsmasq restart..."
 # shellcheck disable=SC2016
 _dns_window=$(vm_run '
@@ -355,7 +362,7 @@ _dns_window=$(vm_run '
   /etc/init.d/dnsmasq restart 2>/dev/null || true
   _n=0
   while [ "$_n" -lt "$_max" ]; do
-    if nslookup localhost 127.0.0.1 >/dev/null 2>&1; then
+    if nslookup scale-probe.test 127.0.0.1 >/dev/null 2>&1; then
       break
     fi
     _down=$(( _down + 1 ))
