@@ -1,6 +1,6 @@
 {
 	"luci-app-amnezia": {
-		"description": "AmneziaWG tunnel toggle, RU IP list refresh, and live status",
+		"description": "AmneziaWG multi-tunnel failover controls, RU IP list refresh, and zapret DPI bypass",
 		"read": {
 			"file": {
 				"/etc/amnezia/ru-update.json":          [ "read" ],
@@ -11,9 +11,7 @@
 		},
 		"write": {
 			"file": {
-				"/usr/bin/awg-toggle":              [ "exec" ],
-				"/usr/bin/awg-status":              [ "exec" ],
-				"/usr/bin/awg-ru-update":           [ "exec" ],
+				"/usr/bin/amnezia-ru-cidr":         [ "exec" ],
 				"/usr/bin/zapret-toggle":           [ "exec" ],
 				"/usr/bin/zapret-status":           [ "exec" ],
 				"/usr/bin/zapret-blockcheck":       [ "exec" ],

@@ -72,14 +72,6 @@ function uiConfirm(message) {
 	});
 }
 
-function parseStatus(text) {
-	text = text || '';
-	var up = /"up"\s*:\s*true/.test(text);
-	var uptimeMatch = text.match(/"uptime"\s*:\s*(\d+)/);
-	var uptime = uptimeMatch ? parseInt(uptimeMatch[1], 10) : null;
-	return { up: up, uptime: uptime, raw: text };
-}
-
 function parseRuStamp(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
@@ -185,24 +177,6 @@ function fmtAge(ts) {
 	if (age < 3600) return Math.floor(age / 60) + 'm ago';
 	if (age < 86400) return Math.floor(age / 3600) + 'h ago';
 	return Math.floor(age / 86400) + 'd ago';
-}
-
-function paintTunnel(s) {
-	var dot = document.getElementById('awg-dot');
-	var label = document.getElementById('awg-state-label');
-	var uptimeEl = document.getElementById('awg-uptime');
-	var btn = document.getElementById('awg-toggle-btn');
-	var raw = document.getElementById('awg-status-raw');
-
-	if (dot) dot.style.background = s.up ? '#3c763d' : '#a94442';
-	if (label) label.textContent = s.up ? 'UP' : 'DOWN';
-	if (uptimeEl) uptimeEl.textContent = s.up && s.uptime !== null ? '(uptime: ' + fmtUptime(s.uptime) + ')' : '';
-	if (btn && !btn.dataset.busy) {
-		btn.textContent = s.up ? _('Turn OFF') : _('Turn ON');
-		btn.className = 'btn ' + (s.up ? 'cbi-button-negative' : 'cbi-button-positive');
-		btn.disabled = false;
-	}
-	if (raw) raw.textContent = s.raw;
 }
 
 function paintZapret(s, errMsg) {
@@ -453,7 +427,9 @@ function parseFailoverState(text) {
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
 
-function renderTunnelTable(state) {
+// self is the view instance; pass it so toggle buttons can call handleTunnelToggle.
+// self may be null when called without toggle support (e.g. in tests).
+function renderTunnelTable(state, self) {
 	if (!state || !state.tunnels || !state.tunnels.length) {
 		return E('div', { 'style': 'color:#888;font-style:italic;' },
 			_('No tunnel state available. Start the amnezia-failover service.'));
@@ -462,13 +438,14 @@ function renderTunnelTable(state) {
 		'style': 'border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed;'
 	});
 	var head = E('tr', {}, [
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Tunnel')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('State')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Role')),
-		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Metric')),
-		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Weight')),
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:16%;' }, _('Handshake')),
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;' }, _('Exit IP'))
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:11%;' }, _('Tunnel')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:9%;' }, _('State')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('Role')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Metric')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Weight')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:14%;' }, _('Handshake')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:14%;' }, _('Exit IP')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;' }, _('Toggle'))
 	]);
 	table.appendChild(head);
 	for (var i = 0; i < state.tunnels.length; i++) {
@@ -477,18 +454,28 @@ function renderTunnelTable(state) {
 		var upText = t.up ? _('UP') : _('DOWN');
 		var role = t.carrying ? _('active') : (t.enabled ? _('standby') : _('disabled'));
 		var roleColor = t.carrying ? '#3c763d' : (t.enabled ? '#666' : '#888');
+		// Visually distinguish DOWN tunnels with a dim background.
+		var rowBg = t.up ? '' : 'background:#fdf2f2;';
+		var toggleBtn = self
+			? E('button', {
+				'id': 'awg-toggle-' + t.name,
+				'class': 'btn btn-sm ' + (t.enabled ? 'cbi-button-negative' : 'cbi-button-positive'),
+				'style': 'padding:2px 8px;font-size:11px;',
+				'click': ui.createHandlerFn(self, 'handleTunnelToggle', t.name)
+			  }, t.enabled ? _('Disable') : _('Enable'))
+			: E('span', {}, '');
 		var row = E('tr', {}, [
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;font-weight:bold;' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;font-weight:bold;' },
 				t.label ? (t.name + ' (' + t.label + ')') : t.name),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + upColor + ';font-weight:bold;' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + upColor + ';font-weight:bold;' },
 				upText),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + roleColor + ';' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + roleColor + ';' },
 				role),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
 				t.metric !== undefined ? t.metric : ''),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
 				t.weight !== undefined ? t.weight : ''),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#666;font-family:monospace;font-size:11px;' },
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;color:#666;font-family:monospace;font-size:11px;' },
 				(function(age) {
 					// age is seconds-since-handshake from the daemon (-1 = never).
 					// Do NOT convert via Date.now() — the value is already an age, not an epoch.
@@ -499,8 +486,10 @@ function renderTunnelTable(state) {
 					if (age < 86400) return Math.floor(age / 3600) + 'h ago';
 					return Math.floor(age / 86400) + 'd ago';
 				})(t.handshake_age)),
-			E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
-				t.exit_ip || '')
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
+				t.exit_ip || ''),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },
+				toggleBtn)
 		]);
 		table.appendChild(row);
 	}
@@ -530,6 +519,25 @@ function paintRuStamp(stamp) {
 	}
 }
 
+// Update the prominent "Active tunnel" banner on each poll.
+function paintFailoverSummary(state) {
+	var dot = document.getElementById('failover-active-dot');
+	var label = document.getElementById('failover-active-label');
+	var modeEl = document.getElementById('failover-mode-label');
+
+	if (!state) {
+		if (dot) dot.style.background = '#888';
+		if (label) label.textContent = _('no data');
+		if (modeEl) modeEl.textContent = '';
+		return;
+	}
+
+	var allDown = !!state.all_down;
+	if (dot) dot.style.background = allDown ? '#a94442' : '#3c763d';
+	if (label) label.textContent = allDown ? _('ALL DOWN') : (state.active_pool || _('unknown'));
+	if (modeEl) modeEl.textContent = 'mode: ' + (state.mode || '?');
+}
+
 return view.extend({
 	handleRefresh: function(ev) {
 		var btn = document.getElementById('manual-refresh-btn');
@@ -541,17 +549,19 @@ return view.extend({
 		});
 	},
 
-	handleToggle: function(ev) {
-		var btn = document.getElementById('awg-toggle-btn');
+	handleTunnelToggle: function(ev, tunnelName) {
+		var btnId = 'awg-toggle-' + tunnelName;
+		var btn = document.getElementById(btnId);
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Working...'); }
-		return fs.exec('/usr/bin/awg-toggle').then(L.bind(function(res) {
+		return fs.exec('/usr/bin/amnezia-failover-ctl', ['toggle', tunnelName]).then(L.bind(function(res) {
 			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
-				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')), 'info');
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'warning');
 			if (btn) delete btn.dataset.busy;
 			return this.refresh();
 		}, this)).catch(function(err) {
 			ui.addNotification(null, E('p', {}, _('Toggle failed: ') + err), 'danger');
-			var b = document.getElementById('awg-toggle-btn');
+			var b = document.getElementById(btnId);
 			if (b) { delete b.dataset.busy; b.disabled = false; }
 		});
 	},
@@ -877,7 +887,7 @@ return view.extend({
 	handleRuUpdate: function(ev) {
 		var btn = document.getElementById('awg-ru-btn');
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Updating...'); }
-		return fs.exec('/usr/bin/awg-ru-update').then(L.bind(function(res) {
+		return fs.exec('/usr/bin/amnezia-ru-cidr').then(L.bind(function(res) {
 			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
 				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
 				(res.code === 0) ? 'info' : 'warning');
@@ -892,20 +902,15 @@ return view.extend({
 
 	refresh: function() {
 		// Self-unregister when the view's DOM is gone (user navigated away).
-		if (!document.getElementById('awg-dot')) {
+		if (!document.getElementById('failover-tunnel-table')) {
 			if (pollFn) { poll.remove(pollFn); pollFn = null; }
 			return Promise.resolve();
 		}
-		var p1 = fs.exec('/usr/bin/awg-status').then(function(res) {
-			paintTunnel(parseStatus(res.stdout || res.stderr || ''));
-		}).catch(function(err) {
-			var raw = document.getElementById('awg-status-raw');
-			if (raw) raw.textContent = 'status read failed: ' + err;
-		});
-		var p2 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
+		var self = this;
+		var p1 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
 			paintRuStamp(parseRuStamp(text));
 		});
-		var p3 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
+		var p2 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
 			if (!res) { paintZapret(null, _('cannot run zapret-status')); return; }
 			var parsed = parseZapret(res.stdout || '');
 			if (parsed) {
@@ -918,7 +923,7 @@ return view.extend({
 				paintZapret(null, _('unparseable status output'));
 			}
 		});
-		var p4 = L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), '').then(L.bind(function(text) {
+		var p3 = L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), '').then(L.bind(function(text) {
 			var bc = parseBlockcheck(text);
 			paintBlockcheck(bc);
 			// Fetch log when there's anything to show. Skipped on never_run to
@@ -929,7 +934,7 @@ return view.extend({
 				}).catch(function() { /* silent: status panel already shows state */ });
 			}
 		}, this));
-		var p5 = Promise.all([
+		var p4 = Promise.all([
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' })
 		]).then(function(res) {
@@ -937,20 +942,20 @@ return view.extend({
 			var cand = parseCandidates((res[1] && res[1].stdout) || '');
 			paintApply(st, cand);
 		});
-		var p6 = L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), '').then(function(text) {
+		var p5 = L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), '').then(function(text) {
 			var st = parseFailoverState(text);
+			paintFailoverSummary(st);
 			var tableEl = document.getElementById('failover-tunnel-table');
 			if (tableEl) {
 				tableEl.innerHTML = '';
-				tableEl.appendChild(renderTunnelTable(st));
+				tableEl.appendChild(renderTunnelTable(st, self));
 			}
 		});
-		return Promise.all([p1, p2, p3, p4, p5, p6]);
+		return Promise.all([p1, p2, p3, p4, p5]);
 	},
 
 	load: function() {
 		return Promise.all([
-			L.resolveDefault(fs.exec('/usr/bin/awg-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), ''),
@@ -963,28 +968,50 @@ return view.extend({
 	},
 
 	render: function(data) {
-		var initial = parseStatus((data && data[0] && data[0].stdout) || '');
-		var stamp = parseRuStamp(data && data[1]);
-		var zap = parseZapret((data && data[2] && data[2].stdout) || '');
-		var bc = parseBlockcheck(data && data[3]);
-		var bcLog = (data && data[4] && data[4].stdout) || '';
-		var applySt = parseApplyState((data && data[5] && data[5].stdout) || '');
-		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
-		var seedList = parseSeedList((data && data[7]) || '');
-		var failoverState = parseFailoverState((data && data[8]) || '');
+		// load() now returns 8 entries (awg-status removed):
+		// [0] ru-update.json, [1] zapret-status, [2] blockcheck.json,
+		// [3] blockcheck log, [4] zapret-apply state, [5] zapret-apply parse,
+		// [6] seed-must-tunnel.list, [7] amnezia-failover.json
+		var stamp = parseRuStamp(data && data[0]);
+		var zap = parseZapret((data && data[1] && data[1].stdout) || '');
+		var bc = parseBlockcheck(data && data[2]);
+		var bcLog = (data && data[3] && data[3].stdout) || '';
+		var applySt = parseApplyState((data && data[4] && data[4].stdout) || '');
+		var applyCands = parseCandidates((data && data[5] && data[5].stdout) || '');
+		var seedList = parseSeedList((data && data[6]) || '');
+		var failoverState = parseFailoverState((data && data[7]) || '');
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
 			E('div', { 'class': 'cbi-map-descr' },
-				_('Toggle the AmneziaWG tunnel and policy-based routing together. Status refreshes every 5 seconds.')),
+				_('Multi-tunnel AmneziaWG failover stack. RU traffic goes direct; foreign traffic routes through active tunnel(s). Status refreshes every 5 seconds.')),
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('Failover tunnels')),
 				E('div', { 'class': 'cbi-map-descr' },
-					_('Per-tunnel status. Mode and sticky target are applied via amnezia-failover-ctl.')),
+					_('Per-tunnel status driven by /var/run/amnezia-failover.json. Mode and sticky target are applied via amnezia-failover-ctl.')),
 				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Active tunnel')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('span', {
+								'id': 'failover-active-dot',
+								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:' +
+									(failoverState && !failoverState.all_down ? '#3c763d' : '#a94442') +
+									';margin-right:8px;vertical-align:middle;'
+							}),
+							E('strong', { 'id': 'failover-active-label' },
+								failoverState
+									? (failoverState.all_down
+										? _('ALL DOWN')
+										: (failoverState.active_pool || _('unknown')))
+									: _('no data')),
+							E('span', { 'id': 'failover-mode-label', 'style': 'margin-left:12px;color:#666;font-size:11px;' },
+								failoverState ? ('mode: ' + (failoverState.mode || '?')) : '')
+						])
+					]),
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Mode')),
 						E('div', { 'class': 'cbi-value-field' }, [
@@ -1006,9 +1033,7 @@ return view.extend({
 							}, [
 								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
 								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
-							]),
-							E('span', { 'style': 'color:#666;font-size:11px;' },
-								failoverState ? ('all_down: ' + (failoverState.all_down ? _('YES') : _('no'))) : '')
+							])
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
@@ -1045,38 +1070,9 @@ return view.extend({
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Tunnels')),
 						E('div', { 'class': 'cbi-value-field' }, [
-							E('div', { 'id': 'failover-tunnel-table' }, renderTunnelTable(failoverState))
+							E('div', { 'id': 'failover-tunnel-table' }, renderTunnelTable(failoverState, this))
 						])
 					])
-				])
-			]),
-
-			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('Tunnel')),
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('State')),
-						E('div', { 'class': 'cbi-value-field' }, [
-							E('span', {
-								'id': 'awg-dot',
-								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:' +
-									(initial.up ? '#3c763d' : '#a94442') + ';margin-right:8px;vertical-align:middle;'
-							}),
-							E('strong', { 'id': 'awg-state-label' }, initial.up ? 'UP' : 'DOWN'),
-							E('span', { 'id': 'awg-uptime', 'style': 'margin-left:8px;color:#666;' },
-								initial.up && initial.uptime !== null ? '(uptime: ' + fmtUptime(initial.uptime) + ')' : '')
-						])
-					]),
-					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('Action')),
-						E('div', { 'class': 'cbi-value-field' }, [
-							E('button', {
-								'id': 'awg-toggle-btn',
-								'class': 'btn ' + (initial.up ? 'cbi-button-negative' : 'cbi-button-positive'),
-								'click': ui.createHandlerFn(this, 'handleToggle')
-							}, initial.up ? _('Turn OFF') : _('Turn ON'))
-						])
-					]),
 				])
 			]),
 
@@ -1379,7 +1375,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'style': 'display:flex;align-items:center;justify-content:space-between;' }, [
-					E('h3', { 'style': 'margin:0;' }, _('Live status')),
+					E('h3', { 'style': 'margin:0;' }, _('Refresh')),
 					E('button', {
 						'id': 'manual-refresh-btn',
 						'class': 'btn cbi-button-action',
@@ -1387,12 +1383,6 @@ return view.extend({
 						'title': _('Force an immediate poll instead of waiting for the 5s tick'),
 						'click': ui.createHandlerFn(this, 'handleRefresh')
 					}, _('Refresh status'))
-				]),
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('pre', {
-						'id': 'awg-status-raw',
-						'style': 'background:#f5f5f5;padding:8px;margin:0;max-height:240px;overflow-y:auto;overflow-x:hidden;font-size:12px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;width:100%;'
-					}, initial.raw)
 				])
 			])
 		]);
