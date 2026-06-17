@@ -113,3 +113,36 @@ setup() {
   # Should refuse because count=1 (would leave zero members)
   [ "$status" -ne 0 ]
 }
+
+# Regression: real OpenWrt uci-list format (one line) — _fwnet_count and _fwnet_has
+@test "REG-1: _fwnet_count returns 2 when UCI_FAKE_FWNET has two members" {
+  # With real OpenWrt single-line list format, count must be 2 (not 1).
+  # remove awg2 with two members in the fw list must NOT hit the guard.
+  UCI_FAKE_TUNNELS="awg1 awg2" UCI_FAKE_FWNET="awg1 awg2" run sh "$TC" remove awg2
+  # exit 0 = guard did not fire, proceed to delete
+  [ "$status" -eq 0 ]
+  # del_list must have been called for awg2
+  grep -q 'del_list firewall.vpn.network=awg2' "$STUB_LOG"
+}
+
+@test "REG-2: _fwnet_has succeeds for member in multi-member list" {
+  # _fwnet_has awg2 must return true when UCI_FAKE_FWNET="awg1 awg2".
+  # We prove this by checking that add awg2 skips the add_list call (already present).
+  UCI_FAKE_FWNET="awg1 awg2" run sh "$TC" add awg2 "$(cat "$FIX")"
+  # add should fail because awg2 already exists in amnezia section? No — UCI_FAKE_TUNNELS not set.
+  # Without UCI_FAKE_TUNNELS, _tunnel_exists returns false, so add proceeds.
+  # But _fwnet_has awg2 should return true → add_list NOT called for awg2.
+  [ "$status" -eq 0 ]
+  run grep -q 'add_list firewall.vpn.network=awg2' "$STUB_LOG"
+  [ "$status" -ne 0 ]
+}
+
+@test "REG-3: remove guard fires when exactly 1 member remains (awg1 only)" {
+  # Verify the guard correctly blocks removal when only one member would remain
+  # AND we are removing that sole member.
+  UCI_FAKE_TUNNELS="awg1 awg2" UCI_FAKE_FWNET="awg2" run sh "$TC" remove awg2
+  [ "$status" -ne 0 ]
+  # del_list must NOT have been called
+  run grep -q 'del_list firewall.vpn.network=awg2' "$STUB_LOG"
+  [ "$status" -ne 0 ]
+}

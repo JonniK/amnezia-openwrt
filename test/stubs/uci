@@ -7,6 +7,8 @@ if [ "$_verb" = "-q" ]; then shift; _verb="$1"; fi
 # exist (the while-loop teardown idiom relies on this to terminate).
 case "$_verb" in
   delete) exit 1 ;;
+  del_list) exit 0 ;;
+  add_list) exit 0 ;;
 esac
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
@@ -33,10 +35,27 @@ case "$1 $2" in
         echo "amnezia.${_sname}.kind=domains"
       done
     fi ;;
+  "get firewall.vpn.network")
+    # Return space-separated members on one line (how real uci get behaves for lists).
+    if [ -n "$UCI_FAKE_FWNET" ]; then
+      echo "$UCI_FAKE_FWNET"
+    else
+      exit 1
+    fi ;;
   "show firewall")
     # UCI_FAKE_FWNET: space-separated list of firewall.vpn.network members.
+    # Real OpenWrt 24.10 renders the list on ONE line with quoted space-separated values:
+    #   firewall.vpn.network='awg1' 'awg2'
     if [ -n "$UCI_FAKE_FWNET" ]; then
-      for _n in $UCI_FAKE_FWNET; do echo "firewall.vpn.network=${_n}"; done
+      _line=""
+      for _n in $UCI_FAKE_FWNET; do
+        if [ -z "$_line" ]; then
+          _line="'${_n}'"
+        else
+          _line="${_line} '${_n}'"
+        fi
+      done
+      echo "firewall.vpn.network=${_line}"
     fi ;;
 esac
 exit 0
