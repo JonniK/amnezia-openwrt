@@ -3,10 +3,30 @@
 USE_PROCD=1
 START=95
 STOP=10
+
+# Source the routing helpers so start/stop can (re)install the fwmark policy
+# rules. Kernel ip rules are runtime state and do NOT survive a reboot, so the
+# rules installed at migrate time vanish on boot; without them, classifier-
+# marked LAN traffic falls through to the main table -> WAN (cleartext leak).
+# The routing tables themselves are rebuilt by the monitor; here we only ensure
+# the fwmark->table rules. Both helpers are idempotent.
+_amnezia_load_routing() {
+  [ -r /usr/lib/amnezia/amnezia-common.sh ]  && . /usr/lib/amnezia/amnezia-common.sh
+  [ -r /usr/lib/amnezia/amnezia-routing.sh ] && . /usr/lib/amnezia/amnezia-routing.sh
+}
+
 start_service() {
+  _amnezia_load_routing
+  command -v routing_install_rules >/dev/null 2>&1 && routing_install_rules
+
   procd_open_instance
   procd_set_param command /usr/sbin/amnezia-failover
   procd_set_param respawn 3600 5 5
   procd_set_param stderr 1
   procd_close_instance
+}
+
+stop_service() {
+  _amnezia_load_routing
+  command -v routing_remove_rules >/dev/null 2>&1 && routing_remove_rules
 }
