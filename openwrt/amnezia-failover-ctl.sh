@@ -1,13 +1,20 @@
 #!/bin/sh
 # AmneziaWG failover control helper.
 # Usage: amnezia-failover-ctl <command> [args]
-# Commands: set-mode <failover|balance>, set-sticky <awgN>, set-weight <awgN> <w>, toggle <awgN>
+# Commands: set-mode <failover|balance>, set-sticky <awgN>, set-weight <awgN> <w>, toggle <awgN>,
+#           set-routing-mode <tunnel-default|direct-default>, set-source <name> <0|1>
 # shellcheck source=lib/amnezia-common.sh
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
   . "$AMNEZIA_LIB/amnezia-common.sh"
 else
   . "$(dirname "$0")/lib/amnezia-common.sh"
+fi
+# shellcheck source=lib/amnezia-routing.sh
+if [ -f "$AMNEZIA_LIB/amnezia-routing.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-routing.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-routing.sh"
 fi
 
 _restart_monitor() {
@@ -50,8 +57,35 @@ case "$1" in
     uci commit amnezia
     _restart_monitor
     ;;
+  set-routing-mode)
+    case "$2" in
+      tunnel-default|direct-default) ;;
+      *) amz_log "ctl: invalid routing mode '$2'"; exit 1 ;;
+    esac
+    uci set amnezia.config.routing_mode="$2"
+    uci commit amnezia
+    LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
+    routing_emit_classifier "$2" "$LAN_DEV" \
+      > "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
+    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+    ( sleep 1 && fw4 reload ) &
+    conntrack -D -m "$POOL_MARK/$MARK_MASK"
+    conntrack -D -m "$STICKY_MARK/$MARK_MASK"
+    ;;
+  set-source)
+    case "$2" in
+      itdoginfo_inside|itdoginfo_services|refilter_domains|refilter_ip|antifilter) ;;
+      *) amz_log "ctl: unknown source '$2'"; exit 1 ;;
+    esac
+    case "$3" in
+      0|1) ;;
+      *) amz_log "ctl: enabled must be 0 or 1"; exit 1 ;;
+    esac
+    uci set "amnezia.$2.enabled=$3"
+    uci commit amnezia
+    ;;
   *)
-    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle} [args]" >&2
+    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source} [args]" >&2
     exit 1
     ;;
 esac
