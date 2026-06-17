@@ -286,22 +286,70 @@ ssh_run "
 log "verifying dummy interfaces"
 ssh_run "ip link show awg1; ip link show awg2"
 
-# Write /etc/config/amnezia — only the base config section.
-# In pbr mode we deliberately omit the globals/awg1/awg2 sections so that
-# deploy-cutover.sh's prep_prestate() is the one that builds them (that is
-# exactly what we are testing).  The migrator's migrate_from_pbr() reads
-# amnezia.globals.mode and amnezia.<name>.enabled — those will be absent until
-# prep runs, which is the realistic "fresh rollback" pre-state.
-log "writing /etc/config/amnezia (base config section only — no globals/awg sections)"
+# Write /etc/config/amnezia — realistic full config mirroring the real
+# post-install state (openwrt/config/amnezia).  This includes:
+#   - config globals 'globals' (mode + sticky_target)
+#   - config tunnel 'awg1' with enabled='1' (Primary tunnel)
+#   - config force_source sections (needed by Scenario 3 / amnezia-force-update)
+#
+# WHY: The installer's tunnel enum (Step 8 migrate / Step 5 first-install) reads
+# `uci show amnezia | awk '/\.enabled=.1/ && $2 ~ /^awg[0-9]/'`.  Without an
+# enabled tunnel section the enum is empty → routing_firewall_apply is skipped →
+# no vpn zone (D1 fails) + no fw4 reload → classifier never loaded (C1 fails).
+# A real install ALWAYS has awg1 enabled — the previous base-only config was an
+# artificial harness gap, not a realistic pre-state.
+#
+# SAFETY: The installer tries gen_tunnel_uci("awg1", "/etc/amnezia/awg1.conf").
+# The dummy conf (no PrivateKey/PublicKey) makes parse_awg_conf return 1 →
+# gen_tunnel_uci returns 1 → installer logs "WARN: conf parse failed" and skips
+# uci batch + ifup.  The dummy awg1 interface is left untouched.
+# routing_firewall_apply still fires (tunnel list is non-empty) → vpn zone +
+# fw4 reload → classifier activated.  This is the correct safe path.
+log "writing /etc/config/amnezia (realistic full config with globals + awg1 + force_sources)"
 ssh_run "mkdir -p /etc/amnezia"
 ssh_run 'cat > /etc/config/amnezia << '"'"'UCI_EOF'"'"'
 config amnezia '"'"'config'"'"'
 	option routing_mode '"'"'tunnel-default'"'"'
 	option installed_version '"'"'main'"'"'
 	option installed_ts '"'"''"'"'
+
+config globals '"'"'globals'"'"'
+	option mode '"'"'failover'"'"'
+	option sticky_target '"'"'awg1'"'"'
+
+config tunnel '"'"'awg1'"'"'
+	option enabled '"'"'1'"'"'
+	option label '"'"'Primary'"'"'
+	option metric '"'"'1'"'"'
+	option weight '"'"'1'"'"'
+
+config force_source '"'"'itdoginfo_inside'"'"'
+	option enabled '"'"'1'"'"'
+	option kind '"'"'domains'"'"'
+	option url '"'"'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst'"'"'
+
+config force_source '"'"'itdoginfo_services'"'"'
+	option enabled '"'"'1'"'"'
+	option kind '"'"'domains'"'"'
+	option url '"'"'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Categories/geoblock.lst'"'"'
+
+config force_source '"'"'refilter_domains'"'"'
+	option enabled '"'"'0'"'"'
+	option kind '"'"'domains'"'"'
+	option url '"'"'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst'"'"'
+
+config force_source '"'"'refilter_ip'"'"'
+	option enabled '"'"'0'"'"'
+	option kind '"'"'cidr'"'"'
+	option url '"'"'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/ipsum.lst'"'"'
+
+config force_source '"'"'antifilter'"'"'
+	option enabled '"'"'0'"'"'
+	option kind '"'"'domains'"'"'
+	option url '"'"'https://antifilter.download/list/domains.lst'"'"'
 UCI_EOF
 '
-log "verifying /etc/config/amnezia (expect: only amnezia.config section)"
+log "verifying /etc/config/amnezia (expect: config + globals + awg1 + force_sources)"
 ssh_run "uci show amnezia"
 
 # Write DUMMY /etc/amnezia/awg{1,2}.conf files so the launcher's keep-if-present
@@ -456,8 +504,6 @@ log "VM is ready for test-migrate.sh or test-first-install.sh"
 log ""
 log "Quick sanity:"
 ssh_run "ip link show awg1; ip link show awg2"
-# Note: amnezia.globals is intentionally absent here in pbr mode — it is built
-# by deploy-cutover.sh's prep_prestate() as part of the launcher's own workflow.
 ssh_run "uci show amnezia"
 if [ "$PROVISION_MODE" = "pbr" ]; then
   ssh_run "/etc/init.d/pbr status 2>/dev/null && echo 'pbr: running' || echo 'pbr: not running (check FIRST_BOOT_TWEAK)'"
