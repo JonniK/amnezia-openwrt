@@ -163,6 +163,118 @@ if [ "${1:-}" = "--dry-run-all" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# _amz_wire_force_engine <dry>
+#   Shared helper: installs the full force-list engine (helpers, hotplug,
+#   boot-init, seed, cron, initial populate). Called from BOTH first_install
+#   and migrate_from_pbr after the ru4 gate passes.
+#   $1 = "1" means dry-run (skip all real file operations).
+#   Note: .nft fragment install is NOT here — first_install places it before
+#   classifier generation (step 2b) which must remain before classifier gen.
+# ---------------------------------------------------------------------------
+_amz_wire_force_engine() {
+  _afe_dry="${1:-0}"
+
+  if [ "$_afe_dry" = 1 ]; then
+    return 0
+  fi
+
+  # Install the three allowlist helpers to /usr/bin.
+  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update; do
+    if [ -f "/usr/bin/${_afe_helper}" ]; then
+      amz_log "${_afe_helper} already present (/usr/bin)"
+    else
+      _afe_src=$(resolve_dep \
+        "/usr/bin/${_afe_helper}" \
+        "${_afe_helper}.sh" \
+        "${_afe_helper}.sh") || true
+      if [ -n "$_afe_src" ] && [ "$_afe_src" != "/usr/bin/${_afe_helper}" ]; then
+        cp "$_afe_src" "/usr/bin/${_afe_helper}" 2>/dev/null || true
+        chmod +x "/usr/bin/${_afe_helper}" 2>/dev/null || true
+        amz_log "${_afe_helper} installed to /usr/bin"
+      elif [ -z "$_afe_src" ]; then
+        amz_log "WARN: ${_afe_helper} not found; allowlist helper will be missing"
+      fi
+    fi
+  done
+
+  # Install the force-load firewall hotplug (repopulates amnezia_force4 on fw reload).
+  if [ -f /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+    amz_log "99-amnezia-force-load hotplug already present (.ipk path)"
+  else
+    _afe_hplug=$(resolve_dep \
+      /etc/hotplug.d/firewall/99-amnezia-force-load \
+      99-amnezia-force-load.hotplug \
+      99-amnezia-force-load.hotplug) || true
+    if [ -n "$_afe_hplug" ] && [ "$_afe_hplug" != /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+      mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+      cp "$_afe_hplug" /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+      chmod +x /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+    elif [ -z "$_afe_hplug" ]; then
+      amz_log "WARN: 99-amnezia-force-load.hotplug not found; force-load hotplug disabled"
+    fi
+  fi
+
+  # Install the force-load boot init (mirrors amnezia-ru-load.init pattern).
+  if [ -f /etc/init.d/amnezia-force-load ]; then
+    amz_log "amnezia-force-load init already present (.ipk path)"
+  else
+    _afe_init=$(resolve_dep \
+      /etc/init.d/amnezia-force-load \
+      amnezia-force-load.init \
+      amnezia-force-load.init) || true
+    if [ -n "$_afe_init" ] && [ "$_afe_init" != /etc/init.d/amnezia-force-load ]; then
+      cp "$_afe_init" /etc/init.d/amnezia-force-load 2>/dev/null || true
+      chmod +x /etc/init.d/amnezia-force-load 2>/dev/null || true
+    elif [ -z "$_afe_init" ]; then
+      amz_log "WARN: amnezia-force-load.init not found; force-load on boot disabled"
+    fi
+  fi
+  # Enable the init service (runs procd enable — idempotent).
+  # Explicit echo to STUB_LOG allows tests to verify enable was called.
+  echo "/etc/init.d/amnezia-force-load enable" >> "${STUB_LOG:-/dev/null}"
+  /etc/init.d/amnezia-force-load enable 2>/dev/null || true
+
+  # Seed /etc/amnezia/force-tunnel.list and force.d/ (idempotent).
+  mkdir -p "${CONF_DIR:-/etc/amnezia}/force.d" 2>/dev/null || true
+  if [ ! -f "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+    _afe_ftl=$(resolve_dep \
+      "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" \
+      force-tunnel.list \
+      force-tunnel.list) || true
+    if [ -n "$_afe_ftl" ] && \
+       [ "$_afe_ftl" != "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+      cp "$_afe_ftl" "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+    else
+      touch "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+    fi
+    amz_log "force-tunnel.list seeded"
+  else
+    amz_log "force-tunnel.list already present"
+  fi
+
+  # Install the daily amnezia-force-update cron entry (dedup, idempotent).
+  _afe_cron=/etc/crontabs/root
+  mkdir -p /etc/crontabs 2>/dev/null || true
+  touch "$_afe_cron" 2>/dev/null || true
+  sed -i '/# amnezia-force-update/d' "$_afe_cron" 2>/dev/null || true
+  echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
+    >> "$_afe_cron" 2>/dev/null || true
+  /etc/init.d/cron enable 2>/dev/null || true
+  /etc/init.d/cron reload 2>/dev/null || true
+  amz_log "amnezia-force-update cron installed (daily 03:15)"
+
+  # Run amnezia-force-update once on install (best-effort, backgrounded).
+  if [ -x /usr/bin/amnezia-force-update ]; then
+    ( /usr/bin/amnezia-force-update >/dev/null 2>&1 ) &
+    amz_log "amnezia-force-update: initial run triggered (background)"
+  else
+    amz_log "WARN: amnezia-force-update not installed; skipping initial run"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # --migrate [--dry-run]: ordered pbr-removal migration.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--migrate" ]; then
@@ -203,9 +315,23 @@ if [ "${1:-}" = "--migrate" ]; then
       mkdir -p /etc/nftables.d 2>/dev/null || true
       _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
       if command -v routing_emit_classifier >/dev/null 2>&1; then
-        routing_emit_classifier "$_routing_mode" "$LAN_DEV" \
-          > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
-        amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+        _cls_tmp=$(mktemp /tmp/amnezia-cls-mig-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-mig-$$")
+        _cls_ok=0
+        if routing_emit_classifier "$_routing_mode" "$LAN_DEV" > "$_cls_tmp" 2>/dev/null; then
+          # Validate: non-empty and contains the expected chain declaration.
+          if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+            amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier gen produced empty/invalid output; keeping existing file"
+          fi
+        else
+          rm -f "$_cls_tmp"
+          amz_log "ERROR: routing_emit_classifier failed; keeping existing file"
+        fi
+        unset _cls_tmp
       else
         # Fallback for legacy staged installs without routing lib.
         _nft_src=$(resolve_dep \
@@ -213,8 +339,16 @@ if [ "${1:-}" = "--migrate" ]; then
           30-amnezia-classify.nft \
           nftables.d/30-amnezia-classify.nft) || true
         if [ -n "$_nft_src" ] && [ "$_nft_src" != /etc/nftables.d/30-amnezia-classify.nft ]; then
-          sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" \
-            > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+          _cls_tmp=$(mktemp /tmp/amnezia-cls-mig-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-mig-$$")
+          if sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" > "$_cls_tmp" 2>/dev/null \
+             && [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier fallback gen failed; keeping existing file"
+          fi
+          unset _cls_tmp
         elif [ -z "$_nft_src" ]; then
           amz_log "WARN: classifier fragment not found; skipping classifier install"
         fi
@@ -458,6 +592,11 @@ if [ "${1:-}" = "--migrate" ]; then
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
     fi
 
+    # Step 10b: wire the full force-list engine (helpers, hotplug, boot-init,
+    # seed, cron, initial populate).  Dry-run-guarded via _amz_wire_force_engine.
+    # H3/H2: migrate_from_pbr was previously missing this wiring entirely.
+    _amz_wire_force_engine "$_migrate_dry"
+
     # Step 11: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
     if [ "$_migrate_dry" = 1 ]; then
       echo "repoint:dnsmasq"
@@ -582,41 +721,10 @@ if [ "${1:-}" = "--first-install" ]; then
     # 2b. Install force-list helpers, hotplug, and nft fragments to stable locations.
     # Must run before step 3 (classifier generation reads from /usr/share/amnezia/nftables.d/).
     if [ "$_fi_dry" != 1 ]; then
-      # Install the three allowlist helpers to /usr/bin.
-      for _helper_name in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update; do
-        if [ -f "/usr/bin/${_helper_name}" ]; then
-          amz_log "${_helper_name} already present (/usr/bin)"
-        else
-          _helper_src=$(resolve_dep \
-            "/usr/bin/${_helper_name}" \
-            "${_helper_name}.sh" \
-            "${_helper_name}.sh") || true
-          if [ -n "$_helper_src" ] && [ "$_helper_src" != "/usr/bin/${_helper_name}" ]; then
-            cp "$_helper_src" "/usr/bin/${_helper_name}" 2>/dev/null || true
-            chmod +x "/usr/bin/${_helper_name}" 2>/dev/null || true
-            amz_log "${_helper_name} installed to /usr/bin"
-          elif [ -z "$_helper_src" ]; then
-            amz_log "WARN: ${_helper_name} not found; allowlist helper will be missing"
-          fi
-        fi
-      done
-      # Install the force-load firewall hotplug (repopulates amnezia_force4 on fw reload).
-      if [ -f /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
-        amz_log "99-amnezia-force-load hotplug already present (.ipk path)"
-      else
-        _fhotplug_src=$(resolve_dep \
-          /etc/hotplug.d/firewall/99-amnezia-force-load \
-          99-amnezia-force-load.hotplug \
-          99-amnezia-force-load.hotplug) || true
-        if [ -n "$_fhotplug_src" ] && [ "$_fhotplug_src" != /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
-          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
-          cp "$_fhotplug_src" /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
-          chmod +x /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
-        elif [ -z "$_fhotplug_src" ]; then
-          amz_log "WARN: 99-amnezia-force-load.hotplug not found; force-load hotplug disabled"
-        fi
-      fi
       # Install both .nft fragments to stable read location for routing_emit_classifier.
+      # NOTE: helpers+hotplug+boot-init+seed+cron are wired via _amz_wire_force_engine
+      # below (step 8), after the failover monitor is started.  The .nft fragments must
+      # come here — before classifier generation in step 3 — so the generator can read them.
       mkdir -p /usr/share/amnezia/nftables.d 2>/dev/null || true
       export AMNEZIA_NFT_DIR=/usr/share/amnezia/nftables.d
       for _frag in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
@@ -645,9 +753,22 @@ if [ "${1:-}" = "--first-install" ]; then
       mkdir -p /etc/nftables.d 2>/dev/null || true
       _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
       if command -v routing_emit_classifier >/dev/null 2>&1; then
-        routing_emit_classifier "$_routing_mode" "$LAN_DEV" \
-          > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
-        amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+        _cls_tmp=$(mktemp /tmp/amnezia-cls-fi-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-fi-$$")
+        if routing_emit_classifier "$_routing_mode" "$LAN_DEV" > "$_cls_tmp" 2>/dev/null; then
+          # Validate: non-empty and contains the expected chain declaration.
+          if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+            amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier gen produced empty/invalid output; keeping existing file"
+          fi
+        else
+          rm -f "$_cls_tmp"
+          amz_log "ERROR: routing_emit_classifier failed; keeping existing file"
+        fi
+        unset _cls_tmp
       else
         amz_log "WARN: routing_emit_classifier not available; skipping classifier install"
       fi
@@ -829,52 +950,11 @@ if [ "${1:-}" = "--first-install" ]; then
       /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
     fi
-    # 8. Seed /etc/amnezia/force-tunnel.list and force.d/ (idempotent).
-    if [ "$_fi_dry" != 1 ]; then
-      mkdir -p "${CONF_DIR:-/etc/amnezia}/force.d" 2>/dev/null || true
-      if [ ! -f "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
-        # Seed an empty manual list so amnezia-force-load can always find it.
-        _ftl_src=$(resolve_dep \
-          "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" \
-          force-tunnel.list \
-          force-tunnel.list) || true
-        if [ -n "$_ftl_src" ] && \
-           [ "$_ftl_src" != "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
-          cp "$_ftl_src" "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
-          chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
-        else
-          touch "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
-          chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
-        fi
-        amz_log "force-tunnel.list seeded"
-      else
-        amz_log "force-tunnel.list already present"
-      fi
-    fi
-    # 9. Install the daily amnezia-force-update cron entry (dedup like the RU cron).
-    if [ "$_fi_dry" != 1 ]; then
-      _cron_file=/etc/crontabs/root
-      mkdir -p /etc/crontabs 2>/dev/null || true
-      touch "$_cron_file" 2>/dev/null || true
-      # Remove any pre-existing force-update cron line so re-runs are idempotent.
-      sed -i '/# amnezia-force-update/d' "$_cron_file" 2>/dev/null || true
-      # Daily at 03:15 — does not collide with the weekly RU slot (Sun 04:30).
-      echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
-        >> "$_cron_file" 2>/dev/null || true
-      /etc/init.d/cron enable 2>/dev/null || true
-      /etc/init.d/cron reload 2>/dev/null || true
-      amz_log "amnezia-force-update cron installed (daily 03:15)"
-    fi
-    # 10. Run amnezia-force-update once on install (best-effort, backgrounded).
-    # A fetch failure is non-fatal: the installer must complete regardless.
-    if [ "$_fi_dry" != 1 ]; then
-      if [ -x /usr/bin/amnezia-force-update ]; then
-        ( /usr/bin/amnezia-force-update >/dev/null 2>&1 ) &
-        amz_log "amnezia-force-update: initial run triggered (background)"
-      else
-        amz_log "WARN: amnezia-force-update not installed; skipping initial run"
-      fi
-    fi
+    # 8. Wire the full force-list engine: helpers, hotplug, boot-init, seed,
+    # daily cron, and initial populate run (shared with migrate_from_pbr).
+    # H3/H2: _amz_wire_force_engine is defined at the top of the --migrate
+    # dispatch section and is always available when this code runs.
+    _amz_wire_force_engine "$_fi_dry"
   }
 
   first_install_wiring

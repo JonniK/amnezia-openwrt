@@ -125,3 +125,42 @@ load '../lib/harness.bash'
   # Cleanup
   rm -f /tmp/amnezia-ru-cidr.sh
 }
+
+# ---------------------------------------------------------------------------
+# H3: migrate_from_pbr wires the full force engine (boot-init + cron + seed)
+# ---------------------------------------------------------------------------
+@test "H3/migrate: force-update cron is installed by migrate (real path)" {
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+
+  grep -q "amnezia-force-update cron installed" "$STUB_LOG" \
+    || { echo "FAIL: amnezia-force-update cron not installed by migrate"; false; }
+}
+
+@test "H3/migrate: force-tunnel.list seeded by migrate (real path)" {
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+
+  ( grep -q "force-tunnel.list seeded" "$STUB_LOG" \
+    || grep -q "force-tunnel.list already present" "$STUB_LOG" ) \
+    || { echo "FAIL: force-tunnel.list not seeded/found by migrate"; false; }
+}
+
+@test "H3/migrate: amnezia-force-load boot init enabled by migrate (real path)" {
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+
+  grep -q "/etc/init.d/amnezia-force-load enable" "$STUB_LOG" \
+    || { echo "FAIL: amnezia-force-load init enable not called in migrate"; false; }
+}
+
+@test "H3/migrate: force engine is dry-run guarded (no force wiring in dry-run)" {
+  # In dry-run the force engine must be a no-op.
+  NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate --dry-run
+
+  ! grep -q "amnezia-force-update cron installed" "$STUB_LOG" \
+    || { echo "FAIL: force cron install appeared in migrate dry-run"; false; }
+  ! grep -q "/etc/init.d/amnezia-force-load enable" "$STUB_LOG" \
+    || { echo "FAIL: amnezia-force-load enable appeared in migrate dry-run"; false; }
+}

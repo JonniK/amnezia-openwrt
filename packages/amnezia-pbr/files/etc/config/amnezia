@@ -37,7 +37,6 @@ config tunnel 'awg1'
 
 # Force-list sources for amnezia-force-update.
 # itdoginfo: two complementary lists — RKN-blocked (inside) and geoblock-RU services.
-# URLs to be resolved at F1 (implementation phase).
 config force_source 'itdoginfo_inside'
 	option enabled '1'
 	option kind 'domains'

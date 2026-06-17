@@ -74,9 +74,10 @@ case "$1" in
     fi
     mv "$_cls_tmp" "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
     ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
-    # H3: conntrack flush AFTER reload, inside the backgrounded subshell.
-    ( sleep 1 && fw4 reload \
-      && conntrack -D -m "$POOL_MARK/$MARK_MASK" 2>/dev/null; \
+    # M2: Both conntrack flushes are unconditional after fw4 reload —
+    # POOL and STICKY are flushed regardless of reload exit status.
+    ( sleep 1 && fw4 reload 2>/dev/null; \
+      conntrack -D -m "$POOL_MARK/$MARK_MASK" 2>/dev/null; \
       conntrack -D -m "$STICKY_MARK/$MARK_MASK" 2>/dev/null ) &
     ;;
   set-source)

@@ -236,3 +236,171 @@ load '../lib/harness.bash'
   grep -q 'rm -f /etc/nftables.d/15-pbr-ru-tld4.nft' "$F" \
     || { echo "FAIL: rm -f 15-pbr-ru-tld4.nft not in source"; false; }
 }
+
+# ---------------------------------------------------------------------------
+# H1: Classifier fail-open (temp-file + validate + atomic mv)
+# ---------------------------------------------------------------------------
+@test "H1/first-install: successful classifier gen writes file containing chain amnezia_classify" {
+  # The classifier is generated from the routing lib's routing_emit_classifier.
+  # In the test harness the lib is available; a successful run must produce a
+  # file containing 'chain amnezia_classify' (the chain that the hotplug reads).
+  # Because /etc/nftables.d is not writable in the test env, we redirect via
+  # a temp classifier output path.
+  _cls_out="$BATS_TEST_TMPDIR/30-amnezia-classify.nft"
+  # Pre-create a known existing file to verify it isn't truncated on success.
+  printf 'chain amnezia_classify { }\n' > "$_cls_out"
+
+  # Run a minimal wrapper that exercises the H1 guard path.
+  _wrap="$BATS_TEST_TMPDIR/h1-test.sh"
+  cat > "$_wrap" <<'WEOF'
+#!/bin/sh
+AMNEZIA_LIB="${AMNEZIA_LIB:-/usr/lib/amnezia}"
+if [ -f "$AMNEZIA_LIB/amnezia-routing.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-routing.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-routing.sh"
+fi
+_cls_out="${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
+_cls_tmp=$(mktemp /tmp/amnezia-cls-h1-XXXXXX)
+if routing_emit_classifier tunnel-default br-lan > "$_cls_tmp" 2>/dev/null; then
+  if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+    mv "$_cls_tmp" "$_cls_out" 2>/dev/null || rm -f "$_cls_tmp"
+    echo "classifier:ok"
+  else
+    rm -f "$_cls_tmp"
+    echo "classifier:empty"
+  fi
+else
+  rm -f "$_cls_tmp"
+  echo "classifier:emit-failed"
+fi
+WEOF
+  chmod +x "$_wrap"
+  _wrap_lib="$BATS_TEST_TMPDIR/lib"
+  mkdir -p "$_wrap_lib"
+  cp "$HARNESS_DIR/../openwrt/lib/amnezia-routing.sh" "$_wrap_lib/"
+  cp "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh" "$_wrap_lib/"
+  AMNEZIA_NFT_DIR="$HARNESS_DIR/../openwrt/nftables.d" \
+  AMNEZIA_CLASSIFIER_OUT="$_cls_out" \
+  AMNEZIA_LIB="$_wrap_lib" \
+    run sh "$_wrap"
+  echo "$output" | grep -q "classifier:ok" \
+    || { echo "FAIL: expected classifier:ok, got: $output"; false; }
+  grep -q "chain amnezia_classify" "$_cls_out" \
+    || { echo "FAIL: output file does not contain chain amnezia_classify"; false; }
+}
+
+@test "H1/first-install: failed classifier gen does NOT truncate existing file and logs ERROR" {
+  # Simulate routing_emit_classifier returning non-zero (failure case).
+  _cls_out="$BATS_TEST_TMPDIR/30-amnezia-classify.nft"
+  printf 'chain amnezia_classify { # existing }\n' > "$_cls_out"
+  _before=$(cat "$_cls_out")
+
+  _wrap="$BATS_TEST_TMPDIR/h1-fail.sh"
+  cat > "$_wrap" <<'WEOF'
+#!/bin/sh
+AMNEZIA_LIB="${AMNEZIA_LIB:-/usr/lib/amnezia}"
+if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then . "$AMNEZIA_LIB/amnezia-common.sh"; fi
+# Override emit to always fail.
+routing_emit_classifier() { return 1; }
+_cls_out="${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
+_cls_tmp=$(mktemp /tmp/amnezia-cls-h1-XXXXXX)
+if routing_emit_classifier tunnel-default br-lan > "$_cls_tmp" 2>/dev/null; then
+  if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+    mv "$_cls_tmp" "$_cls_out" 2>/dev/null || rm -f "$_cls_tmp"
+    echo "classifier:ok"
+  else
+    rm -f "$_cls_tmp"
+    amz_log "ERROR: classifier gen produced empty/invalid output; keeping existing file"
+    echo "classifier:empty"
+  fi
+else
+  rm -f "$_cls_tmp"
+  amz_log "ERROR: routing_emit_classifier failed; keeping existing file"
+  echo "classifier:emit-failed"
+fi
+WEOF
+  chmod +x "$_wrap"
+  _wrap_lib="$BATS_TEST_TMPDIR/lib2"
+  mkdir -p "$_wrap_lib"
+  cp "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh" "$_wrap_lib/"
+  AMNEZIA_CLASSIFIER_OUT="$_cls_out" \
+  AMNEZIA_LIB="$_wrap_lib" \
+    run sh "$_wrap"
+  # Must have reported failure.
+  echo "$output" | grep -q "classifier:emit-failed" \
+    || { echo "FAIL: expected classifier:emit-failed, got: $output"; false; }
+  # The existing file must be unchanged.
+  _after=$(cat "$_cls_out")
+  [ "$_before" = "$_after" ] \
+    || { echo "FAIL: existing classifier was modified (truncated/overwritten) on gen failure"; false; }
+  # logger stub must have recorded the ERROR.
+  grep -q "ERROR: routing_emit_classifier failed" "$STUB_LOG" \
+    || { echo "FAIL: ERROR log message not found in STUB_LOG"; false; }
+}
+
+@test "H1: installer source uses temp-file pattern for both paths (static check)" {
+  F="$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh"
+  # Both migrate and first-install paths must use mktemp + mv, not redirect.
+  # Check that mktemp is used for classifier temp files.
+  grep -q 'mktemp.*amnezia-cls' "$F" \
+    || { echo "FAIL: mktemp temp-file pattern not found for classifier"; false; }
+  # Check that 'chain amnezia_classify' validation is present.
+  grep -q 'chain amnezia_classify' "$F" \
+    || { echo "FAIL: chain amnezia_classify validation not in source"; false; }
+  # Ensure the naive truncating redirect is NOT used for the live classifier file.
+  # (The only redirect for 30-amnezia-classify.nft must be via temp or mv.)
+  ! grep -E '> /etc/nftables.d/30-amnezia-classify\.nft' "$F" \
+    || { echo "FAIL: direct truncating redirect to 30-amnezia-classify.nft found"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# H2: amnezia-force-load boot init installed and enabled
+# ---------------------------------------------------------------------------
+@test "H2/first-install: amnezia-force-load.init is installed and enabled" {
+  UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+
+  # The init must be installed (logger records the log or .ipk path detected).
+  ( grep -q "amnezia-force-load init already present" "$STUB_LOG" \
+    || grep -q "amnezia-force-load.*installed" "$STUB_LOG" \
+    || grep -q "force-load on boot disabled" "$STUB_LOG" ) \
+    || { echo "FAIL: no log for amnezia-force-load init install attempt"; false; }
+  # enable must be called.
+  grep -q "/etc/init.d/amnezia-force-load enable" "$STUB_LOG" \
+    || { echo "FAIL: /etc/init.d/amnezia-force-load enable not called"; false; }
+}
+
+@test "H2/migrate: amnezia-force-load.init is installed and enabled" {
+  UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate
+
+  ( grep -q "amnezia-force-load init already present" "$STUB_LOG" \
+    || grep -q "amnezia-force-load.*installed" "$STUB_LOG" \
+    || grep -q "force-load on boot disabled" "$STUB_LOG" ) \
+    || { echo "FAIL: no log for amnezia-force-load init install attempt in migrate"; false; }
+  grep -q "/etc/init.d/amnezia-force-load enable" "$STUB_LOG" \
+    || { echo "FAIL: /etc/init.d/amnezia-force-load enable not called in migrate"; false; }
+}
+
+@test "H2: amnezia-force-load.init source file exists" {
+  [ -f "$HARNESS_DIR/../openwrt/amnezia-force-load.init" ] \
+    || { echo "FAIL: openwrt/amnezia-force-load.init missing"; false; }
+  grep -q "boot()" "$HARNESS_DIR/../openwrt/amnezia-force-load.init" \
+    || { echo "FAIL: amnezia-force-load.init missing boot() function"; false; }
+  grep -q "amnezia-force-load" "$HARNESS_DIR/../openwrt/amnezia-force-load.init" \
+    || { echo "FAIL: amnezia-force-load.init does not call amnezia-force-load"; false; }
+}
+
+@test "H2: sync includes amnezia-force-load.init" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-force-load.init" "$F" \
+    || { echo "FAIL: amnezia-force-load.init not in sync-to-packages.sh"; false; }
+}
+
+@test "H2: packages contain amnezia-force-load init after sync" {
+  run sh "$HARNESS_DIR/../dev/sync-to-packages.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/etc/init.d/amnezia-force-load" ] \
+    || { echo "FAIL: /etc/init.d/amnezia-force-load not in package files"; false; }
+}

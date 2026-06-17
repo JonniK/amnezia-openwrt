@@ -97,11 +97,13 @@ cp "$SRC/iproute2-amnezia-rt_tables.conf" \
 chmod 0644 "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
 
 # procd init scripts
-cp "$SRC/amnezia-failover.init"  "$PBR_PKG/etc/init.d/amnezia-failover"
-cp "$SRC/amnezia-ru-load.init"   "$PBR_PKG/etc/init.d/amnezia-ru-load"
+cp "$SRC/amnezia-failover.init"    "$PBR_PKG/etc/init.d/amnezia-failover"
+cp "$SRC/amnezia-ru-load.init"     "$PBR_PKG/etc/init.d/amnezia-ru-load"
+cp "$SRC/amnezia-force-load.init"  "$PBR_PKG/etc/init.d/amnezia-force-load"
 chmod 0755 \
 	"$PBR_PKG/etc/init.d/amnezia-failover" \
-	"$PBR_PKG/etc/init.d/amnezia-ru-load"
+	"$PBR_PKG/etc/init.d/amnezia-ru-load" \
+	"$PBR_PKG/etc/init.d/amnezia-force-load"
 
 # firewall hotplug: repopulate nft sets on every fw4 reload
 cp "$SRC/99-amnezia-ru-load.hotplug" \
