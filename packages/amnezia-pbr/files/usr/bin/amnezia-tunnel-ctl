@@ -21,14 +21,21 @@ _tunnel_exists() {
 }
 
 # _fwnet_count — prints number of members in firewall.vpn.network
-# Uses a single awk pass to avoid the grep -c || echo 0 double-line problem.
+# Uses uci get which returns space-separated values on one line (works on every
+# uci version including OpenWrt 24.10 which renders lists as one quoted line in
+# uci show output).
 _fwnet_count() {
-  uci show firewall 2>/dev/null | awk '/^firewall\.vpn\.network=/{c++} END{print c+0}'
+  # shellcheck disable=SC2046,SC2086
+  set -- $(uci -q get firewall.vpn.network 2>/dev/null)
+  echo "$#"
 }
 
 # _fwnet_has <name> — returns 0 if <name> is in firewall.vpn.network
 _fwnet_has() {
-  uci show firewall 2>/dev/null | grep -q "^firewall\.vpn\.network=${1}$"
+  for _m in $(uci -q get firewall.vpn.network 2>/dev/null); do
+    [ "$_m" = "$1" ] && return 0
+  done
+  return 1
 }
 
 # _sticky_target — prints current sticky target
@@ -174,18 +181,8 @@ case "$1" in
     # H1: Remove anonymous peer section using installer idiom (not named section).
     while uci -q delete "network.@amneziawg_${_name}[0]"; do :; done
 
-    # Remove from firewall vpn zone member list
-    # UCI list delete-by-value: delete the matching entry
-    uci show firewall 2>/dev/null \
-      | awk -F'=' -v n="$_name" '$0 ~ "firewall\\.vpn\\.network=" {
-          if ($2 != n) print $2
-        }' \
-      | {
-          uci -q delete "firewall.vpn.network" 2>/dev/null || true
-          while IFS= read -r _m; do
-            uci add_list "firewall.vpn.network=${_m}"
-          done
-        }
+    # Remove from firewall vpn zone member list (idiomatic per-value delete).
+    uci -q del_list "firewall.vpn.network=${_name}" 2>/dev/null || true
 
     # Remove amnezia tunnel section
     uci -q delete "amnezia.${_name}" 2>/dev/null || true
