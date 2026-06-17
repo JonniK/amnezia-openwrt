@@ -480,8 +480,9 @@ cat "$_TAR_TMP" | ssh $VM_SSH_OPTS "root@$SSH_HOST" \
 rm -f "$_TAR_TMP"
 
 log "pushing lib files to /usr/lib/amnezia/"
-ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-common.sh" "/usr/lib/amnezia/amnezia-common.sh"
-ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-routing.sh" "/usr/lib/amnezia/amnezia-routing.sh"
+ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-common.sh"     "/usr/lib/amnezia/amnezia-common.sh"
+ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-routing.sh"    "/usr/lib/amnezia/amnezia-routing.sh"
+ssh_push_file "$REPO_ROOT/openwrt/lib/amnezia-tunnel-lib.sh" "/usr/lib/amnezia/amnezia-tunnel-lib.sh"
 
 # NOTE: amnezia-failover binary and amnezia-failover.init are intentionally NOT
 # pre-staged here. The installer (install-amnezia-pbr.sh) self-installs them via
