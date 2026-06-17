@@ -33,6 +33,7 @@ mkdir -p "$FORCE_DIR/force.d"
   _ts=$(date +%s 2>/dev/null || echo 0)
   _stamp_entries=""
   _any_failed=0
+  _any_ok=0
 
   # Parse enabled force_source sections from UCI.
   # uci show amnezia emits lines like:
@@ -125,6 +126,7 @@ mkdir -p "$FORCE_DIR/force.d"
       # L1: count lines with awk to avoid wc -l portability quirk (no trailing newline).
       _count=$(awk 'END{print NR}' "$_cache" 2>/dev/null || echo 0)
       _status="ok"
+      _any_ok=$(( _any_ok + 1 ))
     else
       rm -f "$_tmp"
       # Keep prior cache; mark failed in stamp.
@@ -140,6 +142,13 @@ mkdir -p "$FORCE_DIR/force.d"
     fi
     _stamp_entries="${_stamp_entries}\"${_name}\":{\"status\":\"${_status}\",\"count\":${_count}}"
   done
+
+  # Warn when every enabled source failed: the cron "success" would otherwise
+  # silently mask a dead upstream.  No behavior change — we still write the
+  # stamp and call force-load (prior cached lists remain active, which is safe).
+  if [ "$_any_ok" = "0" ] && [ "$_any_failed" != "0" ]; then
+    amz_log "force-update: WARNING — all sources failed, no list materialized; allowlist unchanged (using prior cache if any)"
+  fi
 
   # Write force-update.json stamp.
   printf '{"ts":%s,"sources":{%s}}\n' "$_ts" "$_stamp_entries" \
