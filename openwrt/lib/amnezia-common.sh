@@ -57,6 +57,9 @@ H1|H2|H3|H4|I1|I2|I3|I4|I5) ;;
     fi
     eval "AWG_${_k}=\$_v"
   done < "$_f"
-  [ -n "$AWG_PrivateKey" ] && [ -n "$AWG_PublicKey" ] || { amz_log "conf incomplete: $_f"; return 1; }
+  if [ -z "$AWG_PrivateKey" ] || [ -z "$AWG_PublicKey" ]; then
+    amz_log "conf incomplete: $_f"
+    return 1
+  fi
   return 0
 }
