@@ -119,6 +119,30 @@ routing_set_pool_balance() {
   ip nexthop replace id "$TBL_POOL" group "${_grp%/}" type resilient buckets 128 idle_timer 120
   ip route replace default nhid "$TBL_POOL" table "$TBL_POOL"
 }
+# Locate a packaged .nft fragment across source-tree and installed locations.
+_amz_find_fragment() {
+  for _p in "${AMNEZIA_NFT_DIR:-}/$1" \
+            "$(dirname "$0")/nftables.d/$1" \
+            "$(dirname "$0")/../nftables.d/$1" \
+            "/usr/share/amnezia/nftables.d/$1" \
+            "/etc/nftables.d/$1"; do
+    [ -n "${_p#/}" ] && [ -f "$_p" ] && { echo "$_p"; return 0; }
+  done
+  return 1
+}
+
+# routing_emit_classifier <tunnel-default|direct-default> <lan_ifname>
+# Prints the classifier .nft for the given mode with @@LAN_IFNAME@@ substituted.
+routing_emit_classifier() {
+  _mode=$1; _lan=$2
+  case "$_mode" in
+    direct-default) _frag=30-amnezia-classify-direct.nft ;;
+    *)              _frag=30-amnezia-classify.nft ;;
+  esac
+  _src=$(_amz_find_fragment "$_frag") || { amz_log "classifier fragment $_frag not found"; return 1; }
+  sed "s/@@LAN_IFNAME@@/$_lan/" "$_src"
+}
+
 # Disable LAN RA/DHCPv6/NDP so LAN clients stay IPv4-only (v6 fail-closed part b).
 routing_disable_lan_v6() {
   uci set dhcp.lan.ra='disabled'
