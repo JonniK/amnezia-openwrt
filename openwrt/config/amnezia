@@ -34,3 +34,36 @@ config tunnel 'awg1'
 	option label 'Primary'
 	option metric '1'
 	option weight '1'
+
+# Force-list sources for amnezia-force-update.
+# itdoginfo: two complementary lists — RKN-blocked (inside) and geoblock-RU services.
+# URLs to be resolved at F1 (implementation phase).
+config force_source 'itdoginfo_inside'
+	option enabled '1'
+	option kind 'domains'
+	# Resolve exact URL at F1 — itdoginfo Russia "inside" raw domains list.
+	option url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst'
+
+config force_source 'itdoginfo_services'
+	option enabled '1'
+	option kind 'domains'
+	# Resolve exact URL at F1 — itdoginfo geoblock-RU services raw domains list.
+	option url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/services-raw.lst'
+
+config force_source 'refilter_domains'
+	option enabled '0'
+	option kind 'domains'
+	# Resolve exact URL at F1 — 1andrevich/Re-filter-lists domains_all.
+	option url 'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst'
+
+config force_source 'refilter_ip'
+	option enabled '0'
+	option kind 'cidr'
+	# Resolve exact URL at F1 — 1andrevich/Re-filter-lists ipsum (IP/CIDR).
+	option url 'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/ipsum.lst'
+
+config force_source 'antifilter'
+	option enabled '0'
+	option kind 'domains'
+	# Resolve exact URL at F1 — antifilter.download domains list.
+	option url 'https://antifilter.download/list/domains.lst'
