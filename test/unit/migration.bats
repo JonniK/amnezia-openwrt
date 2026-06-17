@@ -80,6 +80,7 @@ load '../lib/harness.bash'
   printf '#!/bin/sh\necho "amnezia-ru-cidr:run" >> "${STUB_LOG:-/dev/null}"\n' \
     > /tmp/amnezia-ru-cidr.sh
   chmod +x /tmp/amnezia-ru-cidr.sh
+  rm -f /usr/bin/amnezia-ru-cidr 2>/dev/null || true
 
   UCI_FAKE_TUNNELS="awg1" NFT_FAKE_RU4_COUNT=12 \
     run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --migrate

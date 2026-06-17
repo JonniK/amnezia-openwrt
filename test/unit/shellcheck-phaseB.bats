@@ -7,5 +7,5 @@ load '../lib/harness.bash'
     openwrt/amnezia-ru-cidr.sh \
     openwrt/amnezia-status.sh \
     openwrt/configure-dnsmasq-amnezia.sh
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

@@ -7,5 +7,5 @@ load '../lib/harness.bash'
     openwrt/amnezia-failover.init \
     openwrt/amnezia-status.sh \
     openwrt/amnezia-failover-ctl.sh
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
