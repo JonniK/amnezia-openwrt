@@ -32,5 +32,14 @@ while IFS= read -r _dom; do
   uci add_list dhcp.amnezia_sticky.domain="$_dom"
 done < "$STICKY_LIST"
 
+# Force-list domains -> amnezia_force4
+# The nft set itself is declared in the .nft fragment; this section only adds
+# domain entries (managed by amnezia-force-load, not here).
+uci -q delete dhcp.amnezia_force 2>/dev/null || true
+uci set dhcp.amnezia_force='ipset'
+uci add_list dhcp.amnezia_force.name='amnezia_force4'
+uci set dhcp.amnezia_force.table='fw4'
+uci set dhcp.amnezia_force.table_family='inet'
+
 uci commit dhcp
 ( sleep 1 && /etc/init.d/dnsmasq restart ) &
