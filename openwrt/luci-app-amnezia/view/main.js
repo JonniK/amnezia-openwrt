@@ -1344,6 +1344,26 @@ return view.extend({
 				tableEl.innerHTML = '';
 				tableEl.appendChild(renderTunnelTable(st, self));
 			}
+			// C1: repaint routing-mode select from live state. Guard: skip when
+			// the select is focused (user may be mid-interaction).
+			var routingSel = document.getElementById('routing-mode-select');
+			if (routingSel && document.activeElement !== routingSel && st && st.routing_mode) {
+				routingSel.value = st.routing_mode;
+			}
+			// H1: repaint source checkboxes from live state. Guard: skip each box
+			// when it currently has focus (user may be mid-click).
+			if (st && st.sources) {
+				var sourceNames = ['itdoginfo_inside', 'itdoginfo_services', 'refilter_domains', 'refilter_ip', 'antifilter'];
+				for (var si = 0; si < sourceNames.length; si++) {
+					var sn = sourceNames[si];
+					if (Object.prototype.hasOwnProperty.call(st.sources, sn)) {
+						var cb = document.getElementById('force-src-' + sn);
+						if (cb && document.activeElement !== cb) {
+							cb.checked = !!st.sources[sn];
+						}
+					}
+				}
+			}
 		});
 		var p6 = L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '').then(function(text) {
 			paintForceStamp(parseRuStamp(text));
@@ -1361,17 +1381,19 @@ return view.extend({
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), ''),
 			L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), ''),
-			L.resolveDefault(fs.read('/etc/amnezia/force-tunnel.list'), ''),
-			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '')
+			L.resolveDefault(fs.read('/etc/amnezia/force-tunnel.list'), '')
+			// M3: force-update.json dropped from load() — refresh()'s p6 reads it
+			// on every poll, so the initial paint comes from the first refresh() call.
 		]);
 	},
 
 	render: function(data) {
-		// load() returns 10 entries:
+		// load() returns 9 entries:
 		// [0] ru-update.json, [1] zapret-status, [2] blockcheck.json,
 		// [3] blockcheck log, [4] zapret-apply state, [5] zapret-apply parse,
 		// [6] seed-must-tunnel.list, [7] amnezia-failover.json,
-		// [8] force-tunnel.list, [9] force-update.json
+		// [8] force-tunnel.list
+		// (force-update.json is no longer in load() — refresh()'s p6 reads it)
 		var stamp = parseRuStamp(data && data[0]);
 		var zap = parseZapret((data && data[1] && data[1].stdout) || '');
 		var bc = parseBlockcheck(data && data[2]);
@@ -1381,7 +1403,8 @@ return view.extend({
 		var seedList = parseSeedList((data && data[6]) || '');
 		var failoverState = parseFailoverState((data && data[7]) || '');
 		var forceTunnelList = (data && data[8]) || '';
-		var forceUpdateStamp = parseRuStamp((data && data[9]) || '');
+		// forceUpdateStamp is not available at render time (M3: dropped from load).
+		// The force-update panel starts empty and is filled on first refresh() call.
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
@@ -1553,7 +1576,10 @@ return view.extend({
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Sources')),
 						E('div', { 'class': 'cbi-value-field' }, [
-							(function(self) {
+							(function(self, fst) {
+								// H1: drive checked state from live failover state sources map.
+								// Fall back to defaultOn only when the daemon hasn't emitted sources yet.
+								var liveSources = (fst && fst.sources) || null;
 								var sourceDefs = [
 									{ name: 'itdoginfo_inside',   label: 'itdoginfo (RKN-blocked, inside)',   defaultOn: true },
 									{ name: 'itdoginfo_services', label: 'itdoginfo (geoblock-RU services)',   defaultOn: true },
@@ -1564,12 +1590,16 @@ return view.extend({
 								var box = E('div', {});
 								for (var si = 0; si < sourceDefs.length; si++) {
 									(function(sd) {
+										// Use live UCI-backed state when available; fall back to defaultOn.
+										var isChecked = liveSources && Object.prototype.hasOwnProperty.call(liveSources, sd.name)
+											? !!liveSources[sd.name]
+											: sd.defaultOn;
 										box.appendChild(E('label', { 'style': 'display:block;margin-bottom:4px;' }, [
 											E('input', {
 												'id': 'force-src-' + sd.name,
 												'type': 'checkbox',
 												'style': 'margin-right:6px;',
-												'checked': sd.defaultOn ? '' : null,
+												'checked': isChecked ? '' : null,
 												'change': ui.createHandlerFn(self, 'handleSourceToggle', sd.name)
 											}),
 											E('span', {}, _(sd.label))
@@ -1577,14 +1607,14 @@ return view.extend({
 									})(sourceDefs[si]);
 								}
 								return box;
-							})(this)
+							})(this, failoverState)
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Last update')),
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('strong', { 'id': 'force-when' },
-								forceUpdateStamp ? fmtAge(forceUpdateStamp.ts) : _('never updated')),
+								_('never updated')),  // M3: filled by first refresh() poll
 							E('span', { 'id': 'force-count', 'style': 'margin-left:12px;color:#666;' },
 								''),
 							E('span', { 'id': 'force-status', 'style': 'margin-left:8px;' }, '')

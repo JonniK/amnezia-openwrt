@@ -12,6 +12,12 @@ case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;
   "get amnezia.globals.sticky_target") echo "awg1" ;;
+  "get amnezia.config.routing_mode") echo "tunnel-default" ;;
+  "get amnezia.itdoginfo_inside.enabled") echo "1" ;;
+  "get amnezia.itdoginfo_services.enabled") echo "1" ;;
+  "get amnezia.refilter_domains.enabled") echo "0" ;;
+  "get amnezia.refilter_ip.enabled") echo "0" ;;
+  "get amnezia.antifilter.enabled") echo "0" ;;
   "show amnezia")
     # UCI_FAKE_TUNNELS: space-separated list of tunnel names to report as enabled.
     if [ -n "$UCI_FAKE_TUNNELS" ]; then

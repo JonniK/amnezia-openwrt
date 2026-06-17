@@ -1,4 +1,4 @@
 {
-  "required": ["mode","active_pool","active_sticky","all_down","tunnels"],
+  "required": ["mode","routing_mode","active_pool","active_sticky","all_down","sources","tunnels"],
   "tunnel_required": ["name","enabled","up","metric","weight","handshake_age","carrying","exit_ip"]
 }

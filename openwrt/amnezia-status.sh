@@ -9,7 +9,7 @@ else
 fi
 emit_empty() {
   cat <<'JSON'
-{"mode":"failover","active_pool":null,"active_sticky":null,"all_down":true,"tunnels":[]}
+{"mode":"failover","routing_mode":"tunnel-default","active_pool":null,"active_sticky":null,"all_down":true,"sources":{"itdoginfo_inside":true,"itdoginfo_services":true,"refilter_domains":false,"refilter_ip":false,"antifilter":false},"tunnels":[]}
 JSON
 }
 case "$1" in

@@ -159,12 +159,31 @@ write_state() {
     fi
     _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":$_hs_age,\"carrying\":$_car,\"exit_ip\":null},"
   done
+
+  # C1: read routing_mode from UCI so the LuCI select shows live state.
+  _rmode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo "tunnel-default")
+  [ -z "$_rmode" ] && _rmode="tunnel-default"
+
+  # H1: read per-source enabled state so the LuCI checkboxes show live state.
+  # Five known source names (order matches the LuCI render list).
+  _sources_json=""
+  for _sname in itdoginfo_inside itdoginfo_services refilter_domains refilter_ip antifilter; do
+    _sen=$(uci -q get "amnezia.${_sname}.enabled" 2>/dev/null || echo "0")
+    [ -z "$_sen" ] && _sen="0"
+    # Emit JSON boolean.
+    if [ "$_sen" = "1" ]; then _sbool=true; else _sbool=false; fi
+    _sources_json="${_sources_json}\"${_sname}\":${_sbool},"
+  done
+  _sources_json="${_sources_json%,}"
+
   # Write to a temp file on the same filesystem then atomically rename so the
   # LuCI reader never sees a partial/truncated JSON.
   _sf_tmp="${STATE_FILE}.tmp.$$"
-  printf '{"mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"tunnels":[%s]}\n' \
-    "$MODE" "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
-    "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" "$_alldown" "${_t%,}" > "$_sf_tmp"
+  printf '{"mode":"%s","routing_mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"sources":{%s},"tunnels":[%s]}\n' \
+    "$MODE" "$_rmode" \
+    "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
+    "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" \
+    "$_alldown" "$_sources_json" "${_t%,}" > "$_sf_tmp"
   mv "$_sf_tmp" "$STATE_FILE"
 }
 
