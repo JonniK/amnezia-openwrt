@@ -183,12 +183,31 @@ if [ "${1:-}" = "--migrate" ]; then
     if [ "$_migrate_dry" = 1 ]; then
       echo "install:classifier"
     else
-      LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      # Ensure both .nft fragments are in the stable read location before generating.
+      mkdir -p /usr/share/amnezia/nftables.d 2>/dev/null || true
+      export AMNEZIA_NFT_DIR=/usr/share/amnezia/nftables.d
+      for _frag in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
+        if [ ! -f "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+          _mig_frag_src=$(resolve_dep \
+            "/usr/share/amnezia/nftables.d/${_frag}" \
+            "$_frag" \
+            "nftables.d/${_frag}") || true
+          if [ -n "$_mig_frag_src" ] && \
+             [ "$_mig_frag_src" != "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+            cp "$_mig_frag_src" "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+            chmod 0644 "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+          fi
+        fi
+      done
+      LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
       mkdir -p /etc/nftables.d 2>/dev/null || true
-      # If the .ipk already installed the classifier, skip copying (it's up-to-date).
-      if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
-        amz_log "install:classifier (already present, skipping copy)"
+      _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
+      if command -v routing_emit_classifier >/dev/null 2>&1; then
+        routing_emit_classifier "$_routing_mode" "$LAN_DEV" \
+          > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+        amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
       else
+        # Fallback for legacy staged installs without routing lib.
         _nft_src=$(resolve_dep \
           /etc/nftables.d/30-amnezia-classify.nft \
           30-amnezia-classify.nft \
@@ -197,10 +216,10 @@ if [ "${1:-}" = "--migrate" ]; then
           sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" \
             > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
         elif [ -z "$_nft_src" ]; then
-          amz_log "WARN: 30-amnezia-classify.nft not found; skipping classifier install"
+          amz_log "WARN: classifier fragment not found; skipping classifier install"
         fi
+        amz_log "install:classifier (fallback sed)"
       fi
-      amz_log "install:classifier"
     fi
 
     # Step 2: declare @amnezia_ru4 in the live ruleset so that amnezia-ru-cidr
@@ -560,29 +579,78 @@ if [ "${1:-}" = "--first-install" ]; then
     fi
     # 2. ip rules
     routing_install_rules
-    # 3. classifier (with LAN ifname substitution)
+    # 2b. Install force-list helpers, hotplug, and nft fragments to stable locations.
+    # Must run before step 3 (classifier generation reads from /usr/share/amnezia/nftables.d/).
+    if [ "$_fi_dry" != 1 ]; then
+      # Install the three allowlist helpers to /usr/bin.
+      for _helper_name in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update; do
+        if [ -f "/usr/bin/${_helper_name}" ]; then
+          amz_log "${_helper_name} already present (/usr/bin)"
+        else
+          _helper_src=$(resolve_dep \
+            "/usr/bin/${_helper_name}" \
+            "${_helper_name}.sh" \
+            "${_helper_name}.sh") || true
+          if [ -n "$_helper_src" ] && [ "$_helper_src" != "/usr/bin/${_helper_name}" ]; then
+            cp "$_helper_src" "/usr/bin/${_helper_name}" 2>/dev/null || true
+            chmod +x "/usr/bin/${_helper_name}" 2>/dev/null || true
+            amz_log "${_helper_name} installed to /usr/bin"
+          elif [ -z "$_helper_src" ]; then
+            amz_log "WARN: ${_helper_name} not found; allowlist helper will be missing"
+          fi
+        fi
+      done
+      # Install the force-load firewall hotplug (repopulates amnezia_force4 on fw reload).
+      if [ -f /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+        amz_log "99-amnezia-force-load hotplug already present (.ipk path)"
+      else
+        _fhotplug_src=$(resolve_dep \
+          /etc/hotplug.d/firewall/99-amnezia-force-load \
+          99-amnezia-force-load.hotplug \
+          99-amnezia-force-load.hotplug) || true
+        if [ -n "$_fhotplug_src" ] && [ "$_fhotplug_src" != /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+          cp "$_fhotplug_src" /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+          chmod +x /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+        elif [ -z "$_fhotplug_src" ]; then
+          amz_log "WARN: 99-amnezia-force-load.hotplug not found; force-load hotplug disabled"
+        fi
+      fi
+      # Install both .nft fragments to stable read location for routing_emit_classifier.
+      mkdir -p /usr/share/amnezia/nftables.d 2>/dev/null || true
+      export AMNEZIA_NFT_DIR=/usr/share/amnezia/nftables.d
+      for _frag in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
+        if [ ! -f "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+          _frag_src=$(resolve_dep \
+            "/usr/share/amnezia/nftables.d/${_frag}" \
+            "$_frag" \
+            "nftables.d/${_frag}") || true
+          if [ -n "$_frag_src" ] && \
+             [ "$_frag_src" != "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+            cp "$_frag_src" "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+            chmod 0644 "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+          elif [ -z "$_frag_src" ]; then
+            amz_log "WARN: classifier fragment ${_frag} not found"
+          fi
+        fi
+      done
+      amz_log "install:classifier-fragments"
+    fi
+    # 3. classifier generation (replaces static .nft copy — uses routing_emit_classifier).
     if [ "$_fi_dry" = 1 ]; then
       amz_log "install:classifier"
       echo "install:classifier" >> "${STUB_LOG:-/dev/null}"
     else
-      LAN_DEV=$(uci get network.lan.device 2>/dev/null || echo br-lan)
+      LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
       mkdir -p /etc/nftables.d 2>/dev/null || true
-      # If .ipk already installed the classifier, skip copying.
-      if [ -f /etc/nftables.d/30-amnezia-classify.nft ]; then
-        amz_log "install:classifier (already present, skipping copy)"
+      _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
+      if command -v routing_emit_classifier >/dev/null 2>&1; then
+        routing_emit_classifier "$_routing_mode" "$LAN_DEV" \
+          > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+        amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
       else
-        _nft_src=$(resolve_dep \
-          /etc/nftables.d/30-amnezia-classify.nft \
-          30-amnezia-classify.nft \
-          nftables.d/30-amnezia-classify.nft) || true
-        if [ -n "$_nft_src" ] && [ "$_nft_src" != /etc/nftables.d/30-amnezia-classify.nft ]; then
-          sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" \
-            > /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
-        elif [ -z "$_nft_src" ]; then
-          amz_log "WARN: 30-amnezia-classify.nft not found; skipping classifier install"
-        fi
+        amz_log "WARN: routing_emit_classifier not available; skipping classifier install"
       fi
-      amz_log "install:classifier"
     fi
     # 4. dnsmasq UCI ipset
     _dns_helper=$(resolve_dep \
@@ -760,6 +828,52 @@ if [ "${1:-}" = "--first-install" ]; then
       fi
       /etc/init.d/amnezia-failover enable 2>/dev/null || true
       ( sleep 1 && /etc/init.d/amnezia-failover start ) &
+    fi
+    # 8. Seed /etc/amnezia/force-tunnel.list and force.d/ (idempotent).
+    if [ "$_fi_dry" != 1 ]; then
+      mkdir -p "${CONF_DIR:-/etc/amnezia}/force.d" 2>/dev/null || true
+      if [ ! -f "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+        # Seed an empty manual list so amnezia-force-load can always find it.
+        _ftl_src=$(resolve_dep \
+          "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" \
+          force-tunnel.list \
+          force-tunnel.list) || true
+        if [ -n "$_ftl_src" ] && \
+           [ "$_ftl_src" != "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+          cp "$_ftl_src" "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+          chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+        else
+          touch "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+          chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+        fi
+        amz_log "force-tunnel.list seeded"
+      else
+        amz_log "force-tunnel.list already present"
+      fi
+    fi
+    # 9. Install the daily amnezia-force-update cron entry (dedup like the RU cron).
+    if [ "$_fi_dry" != 1 ]; then
+      _cron_file=/etc/crontabs/root
+      mkdir -p /etc/crontabs 2>/dev/null || true
+      touch "$_cron_file" 2>/dev/null || true
+      # Remove any pre-existing force-update cron line so re-runs are idempotent.
+      sed -i '/# amnezia-force-update/d' "$_cron_file" 2>/dev/null || true
+      # Daily at 03:15 — does not collide with the weekly RU slot (Sun 04:30).
+      echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
+        >> "$_cron_file" 2>/dev/null || true
+      /etc/init.d/cron enable 2>/dev/null || true
+      /etc/init.d/cron reload 2>/dev/null || true
+      amz_log "amnezia-force-update cron installed (daily 03:15)"
+    fi
+    # 10. Run amnezia-force-update once on install (best-effort, backgrounded).
+    # A fetch failure is non-fatal: the installer must complete regardless.
+    if [ "$_fi_dry" != 1 ]; then
+      if [ -x /usr/bin/amnezia-force-update ]; then
+        ( /usr/bin/amnezia-force-update >/dev/null 2>&1 ) &
+        amz_log "amnezia-force-update: initial run triggered (background)"
+      else
+        amz_log "WARN: amnezia-force-update not installed; skipping initial run"
+      fi
     fi
   }
 
