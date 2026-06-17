@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "ifdown $*" >> "${STUB_LOG:-/dev/null}"
+exit 0

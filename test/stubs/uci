@@ -3,10 +3,26 @@ echo "uci $*" >> "${STUB_LOG:-/dev/null}"
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;
+  "get amnezia.globals.sticky_target") echo "awg1" ;;
   "show amnezia")
     # UCI_FAKE_TUNNELS: space-separated list of tunnel names to report as enabled.
     if [ -n "$UCI_FAKE_TUNNELS" ]; then
       for _t in $UCI_FAKE_TUNNELS; do echo "amnezia.${_t}=tunnel"; echo "amnezia.${_t}.enabled=1"; done
+    fi
+    # UCI_FAKE_SOURCES: space-separated list of "name:enabled" pairs, e.g. "itdoginfo_inside:1 antifilter:0".
+    if [ -n "$UCI_FAKE_SOURCES" ]; then
+      for _s in $UCI_FAKE_SOURCES; do
+        _sname="${_s%%:*}"; _senabled="${_s##*:}"
+        echo "amnezia.${_sname}=force_source"
+        echo "amnezia.${_sname}.enabled=${_senabled}"
+        echo "amnezia.${_sname}.url=https://example.com/${_sname}.txt"
+        echo "amnezia.${_sname}.kind=domains"
+      done
+    fi ;;
+  "show firewall")
+    # UCI_FAKE_FWNET: space-separated list of firewall.vpn.network members.
+    if [ -n "$UCI_FAKE_FWNET" ]; then
+      for _n in $UCI_FAKE_FWNET; do echo "firewall.vpn.network=${_n}"; done
     fi ;;
 esac
 exit 0
