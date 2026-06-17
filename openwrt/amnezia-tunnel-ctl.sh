@@ -21,8 +21,9 @@ _tunnel_exists() {
 }
 
 # _fwnet_count — prints number of members in firewall.vpn.network
+# Uses a single awk pass to avoid the grep -c || echo 0 double-line problem.
 _fwnet_count() {
-  uci show firewall 2>/dev/null | grep -c "^firewall\.vpn\.network=" || echo 0
+  uci show firewall 2>/dev/null | awk '/^firewall\.vpn\.network=/{c++} END{print c+0}'
 }
 
 # _fwnet_has <name> — returns 0 if <name> is in firewall.vpn.network
@@ -35,10 +36,9 @@ _sticky_target() {
   uci get amnezia.globals.sticky_target 2>/dev/null || echo ""
 }
 
-# _next_metric — prints next available metric index (count of existing tunnels + 1)
-_next_metric() {
-  _cnt=$(uci show amnezia 2>/dev/null | grep -c "^amnezia\.awg[0-9].*=tunnel" || echo 0)
-  echo $(( _cnt + 1 ))
+# _metric_for_name — metric = awgN index (not count+1, avoids collisions with gaps)
+_metric_for_name() {
+  printf '%s' "${1#awg}"
 }
 
 case "$1" in
@@ -67,7 +67,20 @@ case "$1" in
       esac
     done
 
-    [ -n "$_name" ] || { amz_log "tunnel-ctl: add requires <name>"; exit 1; }
+    # H2: Validate name BEFORE any mutation.
+    # Must match awg[1-9] exactly (no path traversal, no awg0, no awg10+).
+    case "$_name" in
+      awg[1-9]) ;;
+      *) amz_log "tunnel-ctl: invalid tunnel name '${_name}' (must be awg1..awg${MAX_TUNNELS})"; exit 1 ;;
+    esac
+    _slot="${_name#awg}"
+    if [ "$_slot" -gt "$MAX_TUNNELS" ]; then
+      amz_log "tunnel-ctl: tunnel '${_name}' exceeds MAX_TUNNELS=${MAX_TUNNELS}"; exit 1
+    fi
+    if _tunnel_exists "$_name"; then
+      amz_log "tunnel-ctl: tunnel '${_name}' already exists"; exit 1
+    fi
+
     [ -n "$_body" ] || { amz_log "tunnel-ctl: add requires <conf-body>"; exit 1; }
     [ -z "$_label" ] && _label="$_name"
 
@@ -89,17 +102,22 @@ case "$1" in
       exit 1
     fi
 
-    # Generate network UCI for the tunnel (outputs to stdout for batch)
-    gen_tunnel_uci "$_name" "$_tmp" | while IFS= read -r _line; do
-      uci $_line
-    done
+    # C2: Apply gen_tunnel_uci output via uci batch (not per-line eval — word-splits I-field values).
+    _uci_tmp=$(mktemp /tmp/amnezia-uci-XXXXXX)
+    gen_tunnel_uci "$_name" "$_tmp" > "$_uci_tmp" 2>/dev/null || {
+      rm -f "$_tmp" "$_uci_tmp"
+      exit 1
+    }
+    uci batch < "$_uci_tmp"
+    rm -f "$_uci_tmp"
 
     # Move temp to final destination (mode 600)
     mv "$_tmp" "${CONF_DIR:-/etc/amnezia}/${_name}.conf"
     chmod 600 "${CONF_DIR:-/etc/amnezia}/${_name}.conf"
 
     # Create typed amnezia tunnel section
-    _metric=$(_next_metric)
+    # M2: metric = slot index (not count+1) — avoids collisions with gapped slots.
+    _metric=$(_metric_for_name "$_name")
     uci set "amnezia.${_name}=tunnel"
     uci set "amnezia.${_name}.enabled=1"
     uci set "amnezia.${_name}.label=${_label}"
@@ -107,9 +125,10 @@ case "$1" in
     uci set "amnezia.${_name}.weight=1"
     uci set "amnezia.${_name}.track_ip=1.1.1.1"
 
-    # Add to firewall vpn zone (delete-then-add for idempotence)
-    uci -q delete "firewall.vpn.network" 2>/dev/null || true
-    uci add_list "firewall.vpn.network=${_name}"
+    # C1: Append-if-absent to firewall.vpn.network (NEVER blanket-delete the list).
+    if ! _fwnet_has "$_name"; then
+      uci add_list "firewall.vpn.network=${_name}"
+    fi
 
     # Commit all changes
     uci commit network
@@ -150,9 +169,10 @@ case "$1" in
     # Bring down the interface
     ifdown "$_name"
 
-    # Remove network interface + peer section
+    # Remove network interface section
     uci -q delete "network.${_name}" 2>/dev/null || true
-    uci -q delete "network.amneziawg_${_name}" 2>/dev/null || true
+    # H1: Remove anonymous peer section using installer idiom (not named section).
+    while uci -q delete "network.@amneziawg_${_name}[0]"; do :; done
 
     # Remove from firewall vpn zone member list
     # UCI list delete-by-value: delete the matching entry

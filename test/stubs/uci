@@ -1,5 +1,13 @@
 #!/bin/sh
 echo "uci $*" >> "${STUB_LOG:-/dev/null}"
+# Normalize: strip leading -q flag so verb is always $1 after normalization.
+_verb="$1"
+if [ "$_verb" = "-q" ]; then shift; _verb="$1"; fi
+# delete always returns 1: real UCI returns 1 when the section/option does not
+# exist (the while-loop teardown idiom relies on this to terminate).
+case "$_verb" in
+  delete) exit 1 ;;
+esac
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;

@@ -65,12 +65,19 @@ case "$1" in
     uci set amnezia.config.routing_mode="$2"
     uci commit amnezia
     LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
-    routing_emit_classifier "$2" "$LAN_DEV" \
-      > "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
+    # M1: Capture classifier to a temp; check rc; bail BEFORE writing output or reloading.
+    _cls_tmp=$(mktemp /tmp/amnezia-cls-XXXXXX)
+    if ! routing_emit_classifier "$2" "$LAN_DEV" > "$_cls_tmp" 2>/dev/null; then
+      rm -f "$_cls_tmp"
+      amz_log "ctl: classifier emit failed for mode '$2'; aborting reload"
+      exit 1
+    fi
+    mv "$_cls_tmp" "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
     ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
-    ( sleep 1 && fw4 reload ) &
-    conntrack -D -m "$POOL_MARK/$MARK_MASK"
-    conntrack -D -m "$STICKY_MARK/$MARK_MASK"
+    # H3: conntrack flush AFTER reload, inside the backgrounded subshell.
+    ( sleep 1 && fw4 reload \
+      && conntrack -D -m "$POOL_MARK/$MARK_MASK" 2>/dev/null; \
+      conntrack -D -m "$STICKY_MARK/$MARK_MASK" 2>/dev/null ) &
     ;;
   set-source)
     case "$2" in
