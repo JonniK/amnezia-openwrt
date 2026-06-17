@@ -9,11 +9,20 @@
 **Tech Stack:** BusyBox ash, nftables/fw4, UCI, dnsmasq `config ipset`, LuCI client JS (`fs.exec`/`fs.read`, `DecompressionStream`), bats, the `dev/vm/` QEMU harness.
 
 **Conventions (match existing code):**
-- Source helpers load `amnezia-common.sh` + `amnezia-routing.sh` via the `AMNEZIA_LIB` pattern (see `amnezia-failover-ctl.sh:6-11`).
-- `fw4 reload` runs in a backgrounded subshell (`( sleep 1 && … ) &`) per the SSH-drop rule.
+- Source helpers load libs via the `AMNEZIA_LIB` + `$(dirname "$0")/lib/` fallback pattern (`amnezia-failover-ctl.sh:6-11` sources **only** `amnezia-common.sh`; any helper needing routing functions must source `amnezia-routing.sh` too — see C2/H-fix).
+- `fw4 reload` AND the dnsmasq `restart` both run in a backgrounded subshell (`( sleep 1 && … ) &`) per the SSH-drop rule (mirror `configure-dnsmasq-amnezia.sh:36`).
 - Every new `openwrt/` runtime file gets a `dev/sync-to-packages.sh` entry (drop `.sh`, map to its install path) — CI `sync.bats` enforces parity.
-- Tests live in `test/unit/` (bats) and `test/integration/`; JS fixture under `test/js/`.
 - Never print private keys; `.conf` files are mode 600.
+
+**Test harness contract (REAL convention — `test/lib/harness.bash`):** there is ONE shared log `$STUB_LOG` (every stub in `test/stubs/` appends to it); `PATH` is prefixed with `test/stubs`; `AMNEZIA_DRYRUN=1` is exported. Tests invoke a helper as `run sh "$HARNESS_DIR/../openwrt/<script>.sh" <args>` and assert with `grep -q "<recorded cmd>" "$STUB_LOG"` (see `test/unit/ctl.bats`). ACL tests use `node -e` JSON-structural assertions against `read.file`/`write.file` (see `test/unit/acl.bats`). **Do NOT invent per-tool log variables or bare-command invocation** — those do not exist. `test/unit/classify-nft.bats` already tests the tunnel-default fragment.
+
+### Phase 0 — Harness stubs (Wave-1 prelude; do FIRST)
+
+**Files:** Create `test/stubs/ifdown`, `test/stubs/wget` (+ symlinks/copies `uclient-fetch`, `curl`), `test/stubs/amnezia-failover-init`; Modify `test/stubs/uci`.
+
+- [ ] **P0-1:** Add stubs that log to `$STUB_LOG` like the existing ones: `ifdown` (echo `ifdown $*`); a fetch stub (`wget`/`uclient-fetch`/`curl`) that, unless `FETCH_FAIL=1`, writes a small fixture list to the `-O`/redirect target and logs the URL — honor `AMZ_FETCH` override. Helpers invoke the monitor init and sibling helpers via overridable names so tests can intercept: `${AMNEZIA_FAILOVER_INIT:-/etc/init.d/amnezia-failover}`, `${AMNEZIA_FORCE_LOAD:-amnezia-force-load}`, etc. Provide a `test/stubs/amnezia-failover-init` stub (logs `amnezia-failover <verb>`) and PATH shims `amnezia-force-load`/`amnezia-tunnel-ctl` for cross-helper-call tests; point the env overrides at them in the relevant `setup()`.
+- [ ] **P0-2:** Extend `test/stubs/uci` to enumerate, driven by env like the existing `UCI_FAKE_TUNNELS`: `firewall.vpn.network` members (`UCI_FAKE_FWNET`) and `force_source` sections + their `enabled` (`UCI_FAKE_SOURCES`), and to answer `get amnezia.globals.sticky_target`. Keep existing behavior intact (run the full suite after, expect green).
+- [ ] **P0-3:** Commit `test(harness): stubs for ifdown/fetch/monitor-init + uci firewall/force_source enumeration`.
 
 ---
 
@@ -24,6 +33,7 @@
 | `openwrt/nftables.d/30-amnezia-classify.nft` | tunnel-default fragment; **add `amnezia_force4` set decl** | A |
 | `openwrt/nftables.d/30-amnezia-classify-direct.nft` | NEW — direct-default chain (allowlist) + all 4 set decls | A |
 | `openwrt/lib/amnezia-routing.sh` | `+routing_emit_classifier <mode> <lan>` | A |
+| `openwrt/lib/amnezia-tunnel-lib.sh` | NEW — extracted `gen_tunnel_uci` (shared installer + tunnel-ctl) | D |
 | `openwrt/amnezia-force-load.sh` | NEW — merge/classify/load force list; `save-manual` | B |
 | `openwrt/amnezia-force-update.sh` | NEW — fetch enabled sources, cache, stamp, flock, →load | B |
 | `openwrt/99-amnezia-force-load.hotplug` | NEW — repopulate `amnezia_force4` IP half on fw reload | B |
@@ -37,7 +47,7 @@
 | `dev/sync-to-packages.sh` | mirror all new runtime paths | F |
 | `test/unit/*.bats`, `test/js/decode-vpn.test.*`, `dev/vm/` scenario | tests | each phase + G |
 
-**Waves (for parallel execution):** Wave 1 = A, B, D (disjoint files). Wave 2 = C (needs A+B), E (builds against A–D CLI contracts). Wave 3 = F (integrates all), then G (VM verify).
+**Waves (for parallel execution):** Phase 0 (harness stubs) first. Wave 1 = A, B, D. **Caveat (H4):** D2 extracts `gen_tunnel_uci` out of `install-amnezia-pbr.sh` into a shared lib and edits the installer — so D is NOT fully file-disjoint from Wave-3 F (also edits the installer). Serialize: D's installer edit lands before F, and D re-runs `installer-loop.bats`/`installer-dispatch.bats` after the extraction. Wave 2 = C (needs A+B), E (builds against A–D CLI contracts). Wave 3 = F (integrates all), then G (VM verify). If executed by parallel worktree agents, D and F must not run concurrently (shared `install-amnezia-pbr.sh`).
 
 ---
 
@@ -49,39 +59,48 @@
 - Modify: `openwrt/lib/amnezia-routing.sh`
 - Test: `test/unit/classifier-generator.bats`
 
-- [ ] **A1: Write failing test for the two golden fragments + generator.**
+- [ ] **A1: Write failing test for the two fragments + generator (real harness convention).**
 
 ```bash
 # test/unit/classifier-generator.bats
-setup() {
-  REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-  . "$REPO/openwrt/lib/amnezia-common.sh"
-  . "$REPO/openwrt/lib/amnezia-routing.sh"
-}
+load '../lib/harness.bash'
+ND="$HARNESS_DIR/../openwrt/nftables.d"
 
 @test "both fragments declare amnezia_force4 as an interval set" {
   for f in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
-    run grep -E 'set amnezia_force4 \{ type ipv4_addr; flags interval; auto-merge; \}' \
-      "$REPO/openwrt/nftables.d/$f"
-    [ "$status" -eq 0 ] || { echo "missing force4 decl in $f"; false; }
+    grep -Eq 'set amnezia_force4 +\{ type ipv4_addr; flags interval; auto-merge; \}' "$ND/$f" \
+      || { echo "missing force4 decl in $f"; false; }
   done
 }
 
-@test "direct fragment: default returns (direct), force-listed marks pool, sticky marks sticky" {
-  f="$REPO/openwrt/nftables.d/30-amnezia-classify-direct.nft"
+@test "direct fragment: default direct, force->pool, sticky->sticky, no blanket mark" {
+  f="$ND/30-amnezia-classify-direct.nft"
   grep -q 'ip daddr @amnezia_sticky4 meta mark set 0x0a0000 return' "$f"
-  grep -q 'ip daddr @amnezia_force4 meta mark set 0x0b0000 return' "$f"
-  # No unconditional "meta mark set 0x0b0000" tail (that would be tunnel-default).
-  run grep -E '^\tmeta mark set 0x0b0000$' "$f"
+  grep -q 'ip daddr @amnezia_force4  meta mark set 0x0b0000 return' "$f"
+  run grep -E '^[[:space:]]*meta mark set 0x0b0000$' "$f"   # blanket pool-mark = tunnel-default only
   [ "$status" -ne 0 ] || { echo "direct fragment must not blanket-mark to pool"; false; }
 }
 
-@test "routing_emit_classifier substitutes LAN_IFNAME and picks the right fragment" {
-  out=$(routing_emit_classifier direct-default br-lan)
-  echo "$out" | grep -q 'iifname != "br-lan" return'
-  echo "$out" | grep -q 'ip daddr @amnezia_force4 meta mark set 0x0b0000 return'
-  out2=$(routing_emit_classifier tunnel-default br-lan)
-  echo "$out2" | grep -qE '^\tmeta mark set 0x0b0000$'   # tunnel-default blanket mark present
+@test "routing_emit_classifier picks the right fragment and substitutes LAN" {
+  run sh -c '. "'"$HARNESS_DIR"'/../openwrt/lib/amnezia-common.sh"; \
+    . "'"$HARNESS_DIR"'/../openwrt/lib/amnezia-routing.sh"; \
+    AMNEZIA_NFT_DIR="'"$ND"'" routing_emit_classifier direct-default br-lan'
+  echo "$output" | grep -q 'iifname != "br-lan" return'
+  echo "$output" | grep -q 'ip daddr @amnezia_force4  meta mark set 0x0b0000 return'
+  run sh -c '. "'"$HARNESS_DIR"'/../openwrt/lib/amnezia-common.sh"; \
+    . "'"$HARNESS_DIR"'/../openwrt/lib/amnezia-routing.sh"; \
+    AMNEZIA_NFT_DIR="'"$ND"'" routing_emit_classifier tunnel-default br-lan'
+  echo "$output" | grep -qE '^[[:space:]]*meta mark set 0x0b0000$'
+}
+
+@test "tunnel-default fragment behaviour is preserved (regression)" {
+  # The pre-existing golden test must still pass after A2 adds the force4 decl.
+  run bats "$HARNESS_DIR/unit/classify-nft.bats"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  f="$ND/30-amnezia-classify.nft"
+  grep -q '@amnezia_ru_tld4 return' "$f"
+  grep -q '@amnezia_ru4 return' "$f"
+  grep -q '@amnezia_sticky4 meta mark set 0x0a0000 return' "$f"
 }
 ```
 
@@ -154,64 +173,77 @@ Note for F: the installer must ship BOTH fragments to a stable read location (e.
 - [ ] **B1: Failing tests for `amnezia-force-load` (classify + merge + idempotent restart).**
 
 ```bash
-# test/unit/force-load.bats  (uses uci/nft/dnsmasq stubs on PATH like other unit tests)
+# test/unit/force-load.bats
+load '../lib/harness.bash'
+SCRIPT="$HARNESS_DIR/../openwrt/amnezia-force-load.sh"
+setup() {
+  export FORCE_DIR="$BATS_TEST_TMPDIR/amnezia"; mkdir -p "$FORCE_DIR/force.d"
+  export AMNEZIA_FAILOVER_INIT="amnezia-failover-init"   # P0 stub
+}
+
 @test "force-load classifies IP/CIDR into the set and domains into config ipset" {
   printf '8.8.8.8\n1.2.3.0/24\nexample.com\n# comment\n\n' > "$FORCE_DIR/force.d/itdoginfo_inside.list"
   printf 'manual.example\n9.9.9.9\n' > "$FORCE_DIR/force-tunnel.list"
-  run amnezia-force-load
+  run sh "$SCRIPT"
   [ "$status" -eq 0 ]
-  grep -q 'add element inet fw4 amnezia_force4 { 8.8.8.8 }' "$NFT_LOG"
-  grep -q 'add element inet fw4 amnezia_force4 { 1.2.3.0/24 }' "$NFT_LOG"
-  grep -q 'add element inet fw4 amnezia_force4 { 9.9.9.9 }' "$NFT_LOG"
-  grep -q "add_list dhcp.amnezia_force.domain=example.com" "$UCI_LOG"
-  grep -q "add_list dhcp.amnezia_force.domain=manual.example" "$UCI_LOG"
+  # all stubs (nft/uci/dnsmasq) record to the single $STUB_LOG
+  grep -q 'amnezia_force4.*8.8.8.8' "$STUB_LOG"
+  grep -q 'amnezia_force4.*1.2.3.0/24' "$STUB_LOG"
+  grep -q 'amnezia_force4.*9.9.9.9' "$STUB_LOG"
+  grep -q 'add_list dhcp.amnezia_force.domain=example.com' "$STUB_LOG"
+  grep -q 'add_list dhcp.amnezia_force.domain=manual.example' "$STUB_LOG"
 }
 
 @test "force-load restarts dnsmasq only when the domain set changed" {
   printf 'a.example\n' > "$FORCE_DIR/force-tunnel.list"
-  amnezia-force-load; : > "$DNSMASQ_LOG"
-  amnezia-force-load                      # no change
-  run cat "$DNSMASQ_LOG"; [ -z "$output" ] || { echo "restarted with no change"; false; }
+  sh "$SCRIPT"; : > "$STUB_LOG"
+  sh "$SCRIPT"                                   # no change
+  run grep -q 'dnsmasq.*restart' "$STUB_LOG"; [ "$status" -ne 0 ] || { echo "restarted w/o change"; false; }
   printf 'a.example\nb.example\n' > "$FORCE_DIR/force-tunnel.list"
-  amnezia-force-load                      # domain added
-  grep -q restart "$DNSMASQ_LOG"
+  : > "$STUB_LOG"; sh "$SCRIPT"                   # domain added
+  grep -q 'dnsmasq.*restart' "$STUB_LOG"
 }
 
 @test "save-manual writes the manual file without touching auto caches, then loads" {
   printf 'AUTO\n' > "$FORCE_DIR/force.d/x.list"
-  run amnezia-force-load save-manual "$(printf 'one.example\ntwo.example')"
+  run sh "$SCRIPT" save-manual "$(printf 'one.example\ntwo.example')"
   [ "$status" -eq 0 ]
   grep -q one.example "$FORCE_DIR/force-tunnel.list"
-  grep -q AUTO "$FORCE_DIR/force.d/x.list"     # auto cache untouched
+  grep -q AUTO "$FORCE_DIR/force.d/x.list"        # auto cache untouched
 }
 ```
-(Set up stubs/env in `setup()`: `FORCE_DIR`, `NFT_LOG`, `UCI_LOG`, `DNSMASQ_LOG`, and `PATH`-shim `nft`/`uci`/`/etc/init.d/dnsmasq` recording to those logs — mirror the stub style already in `test/unit/`.)
 
-Run: FAIL (script missing).
+Run: FAIL (script missing). (The `nft`/`uci`/`dnsmasq` stubs already log to `$STUB_LOG`; the dnsmasq stub records its `restart` arg.)
 
-- [ ] **B2: Write `openwrt/amnezia-force-load.sh`.** Reads `FORCE_DIR` (default `/etc/amnezia`), merges `force.d/*.list` + `force-tunnel.list`, dedups, classifies each line (IP/CIDR regex → set; else domain), flushes+batch-adds IP/CIDR into `amnezia_force4` (batch like `amnezia-ru-cidr`), rebuilds `dhcp.amnezia_force` `add_list domain=` entries, computes a hash of the sorted domain list, and only `/etc/init.d/dnsmasq restart` when the hash differs from `$FORCE_DIR/.force-domains.hash`. `save-manual <content>` writes `$content` to `force-tunnel.list` (mode 644) then falls through to the load. Take a `flock` on `/var/lock/amnezia-force.lock` around the load. POSIX sh, shellcheck-clean, `amz_log` for diagnostics.
+- [ ] **B2: Write `openwrt/amnezia-force-load.sh`.** Reads `FORCE_DIR` (default `/etc/amnezia`), merges `force.d/*.list` + `force-tunnel.list`, dedups, classifies each line (IP/CIDR regex → set; else domain), flushes+batch-adds IP/CIDR into `amnezia_force4` (batch like `amnezia-ru-cidr`), rebuilds `dhcp.amnezia_force` `add_list domain=` entries, computes a hash of the sorted domain list, and only restarts dnsmasq **in a backgrounded subshell** (`( sleep 1 && /etc/init.d/dnsmasq restart ) &`, per the SSH-drop rule) when the hash differs from `$FORCE_DIR/.force-domains.hash`. `save-manual <content>` writes `$content` to `force-tunnel.list` (mode 644) then falls through to the load. Take a `flock` on `/var/lock/amnezia-force.lock` around the load. POSIX sh, shellcheck-clean, `amz_log` for diagnostics.
 
 - [ ] **B3: Run `bats test/unit/force-load.bats`** → PASS.
 
 - [ ] **B4: Failing tests for `amnezia-force-update` (enabled iteration + fetch-fail keeps cache).**
 ```bash
 # test/unit/force-update.bats
+load '../lib/harness.bash'
+SCRIPT="$HARNESS_DIR/../openwrt/amnezia-force-update.sh"
+setup() {
+  export FORCE_DIR="$BATS_TEST_TMPDIR/amnezia"; mkdir -p "$FORCE_DIR/force.d"
+  export UCI_FAKE_SOURCES="itdoginfo_inside:1 itdoginfo_services:1 antifilter:0"
+  export AMNEZIA_FORCE_LOAD="amnezia-force-load"   # PATH shim from P0 logs to $STUB_LOG
+}
 @test "update fetches only enabled sources" {
-  # uci stub returns itdoginfo_inside enabled=1, antifilter enabled=0
-  run amnezia-force-update
-  grep -q itdoginfo_inside "$FETCH_LOG"
-  run grep -q antifilter "$FETCH_LOG"; [ "$status" -ne 0 ]
+  run sh "$SCRIPT"
+  grep -q 'itdoginfo_inside' "$STUB_LOG"            # fetch stub logs the source/url
+  run grep -q 'antifilter' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 @test "a failed fetch keeps the previous cache and marks status failed" {
   printf 'OLD\n' > "$FORCE_DIR/force.d/itdoginfo_inside.list"
-  FETCH_FAIL=1 run amnezia-force-update
+  FETCH_FAIL=1 run sh "$SCRIPT"
   grep -q OLD "$FORCE_DIR/force.d/itdoginfo_inside.list"     # not clobbered
   grep -q '"status":"failed"' "$FORCE_DIR/force-update.json"
 }
 @test "update writes a stamp and calls force-load" {
-  run amnezia-force-update
+  run sh "$SCRIPT"
   grep -q '"ts"' "$FORCE_DIR/force-update.json"
-  grep -q force-load "$LOAD_LOG"
+  grep -q 'amnezia-force-load' "$STUB_LOG"
 }
 ```
 
@@ -219,15 +251,15 @@ Run: FAIL (script missing).
 
 - [ ] **B6: Run `bats test/unit/force-update.bats`** → PASS.
 
-- [ ] **B7: Create `openwrt/99-amnezia-force-load.hotplug`** (mirror `99-amnezia-ru-load.hotplug`):
+- [ ] **B7: Create `openwrt/99-amnezia-force-load.hotplug`** — mirror `99-amnezia-ru-load.hotplug` EXACTLY (same quoting + `|| true` tail; read the real file first):
 ```sh
-[ "$ACTION" = reload ] || exit 0
-[ -x /usr/bin/amnezia-force-load ] && /usr/bin/amnezia-force-load
+[ "$ACTION" = "reload" ] || exit 0
+[ -x /usr/bin/amnezia-force-load ] && /usr/bin/amnezia-force-load || true
 ```
 
 - [ ] **B8: Add the `dhcp.amnezia_force` ipset section to `openwrt/configure-dnsmasq-amnezia.sh`** (mirror the `amnezia_sticky` block at lines 26-33), pointing `name='amnezia_force4'`, `table='fw4'`, `table_family='inet'`. Do NOT add domains here (the loader manages them); just ensure the section exists.
 
-- [ ] **B9: Add `force_source` sections to `openwrt/config/amnezia`** (the four sections from the design; itdoginfo_inside + itdoginfo_services `enabled '1'`, the rest `'0'`). Leave the `url` values as the design's placeholders with a comment to resolve at F1.
+- [ ] **B9: Add the FIVE `force_source` sections to `openwrt/config/amnezia`** (H2 — design lines 123-143 define five: `itdoginfo_inside`, `itdoginfo_services`, `refilter_domains`, `refilter_ip`, `antifilter`). `itdoginfo_inside` + `itdoginfo_services` → `enabled '1'`; the other three → `enabled '0'`. Each has `kind` (`domains`/`cidr`) and `url`. Leave `url` as the design placeholders with a comment to resolve at F1.
 
 - [ ] **B10: `shellcheck` all new scripts; commit** `feat(force): allowlist load/update engine + hotplug + dnsmasq section`.
 
@@ -237,28 +269,38 @@ Run: FAIL (script missing).
 
 **Files:** Modify `openwrt/amnezia-failover-ctl.sh`; Test `test/unit/failover-ctl-mode.bats`.
 
-- [ ] **C1: Failing tests.**
+- [ ] **C1: Failing tests (harness convention).**
 ```bash
-@test "set-routing-mode validates, regenerates classifier, force-loads, flushes conntrack" {
-  run amnezia-failover-ctl set-routing-mode direct-default
+# test/unit/failover-ctl-mode.bats
+load '../lib/harness.bash'
+CTL="$HARNESS_DIR/../openwrt/amnezia-failover-ctl.sh"
+setup() {
+  export AMNEZIA_NFT_DIR="$HARNESS_DIR/../openwrt/nftables.d"
+  export AMNEZIA_CLASSIFIER_OUT="$BATS_TEST_TMPDIR/active.nft"   # redirect the write target in tests
+  export UCI_FAKE_SOURCES="itdoginfo_inside:1 antifilter:0"
+  export AMNEZIA_FORCE_LOAD="amnezia-force-load"
+}
+@test "set-routing-mode validates, regenerates classifier, force-loads, flushes both marks" {
+  run sh "$CTL" set-routing-mode direct-default
   [ "$status" -eq 0 ]
-  grep -q 'amnezia.config.routing_mode=direct-default' "$UCI_LOG"
-  grep -q '30-amnezia-classify-direct' "$EMIT_LOG"        # generator invoked for direct
-  grep -q 'force-load' "$LOAD_LOG"
-  grep -q -- '-D -m 0x0B0000/0x0FF0000' "$CONNTRACK_LOG"   # pool mark flushed
-  grep -q -- '-D -m 0x0A0000/0x0FF0000' "$CONNTRACK_LOG"   # sticky mark flushed
+  grep -q 'uci set amnezia.config.routing_mode=direct-default' "$STUB_LOG"
+  grep -q '@amnezia_force4' "$AMNEZIA_CLASSIFIER_OUT"        # direct fragment written
+  grep -q 'amnezia-force-load' "$STUB_LOG"
+  # conntrack stub logs its args; match case-insensitively (constants are 0x0B.. but tolerate 0xb..)
+  grep -qiE -- '-D -m 0x0?b0000/0x0?ff0000' "$STUB_LOG"      # pool mark flushed
+  grep -qiE -- '-D -m 0x0?a0000/0x0?ff0000' "$STUB_LOG"      # sticky mark flushed
 }
 @test "set-routing-mode rejects an unknown mode" {
-  run amnezia-failover-ctl set-routing-mode bogus; [ "$status" -ne 0 ]
+  run sh "$CTL" set-routing-mode bogus; [ "$status" -ne 0 ]
 }
 @test "set-source toggles a known source and rejects unknown" {
-  run amnezia-failover-ctl set-source antifilter 1
-  grep -q 'amnezia.antifilter.enabled=1' "$UCI_LOG"
-  run amnezia-failover-ctl set-source not_a_source 1; [ "$status" -ne 0 ]
+  run sh "$CTL" set-source antifilter 1
+  [ "$status" -eq 0 ]; grep -q 'uci set amnezia.antifilter.enabled=1' "$STUB_LOG"
+  run sh "$CTL" set-source not_a_source 1; [ "$status" -ne 0 ]
 }
 ```
 
-- [ ] **C2: Implement the two verbs** in `amnezia-failover-ctl.sh` (extend the `case`). `set-routing-mode`: validate ∈ {tunnel-default,direct-default}; `uci set amnezia.config.routing_mode`; `uci commit amnezia`; write `routing_emit_classifier "$2" "$LAN_DEV"` → `/etc/nftables.d/30-amnezia-classify.nft` (resolve `LAN_DEV` from the live network config / preserve current substitution); `amnezia-force-load`; backgrounded `fw4 reload`; then `conntrack -D -m "$POOL_MARK/$MARK_MASK"` and `conntrack -D -m "$STICKY_MARK/$MARK_MASK"`. `set-source`: validate `$2` ∈ the hardcoded known names, `$3` ∈ {0,1}; `uci set amnezia.$2.enabled=$3`; commit. Make `conntrack`/`fw4`/classifier-target overridable via env for tests.
+- [ ] **C2: Implement the two verbs** in `amnezia-failover-ctl.sh`. **First add an `amnezia-routing.sh` source block** (mirror the existing `amnezia-common.sh` block at lines 6-11 with the `$AMNEZIA_LIB` + `$(dirname "$0")/lib/` fallback — H1: the file currently sources only common.sh, but `set-routing-mode` needs `routing_emit_classifier`). `set-routing-mode`: validate ∈ {tunnel-default,direct-default}; `uci set amnezia.config.routing_mode`; `uci commit amnezia`; resolve LAN exactly as the installer does — `LAN_DEV=$(uci -q get network.lan.device || echo br-lan)` (M4, single source of truth); `routing_emit_classifier "$2" "$LAN_DEV"` → `${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}`; `${AMNEZIA_FORCE_LOAD:-amnezia-force-load}`; backgrounded `fw4 reload`; then `conntrack -D -m "$POOL_MARK/$MARK_MASK"` and `conntrack -D -m "$STICKY_MARK/$MARK_MASK"` (constants from `amnezia-common.sh`, passed verbatim). `set-source`: validate `$2` ∈ the **five** hardcoded known names (H2: itdoginfo_inside, itdoginfo_services, refilter_domains, refilter_ip, antifilter), `$3` ∈ {0,1}; `uci set amnezia.$2.enabled=$3`; commit.
 
 - [ ] **C3: Run tests → PASS; `shellcheck`; commit** `feat(failover-ctl): set-routing-mode + set-source`.
 
@@ -266,46 +308,62 @@ Run: FAIL (script missing).
 
 ## Phase D — `amnezia-tunnel-ctl` (add / remove / list-free)
 
-**Files:** Create `openwrt/amnezia-tunnel-ctl.sh`; Test `test/unit/tunnel-ctl.bats`.
+**Files:** Create `openwrt/amnezia-tunnel-ctl.sh`, `openwrt/lib/amnezia-tunnel-lib.sh` (extracted `gen_tunnel_uci`); **Modify `openwrt/install-amnezia-pbr.sh`** (source the extracted lib — H4: this is a shared-with-F file, serialize before F); Test `test/unit/tunnel-ctl.bats`, `test/fixtures/awg-sample.conf`.
 
-- [ ] **D1: Failing tests.**
+- [ ] **D0: Extract `gen_tunnel_uci` FIRST into `openwrt/lib/amnezia-tunnel-lib.sh`** (DRY — one copy for installer + tunnel-ctl). Update `install-amnezia-pbr.sh` to source it (replacing the inline def at line 113) and **re-run `bats test/unit/installer-loop.bats test/unit/installer-dispatch.bats`** (they exercise `--dry-run-tunnel`/`--dry-run-all` via `gen_tunnel_uci`) → must stay green before proceeding. Commit `refactor(install): extract gen_tunnel_uci to shared lib`.
+
+- [ ] **D1: Failing tests (harness convention).**
 ```bash
-@test "list-free returns the lowest free slot, accounting for gaps" {
-  # uci stub: awg1, awg3 present -> awg2 free
-  run amnezia-tunnel-ctl list-free; [ "$output" = awg2 ]
+# test/unit/tunnel-ctl.bats
+load '../lib/harness.bash'
+TC="$HARNESS_DIR/../openwrt/amnezia-tunnel-ctl.sh"
+FIX="$HARNESS_DIR/fixtures/awg-sample.conf"
+setup() {
+  export AMNEZIA_FAILOVER_INIT="amnezia-failover-init"
+  export CONF_DIR="$BATS_TEST_TMPDIR/amnezia"; mkdir -p "$CONF_DIR"
 }
-@test "list-free exits 3 when full (awg1..awg5 all present)" {
-  run amnezia-tunnel-ctl list-free; [ "$status" -eq 3 ]
+@test "list-free returns the lowest free slot, accounting for gaps" {
+  UCI_FAKE_TUNNELS="awg1 awg3" run sh "$TC" list-free; [ "$output" = awg2 ]
+}
+@test "list-free exits 3 when full" {
+  UCI_FAKE_TUNNELS="awg1 awg2 awg3 awg4 awg5" run sh "$TC" list-free; [ "$status" -eq 3 ]
 }
 @test "add refuses a conf missing Endpoint (no UCI mutation)" {
-  run amnezia-tunnel-ctl add awg2 "$(printf '[Interface]\nPrivateKey=x\n[Peer]\nPublicKey=y\n')"
+  run sh "$TC" add awg2 "$(printf '[Interface]\nPrivateKey=x\n[Peer]\nPublicKey=y\n')"
   [ "$status" -ne 0 ]
-  run grep -q 'set network.awg2' "$UCI_LOG"; [ "$status" -ne 0 ]
+  run grep -q 'set network.awg2' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
-@test "add emits typed tunnel section + firewall membership + ifup + monitor restart" {
-  run amnezia-tunnel-ctl add awg2 "$(cat test/fixtures/awg-sample.conf)" --label Backup
+@test "add emits typed tunnel section with all fields + fw membership + ifup + monitor restart" {
+  run sh "$TC" add awg2 "$(cat "$FIX")" --label Backup
   [ "$status" -eq 0 ]
-  grep -q 'set amnezia.awg2=tunnel' "$UCI_LOG"
-  grep -q 'add_list firewall.vpn.network=awg2' "$UCI_LOG"
-  grep -q 'ifup awg2' "$CMD_LOG"
-  grep -q 'amnezia-failover restart' "$CMD_LOG"
+  grep -q 'set amnezia.awg2=tunnel' "$STUB_LOG"
+  grep -q 'set amnezia.awg2.enabled=1' "$STUB_LOG"
+  grep -q 'set amnezia.awg2.label=Backup' "$STUB_LOG"
+  grep -q 'set amnezia.awg2.weight=1' "$STUB_LOG"
+  grep -q 'set amnezia.awg2.track_ip=' "$STUB_LOG"
+  grep -q 'add_list firewall.vpn.network=awg2' "$STUB_LOG"
+  grep -q 'ifup awg2' "$STUB_LOG"
+  grep -q 'amnezia-failover restart' "$STUB_LOG"
 }
-@test "remove refuses the sticky target and the last firewall member" {
-  run amnezia-tunnel-ctl remove awg1   # sticky_target=awg1 in stub
+@test "remove refuses the sticky target" {
+  UCI_FAKE_TUNNELS="awg1 awg2" run sh "$TC" remove awg1   # sticky_target=awg1 (uci stub)
   [ "$status" -ne 0 ]
+}
+@test "remove refuses leaving zero firewall.vpn.network members" {
+  UCI_FAKE_FWNET="awg2" run sh "$TC" remove awg2; [ "$status" -ne 0 ]
 }
 @test "remove stops the monitor BEFORE teardown, restarts after" {
-  run amnezia-tunnel-ctl remove awg2
-  # assert ordering in CMD_LOG: stop ... before ifdown/delete ... before start
-  grep -n 'amnezia-failover stop' "$CMD_LOG" | head -1
-  awk '/amnezia-failover stop/{s=NR} /ifdown awg2/{i=NR} /amnezia-failover start/{e=NR} END{exit !(s<i && i<e)}' "$CMD_LOG"
+  UCI_FAKE_TUNNELS="awg1 awg2" UCI_FAKE_FWNET="awg1 awg2" run sh "$TC" remove awg2
+  [ "$status" -eq 0 ]
+  awk '/amnezia-failover stop/{s=NR} /ifdown awg2/{i=NR} /amnezia-failover start/{e=NR} \
+    END{exit !(s&&i&&e&&s<i&&i<e)}' "$STUB_LOG"
 }
 ```
-Add `test/fixtures/awg-sample.conf` (a complete dummy conf with `[Interface]` PrivateKey/Address/Jc.. and `[Peer]` PublicKey/Endpoint — no real keys).
+Add `test/fixtures/awg-sample.conf` (complete dummy conf: `[Interface]` PrivateKey/Address/Jc.. + `[Peer]` PublicKey/Endpoint — no real keys).
 
-- [ ] **D2: Implement `amnezia-tunnel-ctl.sh`** per design Feature 1: source libs; `list-free` (scan awg1..MAX_TUNNELS); `add <name> <conf-body> [--label L]` (write argv body → `mktemp` 600 → `parse_awg_conf` → require PrivateKey/PublicKey/Endpoint_host/Endpoint_port → `gen_tunnel_uci` (factor it out of the installer or source it) → `uci set amnezia.<name>=tunnel` + fields → `add_list firewall.vpn.network` (delete-then-add) → `uci commit network firewall amnezia` → `ifup` → backgrounded `fw4 reload` → `amnezia-failover restart`); `remove <name>` (guards: sticky_target, would-empty `firewall.vpn.network` → `/etc/init.d/amnezia-failover stop` → ifdown + delete network/peer + remove firewall member + delete `amnezia.<name>` + rm conf → commit → backgrounded reload → `/etc/init.d/amnezia-failover start`). `gen_tunnel_uci` is currently defined inside `install-amnezia-pbr.sh`; extract it into a sourced lib (e.g. `amnezia-routing.sh` or a new `amnezia-tunnel-lib.sh`) so both the installer and `amnezia-tunnel-ctl` use ONE copy (DRY) — update the installer to source it.
+- [ ] **D2: Implement `amnezia-tunnel-ctl.sh`** (source `amnezia-common.sh` + `amnezia-tunnel-lib.sh`): `list-free` (scan awg1..MAX_TUNNELS, exit 3 if full); `add <name> <conf-body> [--label L]` — write argv body → `mktemp` (600) → `parse_awg_conf` → **require non-empty `AWG_PrivateKey`, `AWG_PublicKey`, `AWG_Endpoint_host`, `AWG_Endpoint_port`** (exit 1 + rm temp if any missing) → `gen_tunnel_uci` → move temp → `$CONF_DIR/<name>.conf` (600) → emit the typed section with the **exact** design fields: `uci set amnezia.<name>=tunnel`, `.enabled=1`, `.label=<L or name>`, `.metric=<next>`, `.weight=1`, `.track_ip=1.1.1.1` → `firewall.vpn.network` delete-then-`add_list` → `uci commit network firewall amnezia` → `ifup` → backgrounded `fw4 reload` → `${AMNEZIA_FAILOVER_INIT:-/etc/init.d/amnezia-failover} restart`. `remove <name>` — guards (sticky_target; would leave zero `firewall.vpn.network` members) → `${AMNEZIA_FAILOVER_INIT} stop` → `ifdown` + delete `network.<name>`/peer + remove firewall member + delete `amnezia.<name>` + rm conf → commit → backgrounded `fw4 reload` → `${AMNEZIA_FAILOVER_INIT} start`.
 
-- [ ] **D3: Run tests → PASS; `shellcheck`; commit** `feat(tunnel-ctl): add/remove/list-free + shared gen_tunnel_uci`.
+- [ ] **D3: Run tests → PASS; `shellcheck`; commit** `feat(tunnel-ctl): add/remove/list-free`.
 
 ---
 
@@ -319,16 +377,33 @@ Add `test/fixtures/awg-sample.conf` (a complete dummy conf with `[Interface]` Pr
 
 - [ ] **E3: Run JS test → PASS.**
 
-- [ ] **E4: Failing ACL test.**
+- [ ] **E4: Failing ACL test (node JSON-structural, matching `test/unit/acl.bats`).**
 ```bash
-# test/unit/acl-grants.bats — assert every exec/read path the UI calls is granted
-@test "acl grants every new helper + read path" {
-  acl="$REPO/openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
-  for p in /usr/bin/amnezia-tunnel-ctl /usr/bin/amnezia-force-load /usr/bin/amnezia-force-update; do
-    grep -q "\"$p\"" "$acl" || { echo "missing exec grant $p"; false; }
-  done
-  grep -q '/etc/amnezia/force-tunnel.list' "$acl"
-  grep -q '/etc/amnezia/force-update.json' "$acl"
+# test/unit/acl-grants.bats
+load '../lib/harness.bash'
+F="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
+@test "acl grants exec of every new helper (write/file)" {
+  node -e "
+    const a=JSON.parse(require('fs').readFileSync('$F','utf8'));
+    const wf=a['luci-app-amnezia'].write.file;
+    for (const p of ['/usr/bin/amnezia-tunnel-ctl','/usr/bin/amnezia-force-load','/usr/bin/amnezia-force-update'])
+      if(!wf[p]) throw new Error('missing exec grant '+p);
+  "
+}
+@test "acl grants read of force list + stamp (read/file)" {
+  node -e "
+    const a=JSON.parse(require('fs').readFileSync('$F','utf8'));
+    const rf=a['luci-app-amnezia'].read.file;
+    for (const p of ['/etc/amnezia/force-tunnel.list','/etc/amnezia/force-update.json'])
+      if(!rf[p]) throw new Error('missing read grant '+p);
+  "
+}
+@test "acl does NOT grant write of force-tunnel.list (save goes via save-manual exec)" {
+  node -e "
+    const a=JSON.parse(require('fs').readFileSync('$F','utf8'));
+    const wf=a['luci-app-amnezia'].write.file['/etc/amnezia/force-tunnel.list'];
+    if (wf && wf.indexOf('write')!==-1) throw new Error('unexpected write grant on force-tunnel.list');
+  "
 }
 ```
 
@@ -346,7 +421,7 @@ Add `test/fixtures/awg-sample.conf` (a complete dummy conf with `[Interface]` Pr
 
 - [ ] **F1: Resolve the real source URLs** (WebSearch/WebFetch): itdoginfo inside (a) + a services/geoblock list (b), Re-filter `domains_all` + `ipsum`, antifilter domains. Update the `url` values in `openwrt/config/amnezia` and record the resolved paths in this plan + the design. CONFIRM a geoblock-RU/services list is among the default-on two.
 
-- [ ] **F2: Failing sync test.** Extend `test/unit/sync.bats` to assert `dev/sync-to-packages.sh` maps each new path into `packages/amnezia-pbr/files/...`: `amnezia-tunnel-ctl`/`amnezia-force-load`/`amnezia-force-update`→`/usr/bin/`, `99-amnezia-force-load.hotplug`→`/etc/hotplug.d/firewall/`, `30-amnezia-classify-direct.nft`→`/etc/nftables.d/` AND both fragments→`/usr/share/amnezia/nftables.d/`, seeded `force-tunnel.list` + `force.d/`→`/etc/amnezia/`.
+- [ ] **F2: Failing sync test.** Extend `test/unit/sync.bats` to assert `dev/sync-to-packages.sh` maps each new path into `packages/amnezia-pbr/files/...`: `amnezia-tunnel-ctl`/`amnezia-force-load`/`amnezia-force-update`→`/usr/bin/`, `lib/amnezia-tunnel-lib.sh`→`/usr/lib/amnezia/` (alongside the existing libs), `99-amnezia-force-load.hotplug`→`/etc/hotplug.d/firewall/`, `30-amnezia-classify-direct.nft`→`/etc/nftables.d/` AND both fragments→`/usr/share/amnezia/nftables.d/`, seeded `force-tunnel.list` + `force.d/`→`/etc/amnezia/`.
 
 - [ ] **F3: Update `dev/sync-to-packages.sh`** to add those entries (follow the existing drop-`.sh` loop at line ~50). Run sync; run `sync.bats` → PASS.
 
@@ -362,7 +437,7 @@ Add `test/fixtures/awg-sample.conf` (a complete dummy conf with `[Interface]` Pr
 
 - [ ] **G1: Write a `dev/vm/` scenario** (extend `test-all.sh` style) that, from a provisioned image: installs; `amnezia-tunnel-ctl add awg2 <fixture conf>` and asserts the interface + firewall member + monitor membership; `set-routing-mode direct-default` with a one-IP + one-domain manual list; asserts the IP is in `amnezia_force4` and marks to pool while a non-listed IP returns/direct; **measures `uci commit dhcp` + dnsmasq restart time with the real default itdoginfo list** (the C1 scale gate — record the number); asserts a force domain resolves into `amnezia_force4`; runs `fw4 reload` then asserts `amnezia_force4` IP half is still populated (hotplug); asserts mode-switch flushed pool/sticky conntrack; `set-routing-mode tunnel-default` back; `amnezia-tunnel-ctl remove awg2` and asserts no stale probe route/rule and no WAN-cleartext leak for forwarded clients.
 
-- [ ] **G2: Run the scenario on the VM.** Capture results to `dev/logs/`. If the scale gate fails (UCI restart too slow), trigger the documented conf-dir fallback path (name the exact OpenWrt 24.10 option, prove it, then implement) — otherwise proceed.
+- [ ] **G2: Run the scenario on the VM.** Capture results to `dev/logs/`. **Concrete scale-gate threshold (M5):** if the `uci commit dhcp` + backgrounded `dnsmasq restart` for the real default itdoginfo list takes **> 10 s wall-clock** OR the resulting DNS-unavailable window for LAN clients exceeds **3 s**, the `config ipset` path fails the gate → trigger the documented conf-dir fallback (name the exact OpenWrt 24.10 conf-dir UCI option, prove dnsmasq reads it, then implement). At/under both thresholds, proceed with `config ipset`. Record the measured numbers in the VM log regardless.
 
 - [ ] **G3: Full local gate:** `bats test/` (all), `node --test test/js/`, `shellcheck` all new `.sh`, `dev/sync-to-packages.sh` + `git diff --exit-code packages/` (parity). All green.
 
