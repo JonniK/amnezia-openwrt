@@ -54,29 +54,81 @@ mkdir -p "$FORCE_DIR/force.d"
       sed "s/amnezia\.${_name}\.url=//")
     [ -n "$_url" ] || continue
 
-    _cache="$FORCE_DIR/force.d/${_name}.list"
-    _tmp=$(mktemp 2>/dev/null || echo "/tmp/amz-upd-${_name}.$$")
+    _kind=$(uci show amnezia 2>/dev/null | \
+      grep "^amnezia\.${_name}\.kind=" | \
+      sed "s/amnezia\.${_name}\.kind=//")
+    # Default to 'domains' if kind is unset.
+    _kind="${_kind:-domains}"
 
-    # Fetch into temp file. Use AMZ_FETCH if set (for test override).
+    _cache="$FORCE_DIR/force.d/${_name}.list"
+    # M1: mktemp on same filesystem as cache so mv is an atomic rename.
+    _tmp=$(mktemp "$FORCE_DIR/force.d/.amz-upd-${_name}.XXXXXX" 2>/dev/null \
+      || echo "$FORCE_DIR/force.d/amz-upd-${_name}.$$")
+
+    # M3: wrap the fetch chain in an explicit if/then for clarity.
     _fetch_ok=0
     if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ]; then
-      cp "$AMZ_FETCH" "$_tmp" && _fetch_ok=1
+      if cp "$AMZ_FETCH" "$_tmp"; then
+        _fetch_ok=1
+      fi
     else
-      uclient-fetch -qO "$_tmp" "$_url" 2>/dev/null \
-        || wget -qO "$_tmp" "$_url" 2>/dev/null \
-        || curl -sLo "$_tmp" "$_url" 2>/dev/null \
-        && _fetch_ok=1
+      if uclient-fetch -qO "$_tmp" "$_url" 2>/dev/null \
+          || wget -qO "$_tmp" "$_url" 2>/dev/null \
+          || curl -sLo "$_tmp" "$_url" 2>/dev/null; then
+        _fetch_ok=1
+      fi
+    fi
+
+    # H1: per-kind content validation.
+    # After a successful fetch we validate the payload shape.
+    # A 404 page ("<!DOCTYPE html>") or error body must not overwrite the cache.
+    if [ "$_fetch_ok" = 1 ] && [ -s "$_tmp" ]; then
+      _valid=1
+      case "$_kind" in
+        domains)
+          # Count non-comment/non-blank lines and those that look like domains.
+          _total=$(grep -v '^[[:space:]]*$' "$_tmp" | grep -v '^[[:space:]]*#' \
+            | awk 'END{print NR}')
+          if [ "${_total:-0}" -gt 0 ]; then
+            _domain_lines=$(grep -v '^[[:space:]]*$' "$_tmp" \
+              | grep -v '^[[:space:]]*#' \
+              | grep -c '^[A-Za-z0-9_.-][A-Za-z0-9_.-]*\.[A-Za-z0-9-][A-Za-z0-9-]*$' \
+              2>/dev/null || echo 0)
+            # Majority (>50%) of content lines must match domain shape.
+            # Use awk to avoid needing bc/expr for the comparison.
+            _majority=$(awk -v t="$_total" -v d="$_domain_lines" \
+              'BEGIN{ print (d * 2 > t) ? "ok" : "fail" }')
+            [ "$_majority" = "ok" ] || _valid=0
+          fi
+          ;;
+        cidr)
+          # All non-comment/non-blank lines must be dotted-quad[/len].
+          _total=$(grep -v '^[[:space:]]*$' "$_tmp" | grep -v '^[[:space:]]*#' \
+            | awk 'END{print NR}')
+          if [ "${_total:-0}" -gt 0 ]; then
+            _cidr_lines=$(grep -v '^[[:space:]]*$' "$_tmp" \
+              | grep -v '^[[:space:]]*#' \
+              | grep -c '^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\(/[0-9][0-9]*\)\{0,1\}$' \
+              2>/dev/null || echo 0)
+            [ "$_cidr_lines" = "$_total" ] || _valid=0
+          fi
+          ;;
+      esac
+      _fetch_ok="$_valid"
+      [ "$_valid" = 1 ] || \
+        amz_log "force-update: content validation failed for $_name (kind=$_kind), keeping cache"
     fi
 
     if [ "$_fetch_ok" = 1 ] && [ -s "$_tmp" ]; then
       # Atomic write: move temp into place.
       mv "$_tmp" "$_cache"
-      _count=$(wc -l < "$_cache" 2>/dev/null | tr -d ' ' || echo 0)
+      # L1: count lines with awk to avoid wc -l portability quirk (no trailing newline).
+      _count=$(awk 'END{print NR}' "$_cache" 2>/dev/null || echo 0)
       _status="ok"
     else
       rm -f "$_tmp"
       # Keep prior cache; mark failed in stamp.
-      _count=$(wc -l < "$_cache" 2>/dev/null | tr -d ' ' || echo 0)
+      _count=$(awk 'END{print NR}' "$_cache" 2>/dev/null || echo 0)
       _status="failed"
       _any_failed=1
       amz_log "force-update: fetch failed for $_name ($_url), keeping cache"
