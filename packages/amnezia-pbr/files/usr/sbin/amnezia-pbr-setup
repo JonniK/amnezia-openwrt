@@ -141,7 +141,7 @@ fi
 if [ "${1:-}" = "--dry-run-all" ]; then
   _tunnel_list=""
   _tunnel_list=$(uci show amnezia 2>/dev/null \
-    | awk -F'[.=]' '/\.enabled='"'"'?1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+    | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
   # Fallback: UCI_FAKE_TUNNELS is set by the test harness stub.
   if [ -z "$_tunnel_list" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
     _tunnel_list="$UCI_FAKE_TUNNELS"
@@ -491,7 +491,7 @@ if [ "${1:-}" = "--migrate" ]; then
     _mig_tunnels=""
     if [ "$_migrate_dry" != 1 ]; then
       _mig_tunnels=$(uci show amnezia 2>/dev/null \
-        | awk -F'[.=]' '/\.enabled='"'"'?1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+        | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
       if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
         _mig_tunnels="$UCI_FAKE_TUNNELS"
       fi
@@ -786,7 +786,7 @@ if [ "${1:-}" = "--first-install" ]; then
     # 5. tunnel UCI apply + bring-up + firewall zones + disable LAN IPv6 (real path only).
     if [ "$_fi_dry" != 1 ]; then
       _fi_tunnels=$(uci show amnezia 2>/dev/null \
-        | awk -F'[.=]' '/\.enabled='"'"'?1/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+        | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
       if [ -z "$_fi_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
         _fi_tunnels="$UCI_FAKE_TUNNELS"
       fi
