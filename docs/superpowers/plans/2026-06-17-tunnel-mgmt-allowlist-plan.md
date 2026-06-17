@@ -419,7 +419,13 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
 
 **Files:** Modify `openwrt/install-amnezia-pbr.sh`, `dev/sync-to-packages.sh`; Test `test/unit/sync.bats` (extend), `test/unit/installer-*.bats`.
 
-- [ ] **F1: Resolve the real source URLs** (WebSearch/WebFetch): itdoginfo inside (a) + a services/geoblock list (b), Re-filter `domains_all` + `ipsum`, antifilter domains. Update the `url` values in `openwrt/config/amnezia` and record the resolved paths in this plan + the design. CONFIRM a geoblock-RU/services list is among the default-on two.
+- [x] **F1: Resolve the real source URLs** (WebFetch confirmed 2026-06-17):
+  - `itdoginfo_inside` (intent a, RKN-blocked): `https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst` — HTTP 200
+  - `itdoginfo_services` (intent b, geoblock-RU services — OpenAI/ChatGPT/Claude/Spotify etc.): `https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Categories/geoblock.lst` — HTTP 200 (NOTE: `Russia/services-raw.lst` returned 404; the correct path is `Categories/geoblock.lst`)
+  - `refilter_domains`: `https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst` — HTTP 200
+  - `refilter_ip`: `https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/ipsum.lst` — HTTP 200
+  - `antifilter`: `https://antifilter.download/list/domains.lst` — HTTP 200
+  - CONFIRMED: `itdoginfo_services` (geoblock-RU, `Categories/geoblock.lst`) is among the two default-on itdoginfo sources. Both intents (a) and (b) covered by default.
 
 - [ ] **F2: Failing sync test.** Extend `test/unit/sync.bats` to assert `dev/sync-to-packages.sh` maps each new path into `packages/amnezia-pbr/files/...`: `amnezia-tunnel-ctl`/`amnezia-force-load`/`amnezia-force-update`→`/usr/bin/`, `lib/amnezia-tunnel-lib.sh`→`/usr/lib/amnezia/` (alongside the existing libs), `99-amnezia-force-load.hotplug`→`/etc/hotplug.d/firewall/`, `30-amnezia-classify-direct.nft`→`/etc/nftables.d/` AND both fragments→`/usr/share/amnezia/nftables.d/`, seeded `force-tunnel.list` + `force.d/`→`/etc/amnezia/`.
 
