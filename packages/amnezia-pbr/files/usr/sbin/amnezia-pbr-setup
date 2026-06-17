@@ -250,19 +250,66 @@ if [ "${1:-}" = "--migrate" ]; then
         '{ type ipv4_addr; flags interval; auto-merge; }' 2>/dev/null || true
     fi
 
-    # Step 3: populate @amnezia_ru4 from persist before the gate check.
-    # Moved before dnsmasq repoint so that an abort here leaves dnsmasq
-    # still pointing at the old pbr nftsets — no partial-migration state.
+    # Step 3: install the amnezia-ru-cidr binary to /usr/bin/amnezia-ru-cidr,
+    # then run it to populate @amnezia_ru4.
+    #
+    # FIX 2: The installer previously only *ran* the loader (via resolve_dep
+    # which may find it in /tmp or $SCRIPT_DIR) but never INSTALLED it to
+    # /usr/bin/amnezia-ru-cidr.  At boot the amnezia-ru-load init and the
+    # firewall hotplug call /usr/bin/amnezia-ru-cidr directly; if it is absent
+    # the RU set stays empty on every reboot.  Mirror the monitor self-install
+    # pattern: copy to the installed path first, then run from there.
     if [ "$_migrate_dry" != 1 ]; then
-      _rucidr=$(resolve_dep \
-        /usr/bin/amnezia-ru-cidr \
-        amnezia-ru-cidr.sh \
-        amnezia-ru-cidr.sh) || true
-      if [ -n "$_rucidr" ]; then
-        sh "$_rucidr" 2>/dev/null || true
+      _rucidr_run=""
+      if [ -f /usr/bin/amnezia-ru-cidr ]; then
+        amz_log "amnezia-ru-cidr binary already present (/usr/bin)"
+        _rucidr_run=/usr/bin/amnezia-ru-cidr
       else
-        amz_log "WARN: amnezia-ru-cidr not found; skipping RU CIDR populate"
+        _rucidr_src=$(resolve_dep \
+          /usr/bin/amnezia-ru-cidr \
+          amnezia-ru-cidr.sh \
+          amnezia-ru-cidr.sh) || true
+        if [ -n "$_rucidr_src" ] && [ "$_rucidr_src" != /usr/bin/amnezia-ru-cidr ]; then
+          cp "$_rucidr_src" /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          chmod +x /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          # Verify copy succeeded; fall back to source path if not (e.g. read-only /usr/bin).
+          if [ -f /usr/bin/amnezia-ru-cidr ]; then
+            amz_log "amnezia-ru-cidr installed to /usr/bin"
+            _rucidr_run=/usr/bin/amnezia-ru-cidr
+          else
+            amz_log "WARN: could not install amnezia-ru-cidr to /usr/bin; using source path"
+            _rucidr_run="$_rucidr_src"
+          fi
+        elif [ -z "$_rucidr_src" ]; then
+          amz_log "WARN: amnezia-ru-cidr source not found; RU CIDR loader will be missing"
+        fi
       fi
+      # Populate @amnezia_ru4 with the binary we just installed (or the source fallback).
+      if [ -n "$_rucidr_run" ]; then
+        sh "$_rucidr_run" 2>/dev/null || true
+      else
+        amz_log "WARN: amnezia-ru-cidr not available; skipping RU CIDR populate"
+      fi
+    fi
+
+    # Step 3b: install/refresh the weekly RU CIDR update cron entry.
+    # FIX 3: The old pbr-era installer wrote a cron line pointing at the
+    # defunct /usr/bin/awg-ru-update.  Replace any legacy or duplicate entry
+    # with a single, deduplicated line that calls /usr/bin/amnezia-ru-cidr.
+    if [ "$_migrate_dry" != 1 ]; then
+      _cron_file=/etc/crontabs/root
+      mkdir -p /etc/crontabs 2>/dev/null || true
+      touch "$_cron_file" 2>/dev/null || true
+      # Remove any pre-existing lines matching the old or new tag so re-running
+      # the installer is always idempotent (no duplicates).
+      sed -i '/awg-ru-update/d; /# amnezia-ru-update/d; /# amnezia-pbr/d' \
+        "$_cron_file" 2>/dev/null || true
+      # Add a single weekly entry (Sunday 04:30) using the native updater.
+      echo '30 4 * * 0 /usr/bin/amnezia-ru-cidr >/dev/null 2>&1 # amnezia-ru-update' \
+        >> "$_cron_file" 2>/dev/null || true
+      /etc/init.d/cron enable 2>/dev/null || true
+      /etc/init.d/cron reload 2>/dev/null || true
+      amz_log "amnezia-ru-update cron installed (weekly Sun 04:30)"
     fi
 
     # Step 4: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
@@ -460,7 +507,19 @@ if [ "${1:-}" = "--migrate" ]; then
     # Step 13: activate the classifier via fw4 reload BEFORE removing pbr so
     # there is a brief both-active overlap (both route to VPN) rather than a
     # neither-active gap (which would leak LAN traffic to WAN cleartext).
+    #
+    # FIX 1: Disable flow offloading BEFORE fw4 reload.
+    # Hardware/software flow offloading bypasses the kernel's fwmark policy
+    # routing: offloaded flows are steered in the fast path and never consult
+    # ip rules, so fwmark-tagged packets intended for the VPN tunnel are
+    # silently forwarded via WAN instead.  pbr-based routing requires that all
+    # forwarded LAN traffic goes through the slow path where nftables can set
+    # fwmarks.  Disable both offload knobs here, idempotently, before the
+    # reload that activates the classifier.
     if [ "$_migrate_dry" != 1 ]; then
+      uci set firewall.@defaults[0].flow_offloading='0'
+      uci set firewall.@defaults[0].flow_offloading_hw='0'
+      uci commit firewall
       fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
     fi
 
@@ -477,7 +536,29 @@ if [ "${1:-}" = "--migrate" ]; then
       opkg remove pbr luci-app-pbr --force-depends 2>&1 || true
     fi
 
+    # Step 14b: clean pbr remnants left after package removal.
+    # FIX 4: Remove config/data files that opkg does not clean up and that
+    # would otherwise linger and confuse diagnostics or trigger pbr restarts
+    # if the package is ever re-installed.
+    if [ "$_migrate_dry" != 1 ]; then
+      # /etc/config/pbr — UCI config file; opkg marks it as a conffile and
+      # intentionally leaves it behind on removal so user edits survive.
+      rm -f /etc/config/pbr 2>/dev/null || true
+      # /etc/pbr.d/ — pbr globs this dir for user rules; remnants here would
+      # break a fresh pbr install.
+      rm -rf /etc/pbr.d/ 2>/dev/null || true
+      # Stale dnsmasq ipset section that pbr wrote via UCI.
+      uci -q delete dhcp.pbr_ru_tld 2>/dev/null || true
+      uci commit dhcp 2>/dev/null || true
+      /etc/init.d/dnsmasq reload 2>/dev/null || true
+      # nftables fragment left by the old pbr RU-TLD ipset approach.
+      rm -f /etc/nftables.d/15-pbr-ru-tld4.nft 2>/dev/null || true
+    fi
+
     # Step 15: apply firewall zones + disable LAN IPv6 (real path only).
+    # FIX 1 (first-install path): flow offloading is also disabled here so that
+    # a fresh install that never had pbr also gets the offload knobs cleared
+    # before routing_firewall_apply fires its fw4 reload.
     if [ "$_migrate_dry" != 1 ]; then
       [ -n "$_mig_tunnels" ] && routing_firewall_apply "$_mig_tunnels"
       routing_disable_lan_v6
@@ -581,6 +662,13 @@ if [ "${1:-}" = "--first-install" ]; then
           fi
         fi
       done
+      # FIX 1: Disable flow offloading before routing_firewall_apply fires fw4 reload.
+      # HW/SW flow offloading bypasses fwmark policy routing; forwarded LAN traffic
+      # through the tunnel silently follows WAN instead of the VPN table.  Both knobs
+      # must be off for pbr-based fwmark routing to work correctly.
+      uci set firewall.@defaults[0].flow_offloading='0'
+      uci set firewall.@defaults[0].flow_offloading_hw='0'
+      uci commit firewall
       [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"
       routing_disable_lan_v6
     fi
@@ -619,6 +707,57 @@ if [ "${1:-}" = "--first-install" ]; then
           amz_log "WARN: 99-amnezia-ru-load.hotplug not found; firewall reload trigger disabled"
         fi
       fi
+    fi
+    # 6b. Install /usr/bin/amnezia-ru-cidr binary + populate @amnezia_ru4 + set cron.
+    # FIX 2: The loader binary must be installed to /usr/bin/amnezia-ru-cidr so
+    # the amnezia-ru-load init and firewall hotplug can find it at boot.
+    # FIX 3: Install/refresh the weekly RU CIDR update cron entry.
+    if [ "$_fi_dry" != 1 ]; then
+      _rucidr_run_fi=""
+      if [ -f /usr/bin/amnezia-ru-cidr ]; then
+        amz_log "amnezia-ru-cidr binary already present (/usr/bin)"
+        _rucidr_run_fi=/usr/bin/amnezia-ru-cidr
+      else
+        _rucidr_src=$(resolve_dep \
+          /usr/bin/amnezia-ru-cidr \
+          amnezia-ru-cidr.sh \
+          amnezia-ru-cidr.sh) || true
+        if [ -n "$_rucidr_src" ] && [ "$_rucidr_src" != /usr/bin/amnezia-ru-cidr ]; then
+          cp "$_rucidr_src" /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          chmod +x /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          # Verify copy succeeded; fall back to source path if not (e.g. read-only /usr/bin).
+          if [ -f /usr/bin/amnezia-ru-cidr ]; then
+            amz_log "amnezia-ru-cidr installed to /usr/bin"
+            _rucidr_run_fi=/usr/bin/amnezia-ru-cidr
+          else
+            amz_log "WARN: could not install amnezia-ru-cidr to /usr/bin; using source path"
+            _rucidr_run_fi="$_rucidr_src"
+          fi
+        elif [ -z "$_rucidr_src" ]; then
+          amz_log "WARN: amnezia-ru-cidr source not found; RU CIDR loader will be missing"
+        fi
+      fi
+      # Populate @amnezia_ru4 for the initial live set.
+      if [ -n "$_rucidr_run_fi" ]; then
+        # Declare the set first so element adds don't fail if fw4 hasn't loaded yet.
+        nft add table inet fw4 2>/dev/null || true
+        nft add set inet fw4 amnezia_ru4 \
+          '{ type ipv4_addr; flags interval; auto-merge; }' 2>/dev/null || true
+        sh "$_rucidr_run_fi" 2>/dev/null || true
+      else
+        amz_log "WARN: amnezia-ru-cidr not available; RU CIDR set will be empty"
+      fi
+      # Cron: remove old/duplicate entries, install a single weekly entry.
+      _cron_file=/etc/crontabs/root
+      mkdir -p /etc/crontabs 2>/dev/null || true
+      touch "$_cron_file" 2>/dev/null || true
+      sed -i '/awg-ru-update/d; /# amnezia-ru-update/d; /# amnezia-pbr/d' \
+        "$_cron_file" 2>/dev/null || true
+      echo '30 4 * * 0 /usr/bin/amnezia-ru-cidr >/dev/null 2>&1 # amnezia-ru-update' \
+        >> "$_cron_file" 2>/dev/null || true
+      /etc/init.d/cron enable 2>/dev/null || true
+      /etc/init.d/cron reload 2>/dev/null || true
+      amz_log "amnezia-ru-update cron installed (weekly Sun 04:30)"
     fi
     # 7. self-install the failover monitor daemon + init, then enable + start.
     # Mirror the ru-load pattern: resolve binary + init from staged tree and copy
