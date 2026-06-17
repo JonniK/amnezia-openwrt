@@ -42,6 +42,7 @@ done
 
 SUITE_MIGRATE_RC=0
 SUITE_FIRST_RC=0
+SUITE_TUNNEL_MGMT_RC=0
 _T0=$(date +%s)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -136,6 +137,40 @@ log "SCENARIO 2 finished in $(( _S2_END - _S2_START ))s, rc=${SUITE_FIRST_RC}"
 
 stop_vm || true
 
+# ── SCENARIO 3: PHASE G — TUNNEL MGMT + ALLOWLIST ────────────────────────────
+
+log "======================================================"
+log " SCENARIO 3: Phase G tunnel-mgmt + allowlist"
+log "======================================================"
+
+fresh_disk "tunnel-mgmt"
+boot_vm
+
+log "provisioning VM to no-pbr state (first-install mode)"
+"$VM_DIR/provision.sh" --first-install
+
+log "pre-seeding amnezia_ru4 nft set (gate pass for installer)"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" '
+  nft add table inet fw4 2>/dev/null || true
+  nft add set inet fw4 amnezia_ru4 "{ type ipv4_addr; flags interval; auto-merge; }" 2>/dev/null || true
+  nft add element inet fw4 amnezia_ru4 { 77.88.8.8 } 2>/dev/null || true
+' 2>/dev/null || log "WARN: amnezia_ru4 pre-seed had errors (may be non-fatal)"
+
+log "running installer --first-install to install the full stack"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" \
+  'CONF_DIR=/etc/amnezia sh /root/cutover/install-amnezia-pbr.sh --first-install 2>&1' \
+  || log "WARN: installer returned non-zero (assertions in test-tunnel-mgmt.sh will clarify)"
+
+log "running test-tunnel-mgmt.sh"
+_S3_START=$(date +%s)
+"$VM_DIR/test-tunnel-mgmt.sh" && SUITE_TUNNEL_MGMT_RC=0 || SUITE_TUNNEL_MGMT_RC=$?
+_S3_END=$(date +%s)
+log "SCENARIO 3 finished in $(( _S3_END - _S3_START ))s, rc=${SUITE_TUNNEL_MGMT_RC}"
+
+stop_vm || true
+
 # ── Final summary ─────────────────────────────────────────────────────────────
 
 _T1=$(date +%s)
@@ -156,6 +191,12 @@ if [ "$SUITE_FIRST_RC" -eq 0 ]; then
   echo "  SCENARIO 2 (first-install):  PASS"
 else
   echo "  SCENARIO 2 (first-install):  FAIL (rc=$SUITE_FIRST_RC)"
+  _overall=1
+fi
+if [ "$SUITE_TUNNEL_MGMT_RC" -eq 0 ]; then
+  echo "  SCENARIO 3 (tunnel-mgmt):   PASS"
+else
+  echo "  SCENARIO 3 (tunnel-mgmt):   FAIL (rc=$SUITE_TUNNEL_MGMT_RC)"
   _overall=1
 fi
 if [ "$_overall" -eq 0 ]; then

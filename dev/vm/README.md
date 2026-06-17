@@ -94,6 +94,60 @@ The clean `first_install` path is also tested (no pbr present).
 | `provision.sh` | bring VM to pbr pre-state (Tier 1: dummy tunnels) |
 | `test-migrate.sh` | run `--migrate`, assert the 5 regression checks, print PASS/FAIL |
 | `test-first-install.sh` | run clean `first_install`, assert end state |
+| `test-tunnel-mgmt.sh` | Phase G: tunnel-ctl add/remove + allowlist mode + scale gate |
+
+## Phase G — Tunnel management + allowlist scenario (`test-tunnel-mgmt.sh`)
+
+Tests the Phase G spec (plan: `docs/superpowers/plans/2026-06-17-tunnel-mgmt-allowlist-plan.md`,
+design: `docs/superpowers/specs/2026-06-17-tunnel-mgmt-allowlist-design.md`).
+
+**Pre-condition:** the VM is provisioned (`provision.sh --first-install`) and the stack
+is installed (`--first-install`). `test-all.sh` runs this automatically as SCENARIO 3.
+
+**Assertions (7 steps, 16 checks):**
+
+| ID | Description |
+|---|---|
+| T1-1 | `network.awg2` UCI section created after `tunnel-ctl add awg2` |
+| T1-2 | `awg2` in `firewall.vpn.network` after add |
+| T1-3 | `amnezia.awg2.enabled=1` in UCI after add |
+| T1-4 | monitor enumerates `awg2` (state file or running process) |
+| T1-5 | **C1 regression guard:** `awg1` still in `firewall.vpn.network` after adding `awg2` |
+| T2-1/T2-2 | manual force list written via `save-manual` (IP + domain) |
+| T2-3 | `FORCE_IP` in `nft set amnezia_force4` after `set-routing-mode direct-default` |
+| T2-4 | `ip route get FORCE_IP mark 0x0b0000` → tunnel (not WAN) |
+| T2-5 | non-listed IP is unmarked/direct (no blanket pool-mark in direct-default chain) |
+| T3-3 | **C1 scale gate:** `uci commit dhcp` + dnsmasq restart <= 10 s, DNS-down <= 3 s |
+| T3-4 | force domain resolves into `amnezia_force4` via `config ipset` |
+| T4-1 | `amnezia_force4` IP half repopulated after `fw4 reload` (hotplug) |
+| T5-1 | `amnezia_force4` repopulated by boot-init run (cold-boot simulation) |
+| T6-1 | pool+sticky conntrack entries flushed after `set-routing-mode` |
+| T7-1 – T7-6 | `awg2` fully removed; `awg1` still a member; no stale routes/rules |
+| T7-7/T7-8 | no LAN→WAN cleartext leak after remove (fail-closed blackhole) |
+
+**Transcript** captured to `dev/logs/tunnel-mgmt-<ts>.log`.
+
+**Harness limitation noted:** Step 5 (cold-boot repop) is simulated via
+`/etc/init.d/amnezia-force-load start` rather than a true VM reboot. A full cold-boot
+test would require the `wait_for_vm_reboot` helper from `test-cutover.sh` integrated
+into this scenario — noted for a later Tier-2 extension.
+
+### Running stand-alone
+
+```sh
+# From a provisioned, installer-run VM:
+dev/vm/test-tunnel-mgmt.sh
+```
+
+### Running via test-all.sh (recommended)
+
+`test-all.sh` boots a fresh disk, runs `provision.sh --first-install`, runs the installer,
+and then invokes `test-tunnel-mgmt.sh` as SCENARIO 3 automatically.
+
+```sh
+dev/vm/fetch-image.sh          # one-time
+dev/vm/test-all.sh             # runs all 3 scenarios
+```
 
 ## Usage
 
