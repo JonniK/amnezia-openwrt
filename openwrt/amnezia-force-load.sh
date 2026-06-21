@@ -1,7 +1,9 @@
 #!/bin/sh
 # amnezia-force-load: merge force.d/*.list + force-tunnel.list, classify,
-# load IP/CIDR into amnezia_force4 nft set, rebuild dhcp.amnezia_force
-# ipset domain entries. Restart dnsmasq only when domain list changed.
+# load IP/CIDR into amnezia_force4 nft set, write chunked nftset= directives
+# into a dnsmasq conf-dir file (byte-bounded to avoid the 1KB line-buffer
+# limit that breaks dnsmasq with large domain lists).
+# Restart dnsmasq only when domain list changed.
 # Usage: amnezia-force-load [save-manual <content>]
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
@@ -18,6 +20,10 @@ FORCE_LOCK="${FORCE_LOCK:-/var/lock/amnezia-force.lock}"
 # dnsmasq restart is SSH-safe (unlike fw4 reload which drops the SSH session);
 # no backgrounding needed — synchronous restart is deterministic and testable.
 AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
+# Conf-dir for chunked nftset= directives.  Overridable for tests.
+# OpenWrt dnsmasq.init emits --conf-dir=<dir> when dhcp.@dnsmasq[0].confdir
+# is set; all files in that dir are picked up automatically.
+AMZ_DNSMASQ_CONFDIR="${AMZ_DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
 SET_FORCE4=amnezia_force4
 
 # Capture save-manual arguments before entering the subshell.
@@ -155,22 +161,52 @@ fi
   fi
   rm -f "$_tmp_ips"
 
-  # Only rebuild dhcp.amnezia_force and restart dnsmasq when domains changed.
+  # Only rebuild dnsmasq conf-dir nftset directives and restart dnsmasq when
+  # the domain set has changed.
   if [ "$_new_hash" != "$_old_hash" ]; then
-    # Rebuild dhcp.amnezia_force config ipset domain entries.
-    uci -q delete dhcp.amnezia_force 2>/dev/null || true
-    uci set dhcp.amnezia_force='ipset'
-    uci add_list dhcp.amnezia_force.name="$SET_FORCE4"
-    uci set dhcp.amnezia_force.table='fw4'
-    uci set dhcp.amnezia_force.table_family='inet'
-    while IFS= read -r _dom; do
-      [ -n "$_dom" ] || continue
-      uci add_list "dhcp.amnezia_force.domain=$_dom"
-    done < "$_tmp_domains"
-    uci commit dhcp
+    # --- Wire the conf-dir into dnsmasq UCI (idempotent) ---
+    # OpenWrt dnsmasq.init picks up all files in confdir via --conf-dir=<dir>.
+    # We use this to deliver byte-bounded chunked nftset= lines instead of the
+    # legacy config-ipset section which rendered a single nftset line that could
+    # exceed dnsmasq's ~1024-byte line buffer for large domain lists.
+    _confdir_changed=0
+    _cur_confdir=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true)
+    if [ "$_cur_confdir" != "$AMZ_DNSMASQ_CONFDIR" ]; then
+      uci set "dhcp.@dnsmasq[0].confdir=$AMZ_DNSMASQ_CONFDIR"
+      uci commit dhcp
+      _confdir_changed=1
+    fi
+
+    # --- Migration: remove legacy config-ipset section if present ---
+    if uci -q get dhcp.amnezia_force >/dev/null 2>&1; then
+      uci -q delete dhcp.amnezia_force 2>/dev/null || true
+      uci commit dhcp
+    fi
+
+    # --- Write byte-bounded chunked nftset= directives ---
+    # Each nftset= line is kept under 900 bytes to stay well clear of dnsmasq's
+    # internal config-line buffer (empirically ~1024 bytes; 16KB+ lines from the
+    # legacy config-ipset section caused "bad option" / dnsmasq startup failure).
+    mkdir -p "$AMZ_DNSMASQ_CONFDIR"
+    _tmp_conf=$(mktemp "$AMZ_DNSMASQ_CONFDIR/.amz-force-conf.XXXXXX" 2>/dev/null \
+      || echo "$AMZ_DNSMASQ_CONFDIR/.amz-force-conf.$$")
+    if [ -s "$_tmp_domains" ]; then
+      awk -v set="$SET_FORCE4" '
+        function flush(){ if(buf!=""){ print "nftset=" buf "/4#inet#fw4#" set; buf="" } }
+        { gsub(/[ \t\r]/,""); sub(/^\./,""); if($0=="") next;
+          cand=buf "/" $0;
+          if(length(cand) > 900){ flush(); buf="/" $0 } else { buf=cand } }
+        END{ flush() }
+      ' "$_tmp_domains" > "$_tmp_conf"
+    else
+      # Empty domain list: write an empty file so any previous nftset
+      # directives are removed on the next dnsmasq restart.
+      : > "$_tmp_conf"
+    fi
+    mv "$_tmp_conf" "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
 
     printf '%s\n' "$_new_hash" > "$FORCE_DIR/.force-domains.hash"
-    # Restart dnsmasq to pick up changed ipset domains.
+    # Restart dnsmasq to pick up changed nftset directives.
     # dnsmasq restart is SSH-safe (unlike fw4 reload); kept synchronous for
     # deterministic behaviour in tests and on-router.
     "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
