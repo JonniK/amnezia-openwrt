@@ -36,28 +36,21 @@ mkdir -p "$FORCE_DIR/force.d"
   _any_ok=0
 
   # Parse enabled force_source sections from UCI.
-  # uci show amnezia emits lines like:
-  #   amnezia.<name>=force_source
-  #   amnezia.<name>.enabled=1
-  #   amnezia.<name>.url=https://...
-  #   amnezia.<name>.kind=domains
+  # The TYPE line (amnezia.<name>=force_source) is unquoted in uci show output
+  # and safe to grep.  Option values are single-quoted by real OpenWrt uci show
+  # (amnezia.<name>.enabled='1'), so use uci -q get for per-option reads to get
+  # the raw unquoted value regardless of uci version.
   _sources=$(uci show amnezia 2>/dev/null | grep '=force_source$' | \
     sed 's/amnezia\.\([^=]*\)=force_source/\1/')
 
   for _name in $_sources; do
-    _enabled=$(uci show amnezia 2>/dev/null | \
-      grep "^amnezia\.${_name}\.enabled=" | \
-      sed "s/amnezia\.${_name}\.enabled=//")
+    _enabled=$(uci -q get "amnezia.${_name}.enabled")
     [ "$_enabled" = "1" ] || continue
 
-    _url=$(uci show amnezia 2>/dev/null | \
-      grep "^amnezia\.${_name}\.url=" | \
-      sed "s/amnezia\.${_name}\.url=//")
+    _url=$(uci -q get "amnezia.${_name}.url")
     [ -n "$_url" ] || continue
 
-    _kind=$(uci show amnezia 2>/dev/null | \
-      grep "^amnezia\.${_name}\.kind=" | \
-      sed "s/amnezia\.${_name}\.kind=//")
+    _kind=$(uci -q get "amnezia.${_name}.kind")
     # Default to 'domains' if kind is unset.
     _kind="${_kind:-domains}"
 
