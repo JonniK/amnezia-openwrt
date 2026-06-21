@@ -22,17 +22,23 @@ case "$1 $2" in
   "get amnezia.antifilter.enabled") echo "0" ;;
   "show amnezia")
     # UCI_FAKE_TUNNELS: space-separated list of tunnel names to report as enabled.
+    # TYPE lines are unquoted (amnezia.<name>=tunnel); option values are single-quoted
+    # to match real OpenWrt uci show output (amnezia.<name>.enabled='1').
     if [ -n "$UCI_FAKE_TUNNELS" ]; then
-      for _t in $UCI_FAKE_TUNNELS; do echo "amnezia.${_t}=tunnel"; echo "amnezia.${_t}.enabled=1"; done
+      for _t in $UCI_FAKE_TUNNELS; do
+        echo "amnezia.${_t}=tunnel"
+        echo "amnezia.${_t}.enabled='1'"
+      done
     fi
     # UCI_FAKE_SOURCES: space-separated list of "name:enabled" pairs, e.g. "itdoginfo_inside:1 antifilter:0".
+    # TYPE lines are unquoted; option values are single-quoted to match real OpenWrt uci show.
     if [ -n "$UCI_FAKE_SOURCES" ]; then
       for _s in $UCI_FAKE_SOURCES; do
         _sname="${_s%%:*}"; _senabled="${_s##*:}"
         echo "amnezia.${_sname}=force_source"
-        echo "amnezia.${_sname}.enabled=${_senabled}"
-        echo "amnezia.${_sname}.url=https://example.com/${_sname}.txt"
-        echo "amnezia.${_sname}.kind=domains"
+        echo "amnezia.${_sname}.enabled='${_senabled}'"
+        echo "amnezia.${_sname}.url='https://example.com/${_sname}.txt'"
+        echo "amnezia.${_sname}.kind='domains'"
       done
     fi ;;
   "get firewall.vpn.network")
@@ -57,5 +63,29 @@ case "$1 $2" in
       done
       echo "firewall.vpn.network=${_line}"
     fi ;;
+  get*)
+    # Dynamic uci -q get for force_source attributes: serve from UCI_FAKE_SOURCES.
+    # Pattern: "get amnezia.<name>.<opt>" where <name> appears in UCI_FAKE_SOURCES.
+    _key="$2"
+    case "$_key" in
+      amnezia.*.*)
+        _pkg="${_key%%.*}"; _rest="${_key#*.}"
+        _sec="${_rest%%.*}"; _opt="${_rest#*.}"
+        if [ "$_pkg" = "amnezia" ] && [ -n "$UCI_FAKE_SOURCES" ]; then
+          for _s in $UCI_FAKE_SOURCES; do
+            _sname="${_s%%:*}"; _senabled="${_s##*:}"
+            if [ "$_sname" = "$_sec" ]; then
+              case "$_opt" in
+                enabled) echo "$_senabled"; exit 0 ;;
+                url)     echo "https://example.com/${_sname}.txt"; exit 0 ;;
+                kind)    echo "domains"; exit 0 ;;
+              esac
+            fi
+          done
+        fi
+        ;;
+    esac
+    exit 1
+    ;;
 esac
 exit 0
