@@ -234,6 +234,20 @@ _amz_wire_force_engine() {
   echo "/etc/init.d/amnezia-force-load enable" >> "${STUB_LOG:-/dev/null}"
   /etc/init.d/amnezia-force-load enable 2>/dev/null || true
 
+  # Wire dnsmasq conf-dir so fresh installs pick up chunked nftset directives
+  # even before the first amnezia-force-load run.  Idempotent: only set+commit
+  # when the value is not already the expected path.
+  _afe_confdir=/etc/amnezia/dnsmasq.d
+  _afe_cur_confdir=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true)
+  if [ "$_afe_cur_confdir" != "$_afe_confdir" ]; then
+    uci set "dhcp.@dnsmasq[0].confdir=$_afe_confdir"
+    uci commit dhcp
+    amz_log "dnsmasq confdir wired to $_afe_confdir"
+  else
+    amz_log "dnsmasq confdir already set to $_afe_confdir"
+  fi
+  mkdir -p "$_afe_confdir" 2>/dev/null || true
+
   # Seed /etc/amnezia/force-tunnel.list and force.d/ (idempotent).
   mkdir -p "${CONF_DIR:-/etc/amnezia}/force.d" 2>/dev/null || true
   if [ ! -f "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
