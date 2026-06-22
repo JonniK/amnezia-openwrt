@@ -52,7 +52,9 @@ The shared-file reality forbids parallel edits. Run:
 - **Parallel-safe (disjoint files, after chains A+B):** Task 7 (`amnezia-force-load.sh`) ∥ Task 8 (`amnezia-dns.init` + hotplug) ∥ Task 9 (`main.js` + ACL).
 - **Last:** Task 10 (installer + sync + packages mirror; consumes every prior file).
 
-Do NOT dispatch Tasks 2&3 or 4&5&6 to parallel worktrees — they append to one file and to one `case` block; concurrent edits collide. Chains A and B may run concurrently with each other (different files), but each chain is internally sequential.
+Do NOT dispatch Tasks 2&3 or 4&5&6 to parallel worktrees — they append to one file and to one `case` block; concurrent edits collide. Chains A and B may run concurrently with each other (different files), but each chain is internally sequential. Task 8 appends to chain-B's `dns-ctl.bats` and so runs **after** chain B (not parallel with it); Tasks 7/8/9 touch mutually-disjoint source AND test files, so those three may parallelize among themselves once A+B are done.
+
+**On the `--test` gate vs orchestration tests:** the candidate-config `--test` gate is authoritatively exercised by the Task-3 reload tests (which seed the dnsmasq `server` env so the rendered candidate is non-empty). The Task-4/5/6 orchestration tests don't persist UCI writes through the stateless `uci` stub, so their `dns_dnsmasq_reload` tests a near-empty candidate (passes vacuously) — that's intentional: those tests assert orchestration/control-flow (which daemons restart, which tier is set, auto-revert), not the gate internals. Don't add gate assertions to the orchestration tests.
 
 ---
 
@@ -177,7 +179,7 @@ export RULE_PREF_DOT=30900            # DoT-IP ip rule; above pbr cleanup (30000
 export DNSMASQ_LOCK=/var/lock/amnezia-dnsmasq.lock
 ```
 
-- [ ] **Step 6: UCI defaults** — `openwrt/config/amnezia`, inside `config amnezia 'config'`
+- [ ] **Step 6: UCI defaults** — `openwrt/config/amnezia`, inside `config amnezia 'config'`, appended **after `option installed_ts ''`** (before the `config globals` section), so the existing `routing_mode`/`autolearn_*` options are undisturbed
 
 ```
 	option dot_enabled '0'
@@ -188,7 +190,7 @@ export DNSMASQ_LOCK=/var/lock/amnezia-dnsmasq.lock
 	option dns_active_tier 'dot'
 ```
 
-- [ ] **Step 7: Add lib to shellcheck list** — `test/unit/shellcheck-phaseB.bats`: add `amnezia-dns-lib.sh` to its enumerated file list. Run `bats test/unit/shellcheck-phaseB.bats` → PASS.
+- [ ] **Step 7: Add lib to shellcheck list** — `test/unit/shellcheck-phaseB.bats`: append the **repo-relative** path `openwrt/lib/amnezia-dns-lib.sh` to the `shellcheck -s sh \` file list (the list uses `openwrt/...` paths, not bare names). Run `bats test/unit/shellcheck-phaseB.bats` → PASS.
 
 - [ ] **Step 8: Commit**
 
@@ -221,18 +223,31 @@ echo "stubby $*" >> "${STUB_LOG:-/dev/null}"; exit 0
 
 (`https-dns-proxy` and `nslookup` identical with their own name. `chmod +x` all three.)
 
-- [ ] **Step 2: Upgrade `uci` stub for generic `UCI_SHOW_<cfg>`** — in `test/stubs/uci`, generalize the existing `UCI_SHOW_network` arm:
+- [ ] **Step 2: Upgrade `uci` stub** — three changes to `test/stubs/uci`, all backward-compatible:
+
+  **(a) Key normalization must cover `@`, `[`, `]`** (the recurring trap). The existing `UCI_GET_*` arm uses `tr '.-' '__'`, which cannot encode `dhcp.@dnsmasq[0].server`. Change **both** the `UCI_GET` and the new `UCI_SHOW` normalization to `tr -c '[:alnum:]' '_'`. This is a strict superset: for the existing keys (only `.`/`-`) it produces identical output, and for `dhcp.@dnsmasq[0].server` it yields exactly `dhcp__dnsmasq_0__server` — matching the env var the Task-3 reload tests export. Replace the existing get-key line:
 
 ```sh
-# Generic UCI_SHOW_<cfg> dynamic resolution (was network-only).
+  _envk="UCI_GET_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
+```
+
+  **(b) Generic `UCI_SHOW_<cfg>`** (was network-only), placed before the legacy `show network` arm:
+
+```sh
 if [ "$1" = show ] && [ -n "$2" ]; then
-  _showk="UCI_SHOW_$(printf '%s' "$2" | tr '.-' '__')"
+  _showk="UCI_SHOW_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
   eval _showv="\${$_showk+set}"
   if [ "${_showv:-}" = set ]; then eval printf '%s\\n' "\"\$$_showk\""; exit 0; fi
 fi
 ```
 
-(Keep the legacy `UCI_SHOW_network` block working — this generic check runs first and covers it.)
+  **(c) `uci add` must echo a section name** (real `uci add` echoes the new anonymous section's id; the current stub echoes nothing, so `_s=$(uci add ...)` captures empty → renderers emit malformed `stubby..address=`). Add an `add` arm to the top `case "$_verb"`:
+
+```sh
+  add) echo "amzsec"; exit 0 ;;
+```
+
+  so `_s=$(uci add stubby resolver)` → `amzsec` and `uci set stubby.amzsec.address=...` is well-formed and greppable, exactly as a real router behaves.
 
 - [ ] **Step 3: Failing render tests** — append to `test/unit/dns-render.bats`
 
@@ -369,6 +384,15 @@ exit 0
 load '../lib/harness.bash'
 LIB="$HARNESS_DIR/../openwrt/lib/amnezia-dns-lib.sh"
 COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
+
+@test "stub sanity: uci -q get round-trips a bracketed @dnsmasq[0] key" {
+  # Guards the recurring trap: the @[]-bracket key must normalize to the env
+  # var the reload tests set. If this fails, every candidate-render test is vacuous.
+  export UCI_GET_dhcp__dnsmasq_0__server='127.0.0.1#5453'
+  run sh -c 'uci -q get dhcp.@dnsmasq[0].server'
+  [ "$status" -eq 0 ]
+  [ "$output" = "127.0.0.1#5453" ]
+}
 
 @test "dnsmasq lock uses fd 8, never fd 9" {
   grep -Eq 'exec[[:space:]]+8>|flock[[:space:]]+-x[[:space:]]+8' "$LIB"
@@ -566,7 +590,7 @@ esac
 
 (Note: NO `set -eu` — the verbs use explicit return handling; `set -e` is incompatible with the watchdog's `[ ] && [ ]` idioms and the `_has_bin` return convention.)
 
-- [ ] **Step 4: Run to verify pass** — `bats test/unit/dns-ctl.bats` → PASS. Add `amnezia-dns-ctl.sh` to `shellcheck-phaseB.bats`; run it → PASS.
+- [ ] **Step 4: Run to verify pass** — `bats test/unit/dns-ctl.bats` → PASS. Append the repo-relative path `openwrt/amnezia-dns-ctl.sh` to the `shellcheck -s sh` list in `shellcheck-phaseB.bats`; run it → PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -732,6 +756,14 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   grep -q "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
 }
 
+@test "recovery: in plaintext, an encrypted tier up for M with dwell elapsed exits plaintext" {
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_DNS_WD_M=1 AMNEZIA_NOW=99999 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
+  grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
+}
+
 @test "status emits JSON and never calls apply" {
   run sh -c "AMNEZIA_VERIFY_DOT=pass sh '$CTL' status"
   [ "$status" -eq 0 ]
@@ -739,6 +771,8 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   run grep -q "stubby restart" "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 ```
+
+(With `_entered=0` at loop entry and `AMNEZIA_NOW=99999`, `now-entered ≥ dwell` holds, so the recovery arm fires on the single tick. The `del_list` of the live-read provider IP confirms plaintext was removed.)
 
 - [ ] **Step 2: Run to verify failure** — FAIL.
 
@@ -922,7 +956,7 @@ stop_service() {
 /usr/bin/amnezia-dns-ctl apply >/dev/null 2>&1 &
 ```
 
-- [ ] **Step 5: Run + shellcheck** — `bats test/unit/dns-ctl.bats` → PASS. Add both files to `shellcheck-phaseE.bats`; run it → PASS.
+- [ ] **Step 5: Run + shellcheck** — `bats test/unit/dns-ctl.bats` → PASS. Append the repo-relative paths `openwrt/amnezia-dns.init` and `openwrt/99-amnezia-dns.hotplug` to the `shellcheck` list in `shellcheck-phaseE.bats` (phaseE runs `--severity=warning`); run it → PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -1049,34 +1083,43 @@ git commit -m "feat(dns): LuCI DoT toggle + provider dropdown + plaintext warnin
 
 - [ ] **Step 2: Run to verify failure** — FAIL.
 
-- [ ] **Step 3: Extend the installer (shared post-setup region, before dnsmasq wiring)** — `openwrt/install-amnezia-pbr.sh`
+- [ ] **Step 3: Extend the installer (shared region, after the dry-run guard, before dnsmasq wiring)** — `openwrt/install-amnezia-pbr.sh`
 
-Locate the **shared file-placement region** that BOTH `--migrate` and `--first-install` reach (where `amnezia-force-load`/libs are placed, ~lines 182–249) — NOT the legacy STEPS=1 AWG-kmod block. Insert, BEFORE any dnsmasq confdir wiring in that region:
+The shared region is the `_amz_wire_force_engine` function (reached by both `--migrate` and `--first-install`). It starts with a **dry-run early return** at line ~177 (`if [ "$_afe_dry" = 1 ]; then return 0; fi`) and does its dnsmasq confdir wiring at ~line 240. Insert the new block **after** the dry-run guard (so `--dry-run` never invokes opkg or enables a service) and **before** the confdir wiring. Use the repo's real `resolve_dep <installed_path> <tmp_name> <script_rel>` + `cp`+`chmod` idiom (NOT a fictional `install_file`), mirroring the force-load placement at lines 182–231, each with the `.ipk`-already-present guard:
 
 ```sh
-# Encrypted-DNS packages — install on the working resolver, before any dnsmasq mutation.
+# --- Encrypted-DNS packages + files (after the dry-run guard above) ---
 for pkg in stubby https-dns-proxy; do
   opkg list-installed 2>/dev/null | grep -q "^$pkg " || opkg install "$pkg" 2>/dev/null \
-    || amz_log "dns: opkg install $pkg failed (DoT will fall back to plaintext until installed)"
+    || amz_log "dns: opkg install $pkg failed (DoT falls back to plaintext until installed)"
 done
-# Place runtime files (idempotent; mirrors the existing install_file helper used for amnezia-force-load).
-install_file openwrt/amnezia-dns-ctl.sh        /usr/bin/amnezia-dns-ctl              0755
-install_file openwrt/lib/amnezia-dns-lib.sh    /usr/lib/amnezia/amnezia-dns-lib.sh   0644
-install_file openwrt/amnezia-dns.init          /etc/init.d/amnezia-dns              0755
-install_file openwrt/99-amnezia-dns.hotplug    /etc/hotplug.d/firewall/99-amnezia-dns 0755
+# CLI + lib + init + hotplug via resolve_dep (on-router paths, not repo openwrt/ paths)
+_dns_ctl=$(resolve_dep /usr/bin/amnezia-dns-ctl amnezia-dns-ctl.sh amnezia-dns-ctl.sh) || true
+[ -n "$_dns_ctl" ] && [ "$_dns_ctl" != /usr/bin/amnezia-dns-ctl ] && { cp "$_dns_ctl" /usr/bin/amnezia-dns-ctl; chmod 0755 /usr/bin/amnezia-dns-ctl; }
+_dns_lib=$(resolve_dep /usr/lib/amnezia/amnezia-dns-lib.sh amnezia-dns-lib.sh lib/amnezia-dns-lib.sh) || true
+[ -n "$_dns_lib" ] && [ "$_dns_lib" != /usr/lib/amnezia/amnezia-dns-lib.sh ] && cp "$_dns_lib" /usr/lib/amnezia/amnezia-dns-lib.sh
+if [ ! -f /etc/init.d/amnezia-dns ]; then
+  _dns_init=$(resolve_dep /etc/init.d/amnezia-dns amnezia-dns.init amnezia-dns.init) || true
+  [ -n "$_dns_init" ] && { cp "$_dns_init" /etc/init.d/amnezia-dns; chmod 0755 /etc/init.d/amnezia-dns; }
+fi
+if [ ! -f /etc/hotplug.d/firewall/99-amnezia-dns ]; then
+  _dns_hp=$(resolve_dep /etc/hotplug.d/firewall/99-amnezia-dns 99-amnezia-dns.hotplug 99-amnezia-dns.hotplug) || true
+  [ -n "$_dns_hp" ] && { cp "$_dns_hp" /etc/hotplug.d/firewall/99-amnezia-dns; chmod 0755 /etc/hotplug.d/firewall/99-amnezia-dns; }
+fi
 /etc/init.d/amnezia-dns enable 2>/dev/null || true
 ```
 
-(Use the installer's actual file-placement helper name/idiom — read the existing `amnezia-force-load` placement lines and copy that exact pattern; `install_file` above is illustrative of the shape.) **Live-router note:** the running (manually-cutover) router does NOT re-run this installer — it gets `opkg install stubby https-dns-proxy` + the four files placed by hand during bring-up, WAN/DNS/handshake verified after each.
+**Live-router note:** the running (manually-cutover) router does NOT re-run this installer — it gets `opkg install stubby https-dns-proxy` + the four files placed by hand during bring-up, WAN/DNS/handshake verified after each.
 
 - [ ] **Step 4: Extend the sync script** — `dev/sync-to-packages.sh`
 
 Append the new files to the existing explicit copy lists (read the script first):
-- CLI wrapper list (the `for src in ...` / per-name `cp` block, ~lines 42–52): add `amnezia-dns-ctl`.
-- lib `cp`+`chmod` block (~lines 69–75): add `amnezia-dns-lib.sh`.
-- init block (~lines 100–106): add `amnezia-dns`.
-- firewall hotplug block (~lines 108–115, dir already `mkdir`'d): add `99-amnezia-dns`.
+- CLI wrapper `for src in \ ... do cp "$SRC/$src" "$PBR_PKG/usr/bin/${src%.sh}"` loop (~lines 42–52): add **`amnezia-dns-ctl.sh`** (with the `.sh` suffix — the loop strips it via `${src%.sh}`).
+- lib `cp`+`chmod` block (~lines 69–75): add a `cp "$SRC/lib/amnezia-dns-lib.sh" "$PBR_PKG/usr/lib/amnezia/"` **and** the matching `chmod` line.
+- init block (~lines 100–106): add the `cp` for `amnezia-dns.init` → `etc/init.d/amnezia-dns` + chmod.
+- firewall hotplug block (~lines 108–115, dir already `mkdir`'d): add `99-amnezia-dns.hotplug` → `etc/hotplug.d/firewall/99-amnezia-dns` + chmod.
 - ACL + `config/amnezia` are already mirrored by the existing luci/base copy steps — verify, add only if absent.
+- **`.ipk` DEPENDS:** add `stubby` and `https-dns-proxy` to the `amnezia-pbr` package `Makefile`'s `DEPENDS:=` line so the `.ipk` install path pulls the daemons (the script-level `opkg install` only covers the imperative installer path; without this, an `.ipk`-only install is silently DoT-less until the missing-binary fallback kicks in).
 
 - [ ] **Step 5: Run the generator manually (outside bats), verify parity** — `bash dev/sync-to-packages.sh` then `bats test/unit/sync.bats test/unit/packaging.bats` → PASS; confirm the four files exist under `packages/amnezia-pbr/files/...`.
 
