@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "pgrep $*" >> "${STUB_LOG:-/dev/null}"
+# PGREP_OUTPUT: space-separated pids to emit (default: empty -> nothing found)
+for _p in ${PGREP_OUTPUT:-}; do
+  printf '%s\n' "$_p"
+done
+[ -n "${PGREP_OUTPUT:-}" ] && exit 0 || exit 1
