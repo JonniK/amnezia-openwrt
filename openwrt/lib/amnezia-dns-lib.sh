@@ -92,7 +92,10 @@ dns_iprule_set() {
 dns_iprule_clear() { ip rule del to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT" 2>/dev/null || true; }
 # Flush ALL pref-RULE_PREF_DOT rules unconditionally (no-IP needed). Safe as
 # an idempotent teardown even when the current profile can't be parsed.
-dns_iprule_flush() { while ip rule del pref "$RULE_PREF_DOT" 2>/dev/null; do :; done; }
+dns_iprule_flush() {
+  _k=0
+  while [ "$_k" -lt 16 ] && ip rule del pref "$RULE_PREF_DOT" 2>/dev/null; do _k=$((_k+1)); done
+}
 
 dns_dnsmasq_encrypted() {
   uci set "dhcp.@dnsmasq[0].noresolv=1"

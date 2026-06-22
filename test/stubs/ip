@@ -1,9 +1,6 @@
 #!/bin/sh
 echo "ip $*" >> "${STUB_LOG:-/dev/null}"
 case "$*" in
-  # "rule del pref N" is used by dns_iprule_flush's while-loop; return failure
-  # so the loop terminates after the first call (no real rules in test env).
-  "rule del pref "*) exit 1 ;;
   "rule show"*)
     # Emit real kernel form: %#x strips leading zeros from the mark.
     # 0x0a0000 -> 0xa0000, 0x0b0000 -> 0xb0000.  Mask 0x0ff0000 -> 0xff0000.
