@@ -8,11 +8,12 @@ DENY="$AL_DIR/autolearn/deny.list"
 MANUAL="$AL_DIR/force-tunnel.list"
 AL_LOCK="${AL_LOCK:-/var/lock/amnezia-autolearn.lock}"
 AMNEZIA_FORCE_LOAD="${AMNEZIA_FORCE_LOAD:-amnezia-force-load}"
+AL_INIT="${AL_INIT:-/etc/init.d/amnezia-autolearn}"
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 
 _je() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t' | tr -d '\000-\037'; }
 _reload() { "$AMNEZIA_FORCE_LOAD" >/dev/null 2>&1 || true; }
-_lock() { exec 9>"$AL_LOCK" 2>/dev/null || true; flock -n 9 2>/dev/null || true; }
+_lock() { exec 9>"$AL_LOCK" 2>/dev/null || return 0; if command -v flock >/dev/null 2>&1; then flock -x 9 2>/dev/null || true; fi; }
 
 cmd="${1:-status}"
 case "$cmd" in
@@ -53,6 +54,8 @@ case "$cmd" in
   set-enabled)
     _v="${2:?0|1}"; case "$_v" in 0|1) ;; *) echo '{"error":"invalid"}'; exit 2 ;; esac
     uci set "amnezia.config.autolearn_enabled=$_v"; uci commit amnezia
+    if [ "$_v" = 1 ]; then "$AL_INIT" enable >/dev/null 2>&1 || true
+    else "$AL_INIT" disable >/dev/null 2>&1 || true; fi
     ;;
   *) echo '{"error":"unknown command"}'; exit 2 ;;
 esac

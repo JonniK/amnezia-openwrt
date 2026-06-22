@@ -138,8 +138,10 @@ _al_rotate_log() {
 }
 
 # --- Lock (advisory; flock may be absent in dev/test) -----------------------
+# Skip-on-busy: if another pass or purge holds the lock, exit cleanly — matches
+# awg-ru-update.sh idiom. When flock is absent (dev/test), proceed unconditionally.
 exec 9>"$AL_LOCK" 2>/dev/null || true
-flock -n 9 2>/dev/null || true     # NEVER `|| exit` — matches force-load idiom
+if command -v flock >/dev/null 2>&1; then flock -n 9 2>/dev/null || exit 0; fi
 
 _changed=0                          # declared BEFORE revalidation so a drop counts
 _al_revalidate && _changed=1        # drop stale recovered entries

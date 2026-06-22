@@ -5,6 +5,7 @@ setup() {
   export AL_DIR="$BATS_TEST_TMPDIR/amnezia"; mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
   export AUTO_LIST="$AL_DIR/force.d/auto.list"
   export AMNEZIA_FORCE_LOAD="amnezia-force-load"
+  export AL_INIT="amnezia-autolearn-init"
   export UCI_GET_amnezia_config_autolearn_enabled="1"
   printf 'a.com\nb.com\n' > "$AUTO_LIST"
   printf 'a.com\tdirect_geoblocked\t2\t\t100\t200\tgeoblock\n' > "$AL_DIR/autolearn/candidates.tsv"
@@ -49,6 +50,16 @@ setup() {
 @test "set-enabled writes uci" {
   run sh "$SCRIPT" set-enabled 0; [ "$status" -eq 0 ]
   grep -q "set amnezia.config.autolearn_enabled=0" "$STUB_LOG"
+}
+@test "set-enabled 1 invokes init enable" {
+  run sh "$SCRIPT" set-enabled 1; [ "$status" -eq 0 ]
+  grep -q "set amnezia.config.autolearn_enabled=1" "$STUB_LOG"
+  grep -q "init enable" "$STUB_LOG"
+}
+@test "set-enabled 0 invokes init disable" {
+  run sh "$SCRIPT" set-enabled 0; [ "$status" -eq 0 ]
+  grep -q "set amnezia.config.autolearn_enabled=0" "$STUB_LOG"
+  grep -q "init disable" "$STUB_LOG"
 }
 @test "set-enabled rejects invalid value" {
   run sh "$SCRIPT" set-enabled 2; [ "$status" -eq 2 ]
