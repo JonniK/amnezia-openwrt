@@ -73,6 +73,33 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
 }
 
+@test "M-hysteresis: tier=plaintext, M=2, TICKS=1 — plaintext NOT exited (_ok=1 < 2)" {
+  # Mutation-coverage: if `[ "$_ok" -ge "$_m" ] &&` is deleted from the exit guard,
+  # the watchdog would exit plaintext after the first consecutive OK. This test
+  # catches that mutation because with TICKS=1 only one OK tick runs (_ok=1),
+  # which is < M=2, so plaintext must be retained.
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
+  run sh -c "AMNEZIA_DNS_WD_TICKS=1 AMNEZIA_DNS_WD_M=2 AMNEZIA_NOW=99999 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # del_list of provider IP = exit-plain signal; must NOT be present (_ok=1 < M=2)
+  run grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # dns_active_tier must NOT flip to dot
+  run grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "M-hysteresis: tier=plaintext, M=2, TICKS=2 — plaintext IS exited on 2nd OK (_ok=2 >= 2)" {
+  # Companion to the TICKS=1 test: proves _ok accumulates correctly across ticks
+  # and that the exit fires exactly when the threshold is met.
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
+  run sh -c "AMNEZIA_DNS_WD_TICKS=2 AMNEZIA_DNS_WD_M=2 AMNEZIA_NOW=99999 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # After 2 consecutive OK ticks with M=2 and dwell elapsed, plaintext must exit
+  grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
+  grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
+}
+
 @test "watchdog: _enter_plain failure leaves no latch, retries on next tick (HIGH)" {
   # Bug: the watchdog unconditionally latched _tier=plaintext after calling
   # _enter_plain, even when it returned 1 (dnsmasq reload failed). Once latched,
