@@ -2,30 +2,30 @@
 
 **Date:** 2026-06-22
 **Branch:** `feat/autolearn-bypass` (DNS work may move to its own `feat/dot-dns` branch at plan time)
-**Status:** approved (brainstorm). Pending: written-spec review → writing-plans.
+**Status:** approved (brainstorm) → design-review cycle 1 (3 C / 9 H found across two reviewers, all resolved in this revision). Pending: design-review re-converge → writing-plans.
 
 ## Goal
 
 Replace today's reliance on the **ISP resolver** (plaintext, on the direct path, poisonable for blocked domains) with a **user-toggleable encrypted DNS** stack driven from the LuCI page:
 
-1. **DoT on/off** toggle. OFF ⇒ exactly today's behaviour (dnsmasq forwards to WAN-DHCP provider resolvers). ON ⇒ encrypted DNS with a three-tier fallback chain.
+1. **DoT on/off** toggle. OFF ⇒ exactly today's behaviour (dnsmasq forwards to WAN-DHCP provider resolvers). ON ⇒ encrypted DNS with the layered chain below.
 2. **Provider dropdown** — switch the resolver provider live (Quad9 default, plus AdGuard / dns0.eu / Mullvad / Google / Custom).
 
-When ON, resolution degrades gracefully:
+When ON, resolution is **two leak-free encrypted tiers** plus a **health-gated plaintext last resort**:
 
-1. **DoT** (stubby) → chosen provider, **routed through awg1** (encrypted *and* hidden from the ISP, unblockable).
+1. **DoT** (stubby) → chosen provider, **routed through the sticky tunnel** (encrypted *and* hidden from the ISP, unblockable).
 2. If the tunnel is down → **DoH** (https-dns-proxy) → same provider, **direct over WAN** (still encrypted/tamper-proof; 443 blends with HTTPS).
-3. If DoH also fails → **provider DNS** (plaintext, WAN — today's behaviour) as last resort.
+3. Only if **both encrypted tiers are confirmed dead** by a health watchdog → **plaintext provider DNS** (today's behaviour), as an explicitly **surfaced warning state** — never a silent per-query peer.
 
 **Non-goals.** No change to failover/health/sticky logic, the RU-direct CIDR loader, the force-allowlist engine, or `routing_mode`. This feature only owns the *resolver chain* and its UI.
 
 ## Constraints (carried from project history)
 
-- **Never break client internet.** Every mutation reloads atomically and **fails toward a working resolver**: manual `enable` verifies resolution and **auto-reverts to plain provider DNS** if nothing resolves; boot/`apply` relies on the chain's own degradation. The force-allowlist confdir (`/etc/amnezia/dnsmasq.d/`) is never touched by this feature.
-- **No Cloudflare** anywhere in the shipped profiles (explicit user requirement — the reason we're leaving the ISP/CF defaults).
-- **No DNS leak while a higher tier works.** dnsmasq `strict-order` guarantees tier N+1 is queried *only* on tier N failure, so the provider never sees a query while DoT or DoH works.
+- **Never break client internet.** Every mutation reloads atomically and **fails toward a working resolver**: manual `enable` verifies resolution **through an encrypted tier** and **auto-reverts to plain provider DNS** if that fails; the health watchdog gates the plaintext tier in/out with a visible status.
+- **No Cloudflare** anywhere in the shipped profiles (explicit user requirement). Because both daemons ship Cloudflare *default* upstreams, "no Cloudflare" is a **fail-closed gate**: `apply` deletes the stock sections and a test asserts no Cloudflare endpoint survives in the rendered config.
+- **No silent DNS leak.** Plaintext (tier 3) is never a co-equal dnsmasq `server=` while an encrypted tier might work — see "Why not plain `strict-order` over three tiers" below. The force-allowlist confdir (`/etc/amnezia/dnsmasq.d/`) is never touched by this feature.
 - POSIX sh / BusyBox ash for router scripts; LuCI client JS for browser work.
-- Source lives in `openwrt/`; `dev/sync-to-packages.sh` mirrors into `packages/` (CI sync-check enforces parity).
+- Source lives in `openwrt/`; `dev/sync-to-packages.sh` mirrors into `packages/` (CI sync-check enforces parity). The sync script is a **hand-maintained allow-list**, not a glob — every new file is an explicit work item.
 - Live-router application is a **separate, later step** after unit/VM verification, each router action preceded by its rollback and a WAN+DNS+handshake check (per CLAUDE.md live-router rules).
 
 ---
@@ -34,43 +34,65 @@ When ON, resolution degrades gracefully:
 
 - dnsmasq is the LAN resolver (`192.168.1.1:53`). `resolvfile=/tmp/resolv.conf.d/resolv.conf.auto`, no `server=`, no `noresolv` ⇒ forwards to **WAN-DHCP provider resolvers** (`109.195.112.1`, `5.3.3.3`).
 - `confdir=/etc/amnezia/dnsmasq.d` holds the force-allowlist `nftset=` chunks — **owned by force-load, out of scope here.**
-- `awgN.conf` `DNS =` fields (`1.1.1.1, 8.8.8.8` etc.) are **ignored** by the OpenWrt `amneziawg` proto — they never reach the resolver. The awg server runs **no** internal resolver (`10.8.1.1` does not answer DoT through either tunnel — probed, timed out).
+- `awgN.conf` `DNS =` fields are **ignored** by the OpenWrt `amneziawg` proto. The awg server runs **no** internal resolver (`10.8.1.1` does not answer DoT through either tunnel — probed, timed out).
 - Router-originated traffic (dnsmasq → upstream) is **not** marked by the prerouting classifier, so it egresses via the **main table → WAN** unless an explicit `ip rule`/route says otherwise.
 
 ---
 
 ## Resolver chain (the mechanism)
 
-dnsmasq with **`noresolv=1` + `strict-order`** and three explicit upstreams, in order:
+### Two encrypted tiers via dnsmasq `strict-order` (leak-free)
+
+dnsmasq is configured `noresolv=1` + `strict-order` with **exactly two** loopback upstreams — both encrypted:
 
 | # | Tier | Daemon / listen | Upstream | Egress |
 |---|------|-----------------|----------|--------|
-| 1 | DoT | stubby `127.0.0.1#5453` | provider **DoT primary IP** `@853` (TLS auth by hostname) | **awg1** via `ip rule to <DoT-IP> lookup 100` |
-| 2 | DoH | https-dns-proxy `127.0.0.1#5454` | provider **DoH secondary IP** (`https://<host>/dns-query`) | **direct / WAN** (main table) |
-| 3 | Provider | — (dnsmasq → IP) | WAN-DHCP resolver IPs, captured at `apply` | **direct / WAN** |
+| 1 | DoT | stubby `127.0.0.1#5453` | provider **DoT primary IP** `@853` (strict TLS auth) | **sticky tunnel** via `ip rule to <DoT-IP> lookup 100 pref 30900` |
+| 2 | DoH | https-dns-proxy `127.0.0.1#5454` | provider **DoH secondary IP** (`https://<IP>/dns-query`) | **direct / WAN** (main table) |
 
-**Distinct primary/secondary IPs are mandatory.** DoT (tier 1) and DoH (tier 2) use the **same provider but two different anycast IPs** on purpose. If both used the same IP, the `ip rule … lookup 100` would force the DoH fallback into the *dead* tunnel too, collapsing tier 2 exactly when it's needed. Tier 1 IP is pinned to the tunnel; tier 2 IP stays direct. Using a fixed IP endpoint for DoH (not a hostname) also avoids a bootstrap-DNS chicken-and-egg and a second routing collision.
+Because **both** upstreams are encrypted local proxies, the strict-order fall-through can only ever land on another encrypted tier — **a per-query fall-through from DoT to DoH never leaks.** This is the key change from the first draft, which listed plaintext provider as a third strict-order peer; under dnsmasq `strict-order` a *lossy* tier-1 (stubby up but stalling) advances the *same* query to the next `server=`, so a plaintext peer would leak blocked-domain lookups to the ISP-reachable provider on exactly the flaky-tunnel conditions the feature targets. Plaintext must therefore be gated by health, not by strict-order (next section).
 
-**Self-healing.** `strict-order` always restarts from tier 1, so when awg1 recovers the chain returns to DoT automatically — no daemon, no state machine. **Cost:** during a full tunnel outage every cache-miss first eats stubby's connect timeout before falling to DoH; we set a **short stubby timeout** to bound it, and dnsmasq's cache absorbs repeats. Acceptable for rare outages.
+**`strict-order` semantics we rely on (verified against dnsmasq behavior):** without `all-servers`, dnsmasq sends a query to one upstream and advances to the next only on timeout/SERVFAIL; `strict-order` forces that probing to start from the first listed server every query (instead of fastest-RTT). So while tier-1 answers, tier-2 is never contacted (no leak between encrypted tiers either); when tier-1 fails the query advances to tier-2; and recovery is automatic (each query re-tries tier-1 first). The live leak-test below validates this empirically rather than trusting the manual.
 
-**Provider tier and `noresolv`.** Because `noresolv=1` makes dnsmasq ignore `resolvfile`, the tier-3 provider IPs are captured from `/tmp/resolv.conf.d/resolv.conf.auto` **at `apply` time** and written as the last `server=` entries. A WAN `ifupdate` hotplug re-runs `apply` so a DHCP renew refreshes them.
+**Tunnel egress + the failover blackhole.** Table 100 is the *sticky* table, owned by `amnezia-failover` (`routing_set_sticky_default`). The `to <DoT-IP> lookup 100` rule is **tunnel-agnostic by design**: it follows whatever tunnel the daemon currently points table 100 at (the configured `sticky_target`, default awg1, or the best pool member during failover) — so it self-heals across *all* tunnels, not just awg1 recovery. Two sub-cases when tunnels are unhealthy, both handled:
+- **All tunnels down ⇒ table 100 holds `blackhole default`** (`amnezia-routing.sh`). The DoT packet is dropped with an immediate `EHOSTUNREACH` → stubby fails **fast** → dnsmasq advances to tier-2 (DoH/WAN) promptly. This is the desired outcome (tier-1 never falls through to cleartext WAN), and it is *fast*, not a timeout stall.
+- **Transient stale route** (dead `dev awgN` still in table 100 for one poll before the daemon swings it to blackhole) ⇒ packets blackhole at the dead device; bounded by a **short, explicit stubby timeout** (value pinned in the plan, e.g. 2s) so tier-2 is still reached quickly. dnsmasq cache absorbs repeats.
+
+**Rule priority — pinned and documented.** `pref 30900` sits **above pbr's 30000 cleanup line** (survives pbr teardown, per `amnezia-common.sh`) and **below the sticky fwmark rules at 31000/31001** (evaluated first, which is correct: router-origin DNS carries no fwmark, so only this `to`-selector should steer it). The plan asserts: exactly one such rule exists, it is keyed by the exact normalized `to <IP> pref 30900 lookup 100` triple for idempotent delete-then-add (mirroring `_rule_exists`'s kernel-normalization handling, e.g. `/32` and hex-mask reprinting), and pref 30900 is unused by zapret/pbr.
+
+### Plaintext last resort — health-gated, never a strict-order peer
+
+A lightweight watchdog (procd-respawned `amnezia-dns-ctl watchdog`, ~every 20s) probes the two **encrypted** listeners (`127.0.0.1#5453`, `127.0.0.1#5454`). State machine:
+- **Either encrypted tier healthy ⇒** dnsmasq has only the two encrypted `server=` entries. No plaintext anywhere. `active_tier` = `dot` or `doh`.
+- **Both encrypted tiers failing for N consecutive probes ⇒** add the captured WAN-DHCP provider IPs as `server=` (plaintext, direct), reload dnsmasq, set a **persisted `active_tier=plaintext` warning flag**. This is the only path by which a query reaches cleartext, and it is *visible*, not silent.
+- **An encrypted tier recovers ⇒** remove the plaintext `server=`, clear the warning, reload.
+
+This honors "if DoH fails, then provider DNS" (the user's explicit ask) **without** the per-query leak, because plaintext enters the candidate set only after confirmed total encrypted failure, and leaves the moment encryption returns. Tier-2 DoH (direct/WAN) already covers the common "tunnel down but internet up" case, so the plaintext tier should fire only when the ISP additionally blocks the DoH endpoint — genuinely rare, and now alarmed when it happens.
+
+> **Why a watchdog and not pure `strict-order`** (revisiting the v1 YAGNI call): the leak analysis above forces it. The cost is one tiny procd loop reusing the listener probes `status` already needs. The failover daemon is *not* extended — tunnel-health ≠ DNS-tier-health (DoH works when the tunnel is down), so DNS-tier liveness is its own loopback DNS probe.
+
+### IPv6 — no leak, v4-only endpoints
+
+- All shipped-profile DoT/DoH endpoints are **v4 IP literals** (asserted invariant). No `ip -6 rule` is needed because there is no v6 upstream.
+- `noresolv` is what makes this safe end-to-end: dnsmasq forwards **every** query (A *and* AAAA) only to the loopback proxies — it has no other upstream, so there is no v6 (or v4) leak path out of dnsmasq regardless of the query type. stubby/https-dns-proxy make the actual provider connection over v4 (tunnel-pinned / direct respectively). stubby's `::1@5453` listen line is dropped (loopback v4 is sufficient and avoids implying a v6 upstream).
+- **Boundary stated explicitly:** clients configured with their *own* resolver (RA-advertised v6 resolver, hardcoded `8.8.8.8`, DoH-in-browser) bypass the router resolver entirely; this feature cannot encrypt those and does not try to. It does not add or change the existing `amnezia_v6_drop` firewall behavior.
 
 ---
 
 ## Provider profiles
 
-A profile is a small record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, dot_tls_host, doh_url(IP-pinned) }`. `amnezia.config.dns_provider` selects one. Shipped (all free, non-Cloudflare):
+A profile is a record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, dot_tls_host, doh_url(IP-literal) }`. `amnezia.config.dns_provider` selects one. Shipped (all free, non-Cloudflare):
 
 | Profile | Notes |
 |---|---|
 | `quad9` (default) | Swiss foundation, malware-filtering, privacy-first |
 | `adguard` | DNS-level ad/tracker blocking |
-| `dns0` | EU, GDPR, privacy-focused |
+| `dns0` | EU, GDPR, privacy-focused (IP-pin maintenance risk noted — see Risks) |
 | `mullvad` | No-log, VPN-grade, block variants |
-| `google` | Most robust uptime; large US provider (acceptable as a fallback choice) |
-| `custom` | user-supplied `dot_resolver` / `doh_resolver` UCI values |
+| `google` | Most robust uptime; **large US logging provider** — dropdown help-text states this so the choice is informed |
+| `custom` | user-supplied `dot_resolver` / `doh_resolver` UCI values; **DoH must be IP-literal** (hostname rejected) to avoid a bootstrap loop through dnsmasq |
 
-> **Exact endpoint IPs/hosts are locked at implementation**, verified against each provider's published docs **and** a live resolution probe during `apply` — not asserted from memory here. Each shipped profile must supply two distinct IPs (DoT-primary, DoH-secondary); this is a per-profile invariant the unit tests assert.
+> **Per-profile invariant, proven at plan time, not from memory:** for each shipped profile, record the concrete DoT-IP and DoH-IP, verified against the provider's published docs **and** a live resolution probe; assert (a) DoT-IP ≠ DoH-IP (else the lookup-100 rule drags DoH into the dead tunnel), (b) both are stable published anycast literals (not hostname-resolved moving targets), and (c) no other `ip rule`/route references the DoH-IP. **Drop any profile that cannot satisfy this** rather than shipping a silently-broken fallback.
 
 ---
 
@@ -82,56 +104,66 @@ A profile is a small record the `amnezia-dns-ctl` table owns: `name → { dot_ip
 option dot_enabled  '0'        # master toggle; 0 = today's provider DNS
 option dns_provider 'quad9'    # selected profile
 option dot_resolver ''         # custom only: <ip>@853#<tls-host>
-option doh_resolver ''         # custom only: https://<ip>/dns-query
+option doh_resolver ''         # custom only: https://<ip-literal>/dns-query
+# runtime, written by the watchdog (not user-edited):
+option dns_active_tier 'dot'   # dot | doh | plaintext  (drives UI warning)
 ```
 
 ### New CLI `/usr/bin/amnezia-dns-ctl`
 
-POSIX sh, sources `amnezia-common.sh`. Verbs:
+POSIX sh, sources `amnezia-common.sh`. UCI reads use `uci -q get` (quoting/list discipline). Verbs:
 
-- **`status`** → JSON `{ "enabled": bool, "provider": str, "active_tier": "dot|doh|provider", "healthy": bool }` for the UI. `active_tier` is derived by probing each local listener in order; `healthy` = any tier resolves a control domain.
-- **`enable`** → set `dot_enabled=1`, commit → `apply` → **verify** (resolve a control domain via `127.0.0.1`). On total failure: **auto-revert** (`disable` internals), `dot_enabled=0`, non-zero exit, message surfaced to UI.
-- **`set-provider <name>`** → validate, set `dns_provider` (+ custom fields if `custom`), commit → if `dot_enabled=1`, `apply` + verify (same auto-revert-to-*previous-provider*-then-plain on failure); if disabled, just persist.
-- **`apply`** (idempotent; used by `enable`, `set-provider`, init, hotplug) → render stubby + https-dns-proxy configs for the selected profile; set dnsmasq (`noresolv`+`strict-order`+3 `server=` with captured provider IPs); install `ip rule to <DoT-IP> lookup 100 pref 30900` (delete-then-add, idempotent); restart stubby + https-dns-proxy, **backgrounded** dnsmasq reload (fw4/dnsmasq-reload-SSH rule). **No** auto-revert here (boot-time degradation is the chain's job).
-- **`disable`** → restore dnsmasq to `resolvfile` (drop `noresolv`/`strict-order`/our `server=`), remove the `ip rule`, stop+disable stubby and https-dns-proxy, `dot_enabled=0`, commit, backgrounded dnsmasq reload.
+- **`status`** → JSON `{ "enabled": bool, "provider": str, "active_tier": "dot|doh|plaintext", "encrypted": bool, "healthy": bool }`. `active_tier` is read from the watchdog flag; `encrypted` = active tier ∈ {dot,doh}. **Bounded** (each listener probe ≤1s) and **never triggers `apply`**, so the UI status call can't stall during an outage.
+- **`enable`** → preflight: confirm `stubby` + `https-dns-proxy` **binaries present** (else fail with "install packages first", no mutation). Set `dot_enabled=1`, commit → `apply` → **verify through an encrypted tier**: probe `127.0.0.1#5453` and `127.0.0.1#5454` directly (not `#53`, which could be answered by a plaintext tier). Success **only** if an encrypted tier resolves a control domain. On failure: **auto-revert** to plain provider DNS, `dot_enabled=0`, non-zero exit, message to UI.
+- **`set-provider <name>`** → validate (custom ⇒ DoH IP-literal). Persist `dns_provider_prev`, set new `dns_provider`. If `dot_enabled=1`: `apply` + encrypted-tier verify; on failure roll back to `dns_provider_prev` and re-verify; if that also fails, drop to `dot_enabled=0` plain. End-state matrix defined in the plan; UI reflects the actual landing state.
+- **`apply`** (idempotent; used by `enable`, `set-provider`, init, hotplug, watchdog) → render stubby + https-dns-proxy **via their UCI** (see below); set dnsmasq `noresolv`+`strict-order`+the two encrypted `server=`; install the `ip rule` (delete-then-add by normalized triple); restart stubby + https-dns-proxy; **`dnsmasq --test` the assembled config, and only on pass** do a **backgrounded** dnsmasq reload. **If a binary is missing** (e.g. post-sysupgrade), do **not** wedge DNS: fall back to plain provider config and set `active_tier=plaintext` + warning. **No auto-revert** here (boot/watchdog own degradation), but also **no silent encrypted-claim** — the missing-binary fallback is surfaced.
+- **`disable`** → restore dnsmasq to `resolvfile` (drop `noresolv`/`strict-order`/our `server=`), remove the `ip rule`, stop+disable stubby and https-dns-proxy and the watchdog, clear `active_tier`, `dot_enabled=0`, commit, backgrounded dnsmasq reload.
+- **`watchdog`** → the procd-respawned loop described in "Plaintext last resort."
 
-**Idempotency & fail-closed ordering.** `apply` is re-runnable; every mutation is delete-then-add. dnsmasq is only reloaded after its config validates (`dnsmasq --test`), mirroring the existing >1024-byte chunking guard — a bad render never takes DNS down.
+**Fail-closed ordering.** `apply` is re-runnable; every mutation is delete-then-add. dnsmasq reloads **only after** `dnsmasq --test` passes — a bad render never takes DNS down.
 
-### Daemon configs (generated, never hand-edited)
+### Daemon configs — driven via the packages' own UCI (not hand-written)
 
-- **stubby** → `/etc/stubby/stubby.yml` (or UCI `/etc/config/stubby`): listen `127.0.0.1@5453` + `::1@5453`, **single** upstream = profile DoT (strict TLS auth by hostname, `tls_authentication: GETDNS_AUTHENTICATION_REQUIRED`), short timeout. No Cloudflare/Quad9-default servers from the package template.
-- **https-dns-proxy** → its UCI/config: listen `127.0.0.1#5454`, upstream = profile DoH **IP-pinned** URL, egress direct (no ip rule). `bootstrap_dns` set to the same pinned IP to avoid recursion.
+Both `stubby` and `https-dns-proxy` ship `/etc/config/{stubby,https-dns-proxy}` whose init scripts **regenerate** runtime config on start; hand-writing `stubby.yml` would be clobbered and could fall back to the packages' **Cloudflare/Quad9 default upstreams** (a no-Cloudflare violation). Therefore `apply` drives **their UCI**:
+- **stubby** — `uci -q delete` **all** stock `stubby.@resolver[*]` sections, add a single resolver = profile DoT (`address`, `tls_auth_name`, strict `tls_authentication`/spki), listen `127.0.0.1@5453` only, short timeout; `uci commit stubby; /etc/init.d/stubby restart`.
+- **https-dns-proxy** — `uci -q delete` **all** stock `@https-dns-proxy[*]` sections (the Cloudflare defaults), add a single section = profile DoH IP-literal URL, listen `127.0.0.1:5454`, `bootstrap_dns` = the same pinned IP; commit + restart.
+- A test asserts **no Cloudflare IP/host** remains in either rendered config.
 
-### Persistence — two triggers (mirrors force-load)
+### Persistence — triggers (mirrors force-load's robustness)
 
-- **`/etc/init.d/amnezia-dns`** (`START` after network/failover) → `amnezia-dns-ctl apply` when `dot_enabled=1`.
-- **`/etc/hotplug.d/iface/99-amnezia-dns`** → on **awg1 ifup** re-assert (`apply`, mainly to re-add the `ip rule` after a reboot/flush and survive the known pbr/failover boot race), and on **WAN ifupdate** refresh the tier-3 provider IPs.
+- **`/etc/init.d/amnezia-dns`** (`START` after network/failover) → if `dot_enabled=1`, `apply` (tolerant of "no tunnel yet": the chain degrades to DoH; the watchdog gates plaintext if even DoH can't start) and start the watchdog.
+- **Hotplug** — the exact `$ACTION × $INTERFACE` matrix is pinned in the plan against a **live `logread` capture of an awg1 flap** (the project's tunnels are known to fire `ifupdate` on reconfig, not always `ifup`, and have a documented boot race). Intent: on **sticky-tunnel up/update** re-assert the `ip rule`; on **WAN ifupdate** refresh the captured plaintext provider IPs. If iface events prove unreliable for awg, fall back to the force-load pattern (key off the firewall `reload` hotplug action).
 
 ### LuCI UI (`main.js` + ACL)
 
-- New controls near the routing-mode block: a **DoT on/off** toggle and a **provider dropdown** (6 options; Custom reveals two text inputs). Both call `fs.exec('/usr/bin/amnezia-dns-ctl', [...])`, exactly like the `set-routing-mode` precedent. Status line shows `active_tier` from `amnezia-dns-ctl status`.
-- **ACL** (`acl.d/luci-app-amnezia.json`): add `/usr/bin/amnezia-dns-ctl` to the permitted `file.exec` list (read+exec).
+- New controls near the routing-mode block: a **DoT on/off** toggle and a **provider dropdown** (6 options; Custom reveals two text inputs). Both call `fs.exec('/usr/bin/amnezia-dns-ctl', [...])`, exactly like the `set-routing-mode` precedent. A **status line shows `active_tier`**, and renders a **visible warning when `active_tier=plaintext`** ("encrypted DNS unavailable — on plaintext fallback").
+- **ACL** (`acl.d/luci-app-amnezia.json`): add `"/usr/bin/amnezia-dns-ctl": ["exec"]` under the existing **`write.file`** block (mirroring `amnezia-failover-ctl`). No new `read.file` entry (status is exec-derived, no JSON state file).
 
 ### Installer / packaging
 
-- `install-amnezia-pbr.sh`: `opkg install stubby https-dns-proxy` (guarded — skip if present); install the new init + hotplug + CLI.
-- Mirror everything into `packages/` via `dev/sync-to-packages.sh`; CI sync-check must stay green.
+- `install-amnezia-pbr.sh`: `opkg update && opkg install stubby https-dns-proxy` **guarded** (skip if present) and **before any dnsmasq mutation**, on the working/plain resolver — never from inside `enable`/`apply`. Install the new CLI + init + hotplug + ACL.
+- **Sysupgrade caveat (documented):** these packages are not in the firmware image, so a sysupgrade removes the binaries while `dot_enabled=1` persists. The boot `apply`'s **missing-binary fallback** (→ plain + `active_tier=plaintext` warning) prevents a silent degraded boot; the docs tell the user to re-install the two packages (or bake a custom image) after sysupgrade.
+- Mirror every new file into `packages/` via `dev/sync-to-packages.sh` — **explicit edits required**: add `amnezia-dns-ctl` to its wrapper list, add the init + the new `hotplug.d/iface/` path (the script currently only `mkdir`s `hotplug.d/firewall`), and the ACL. CI sync-check must stay green.
 
 ---
 
 ## Testing
 
-bats unit tests with stubs in the **exact real output format** (CLAUDE.md rule — `uci` quotes values & one-lines lists; `dnsmasq --test`; `ip rule`; `stubby`/`https-dns-proxy` init):
+bats unit tests with stubs in the **exact real output format** (CLAUDE.md rule):
 
-1. `enable` → verify-ok → dnsmasq has `noresolv`+`strict-order`+3 ordered `server=`; `ip rule` present.
-2. `enable` → verify-fail → **auto-revert**: `dot_enabled=0`, dnsmasq back on `resolvfile`, no stray `ip rule`, non-zero exit.
-3. `disable` fully restores today's provider config (no `noresolv`, no our `server=`, no `ip rule`).
-4. `set-provider` for each shipped profile renders distinct DoT/DoH IPs (asserts the two-distinct-IP invariant) and a valid stubby/DoH config; `custom` parses user endpoints.
-5. `apply` is idempotent (run twice → identical state, single `ip rule`).
-6. dnsmasq render passes `dnsmasq --test`; a deliberately bad render is rejected **before** reload (no DNS-down).
-7. tier-3 provider IPs are captured from a stubbed `resolv.conf.auto`.
+1. `enable` (binaries present) → encrypted-tier verify ok → dnsmasq has `noresolv`+`strict-order`+exactly the **two** encrypted `server=`; `ip rule` present; **no plaintext server=**.
+2. `enable` → encrypted verify fails → **auto-revert**: `dot_enabled=0`, dnsmasq back on `resolvfile`, no stray `ip rule`, non-zero exit.
+3. `enable` with a **missing binary** → preflight refuses (no mutation); and the `apply` missing-binary path → plain + `active_tier=plaintext` warning, never wedged.
+4. `disable` fully restores today's provider config (no `noresolv`, no our `server=`, no `ip rule`, watchdog stopped).
+5. `set-provider` for each shipped profile renders distinct DoT/DoH **IP literals** (asserts the two-distinct-IP invariant) and a stubby/https-dns-proxy UCI with **no Cloudflare** surviving; `custom` parses user endpoints and **rejects a hostname DoH URL**.
+6. `apply` idempotent (run twice → identical state, single `ip rule`; uses the kernel-normalized selector so boot-init + hotplug double-apply can't duplicate).
+7. **Watchdog state machine:** both-encrypted-down → adds plaintext + sets warning flag; recovery → removes plaintext + clears flag.
+8. **`dnsmasq --test` gate is actually exercised** — the current stub (`exit 0` for everything) makes the headline safety test vacuous; **upgrade the dnsmasq stub** to reject the malformation classes the gate guards (oversized `server=`/line, malformed `server=`, bad `nftset`) — or run real `dnsmasq --test` in CI. A deliberately-bad render must be rejected **before** reload.
 
-VM smoke (`dev/vm/`) where it can observe; **live verification on real hardware** is the final gate (the VM's dnsmasq blind spot for real queries is exactly where a live-only bug hides).
+**Live-only gates (explicit — a green bats run is not proof; the VM's dnsmasq doesn't serve real queries):**
+- **Leak test:** enable DoT, `tcpdump` WAN `:53` while resolving control domains with tier-1 artificially **stalled** (not just down) — assert **zero** cleartext `:53` to the provider until the watchdog deliberately gates plaintext.
+- **nftset tagging:** enable DoT, resolve a force-listed domain, assert its IP lands in `amnezia_force4` and routes through the tunnel (confirms encrypted upstreams don't break the force-allowlist tagging path).
+- **Failover interaction:** with DoT on, force a sticky failover and confirm DNS continues via the new sticky tunnel (lookup-100 follows it).
 
 ---
 
@@ -139,17 +171,23 @@ VM smoke (`dev/vm/`) where it can observe; **live verification on real hardware*
 
 | Risk | Mitigation |
 |---|---|
-| DoT/DoH share an IP → fallback pinned into dead tunnel | Two-distinct-IP invariant per profile, asserted in tests |
-| `noresolv` drops provider fallback | Capture WAN resolver IPs at `apply`; WAN hotplug refreshes on DHCP renew |
-| Boot race: awg1 not up at boot ⇒ tier-1 fails | Chain degrades to DoH/provider automatically; awg1-ifup hotplug re-asserts the `ip rule` |
-| Bad generated dnsmasq config ⇒ DNS outage | `dnsmasq --test` gate before any reload |
-| Total degradation leaks plaintext to provider | Accepted by design (last resort); only when both tunnel **and** DoH are down |
-| Package missing on a stripped image | Installer guards `opkg install`; `enable` verify auto-reverts if daemons absent |
+| Plaintext tier leaks per-query under a lossy tunnel (the v1 strict-order flaw) | Plaintext is **health-gated**, never a strict-order peer; only two encrypted tiers in `strict-order`; live `tcpdump` leak-test |
+| IPv6 upstream leak / unpinned v6 DoT | v4-literal endpoints only; `noresolv` forces all query types to loopback proxies → no v6 (or v4) leak out of dnsmasq; `::1` listener dropped; client-own-resolver boundary stated |
+| Tunnel down ⇒ table 100 blackhole stalls tier-1 | Blackhole returns fast `EHOSTUNREACH` (not a timeout); short explicit stubby timeout bounds the stale-route transient; documented so nobody "fixes" it into a WAN fallthrough |
+| DoT/DoH share an IP ⇒ fallback pinned into dead tunnel | Two-distinct-IP invariant **proven per profile at plan time**; drop profiles that can't satisfy it; assert no other rule touches the DoH-IP |
+| Hand-written daemon config clobbered ⇒ Cloudflare default leak | Drive stubby + https-dns-proxy **via their UCI**, delete stock sections; test asserts no Cloudflare survives |
+| Packages vanish after sysupgrade ⇒ silent degraded boot | `apply` missing-binary fallback → plain + visible `active_tier=plaintext`; docs: reinstall after sysupgrade; never opkg from `enable`/`apply` |
+| `enable` "success" via plaintext ⇒ green status on cleartext | Verify probes the **encrypted listeners** specifically; only encrypted success is green; plaintext is a warning state |
+| `dnsmasq --test` gate unprovable with the `exit 0` stub | Upgrade stub to parse malformations (or real `--test` in CI); test #8 |
+| force-allowlist nftset tagging silently breaks under encrypted upstreams | Live-only gate (resolve force domain → assert in `amnezia_force4`) |
+| Hotplug fires `ifupdate` not `ifup` ⇒ rule not re-asserted | `$ACTION×$INTERFACE` matrix pinned against live `logread`; firewall-reload-hotplug fallback |
 | Reload drops SSH | Backgrounded dnsmasq reload per the fw4/dnsmasq-reload-SSH rule |
+| `dns0`/IP-pinned providers change IPs ⇒ silent breakage | Prefer stable published anycast; watchdog surfaces the resulting plaintext fallback; note maintenance burden |
 
 ---
 
 ## Open items deferred to plan
 
 - Branch choice: fold into `feat/autolearn-bypass` or cut `feat/dot-dns`.
-- Whether the failover daemon should additionally *nudge* a faster tier switch on a known tunnel-down transition (optimization over `strict-order`'s per-query timeout). **YAGNI for v1** — `strict-order` self-heals; revisit only if outage latency is a real complaint.
+- Exact short stubby/dnsmasq timeout values, watchdog probe interval/threshold (`N`), and the hotplug `$ACTION×$INTERFACE` matrix — all pinned at plan time with live observation.
+- Concrete per-profile DoT/DoH IP literals (proven against provider docs + live probe; profiles failing the invariant are dropped).
