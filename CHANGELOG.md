@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.3.0 — 2026-06-22
+
+### Auto-learning self-learning bypass
+
+**New feature** — opt-in, `direct-default` mode only, default OFF.
+
+A cron pass (`/usr/sbin/amnezia-autolearn`) harvests visited domains from
+the dnsmasq query log, probes blocked ones via `zapret-probe` with a
+pinned IP (SSRF-safe `--resolve`, no redirects, public-IP gate), and
+auto-adds confirmed-blocked domains to `/etc/amnezia/force.d/auto.list`
+which feeds `amnezia_force4` via the normal `amnezia-force-load` path.
+
+Classification thresholds: geoblock (`direct_geoblocked`) confirmed at
+**2 verdicts**, DPI (`direct_dpi_blocked`) at **3**. A domain is eligible
+only if **≥2 distinct client IPs** resolved it in the harvest window. LRU
+eviction bounds flash use at `autolearn_max_entries` (default 500).
+Revalidation every `autolearn_revalidate_days` (default 14) days drops
+domains that now return `direct_ok` on a direct router-origin probe.
+
+Hard gates: `routing_mode=direct-default`, `autolearn_enabled=1`,
+failover state file fresh + `all_down:false`. All failure directions are
+fail-safe (no list change on probe error or unreachable).
+
+**New files:**
+
+- `/usr/sbin/amnezia-autolearn` — cron pass
+- `/usr/bin/amnezia-autolearn-ctl` — CLI: `status|list|veto|promote|purge|set-enabled`
+- `/etc/init.d/amnezia-autolearn` — reversible dnsmasq query logging + cron wiring (START=97)
+- `/usr/lib/amnezia/amnezia-autolearn-lib.sh` — pure helpers (querylog parsing, IP/name validation, deny matching)
+
+**New data paths:**
+
+- `/etc/amnezia/force.d/auto.list` — auto-learned domains
+- `/etc/amnezia/autolearn/candidates.tsv` — 7-col TSV: domain, verdict, count, clients, first_seen, last_probe, reason
+- `/etc/amnezia/autolearn/deny.list` — vetoed domains (suffix-aware; never re-added)
+- `/tmp/dnsmasq-queries.log` — DNS query log (tmpfs; present only while enabled)
+
+**Changed files:**
+
+- `zapret-probe.sh`: optional 2nd arg (pinned IPv4) for SSRF-safe probing;
+  existing single-arg LuCI path is byte-equivalent to before.
+- `amnezia-force-load.sh`: guarded suffix-aware `deny.list` global exclusion;
+  a missing/empty deny.list is a strict no-op (can never blank force4).
+
+**New UCI options** (all under `amnezia.config`):
+
+```
+option autolearn_enabled              '0'
+option autolearn_interval_min         '30'
+option autolearn_max_probes           '20'
+option autolearn_max_per_client       '5'
+option autolearn_revalidate_days      '14'
+option autolearn_max_entries          '500'
+option autolearn_candidate_retention_days '30'
+```
+
+**Enable:**
+
+```sh
+amnezia-autolearn-ctl set-enabled 1
+```
+
+**LuCI panel:** master toggle + auto-list table with Remove (veto), Promote,
+and Purge all.
+
+---
+
 ## 0.2.0-r3 — 2026-06-15
 
 ### Multi-tunnel AmneziaWG failover (replaces pbr)
