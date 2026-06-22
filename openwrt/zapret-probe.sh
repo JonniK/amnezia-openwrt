@@ -45,6 +45,25 @@ URL="https://$domain/"
 CT=5     # connect timeout (seconds)
 MAX=10   # total timeout
 
+# Optional 2nd arg: a pinned IPv4 to fix resolution (autolearn SSRF guard).
+# When present, curl resolves <domain> to exactly this IP and follows NO
+# redirects (a block manifests at the handshake / first response).
+pinned_ip=${2:-}
+RESOLVE_OPTS=""
+# REDIR_OPTS carries the redirect policy. The unpinned (existing UI) path MUST
+# stay byte-equivalent to the original `-sL` — keep BOTH -s and -L. The pinned
+# path keeps -s but forbids redirects.
+REDIR_OPTS="-sL"
+if [ -n "$pinned_ip" ]; then
+  case "$pinned_ip" in
+    *.*.*.*) : ;;
+    *) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;;
+  esac
+  case "$pinned_ip" in *[!0-9.]*) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;; esac
+  RESOLVE_OPTS="--resolve $domain:443:$pinned_ip --resolve $domain:80:$pinned_ip"
+  REDIR_OPTS="-s --max-redirs 0"
+fi
+
 json_escape() {
 	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t'
 }
@@ -53,9 +72,9 @@ json_escape() {
 # We bind to the wan interface explicitly so PBR can't redirect us via AWG
 # even if local-origin routing rules ever change.
 HDR_FILE=/tmp/zapret-probe-hdr.$$
-out=$(curl --interface wan \
+out=$(curl --interface wan $RESOLVE_OPTS \
 	--connect-timeout "$CT" --max-time "$MAX" \
-	-sL -D "$HDR_FILE" -o /dev/null \
+	$REDIR_OPTS -D "$HDR_FILE" -o /dev/null \
 	-w '%{http_code}\t%{time_total}\t%{num_redirects}\n' \
 	"$URL" 2>&1)
 status=$(printf '%s' "$out" | awk -F'\t' '{print $1}')
@@ -101,9 +120,9 @@ fi
 body_signal=""
 case "$status" in
 	403|451|418|429|503)
-		body=$(curl --interface wan \
+		body=$(curl --interface wan $RESOLVE_OPTS \
 			--connect-timeout "$CT" --max-time "$MAX" \
-			-sL "$URL" 2>/dev/null | head -c 16384 | tr '[:upper:]' '[:lower:]')
+			$REDIR_OPTS "$URL" 2>/dev/null | head -c 16384 | tr '[:upper:]' '[:lower:]')
 		# Common phrases used by CDN / region-block / VPN-detect pages.
 		# CF "Access denied", OpenAI "Country/region not supported", "VPN".
 		# Tight phrases only -- a bare "vpn" substring would false-positive
