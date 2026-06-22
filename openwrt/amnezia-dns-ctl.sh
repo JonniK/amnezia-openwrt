@@ -68,7 +68,10 @@ cmd_enable() {
   _has_bin || { echo "install stubby + https-dns-proxy first" >&2; return 1; }
   uci set amnezia.config.dot_enabled=1; uci commit amnezia
   cmd_apply || { cmd_disable; return 1; }
-  if _verify_encrypted; then return 0; fi    # verify runs OUTSIDE the lock (apply released it)
+  if _verify_encrypted; then
+    "$AMNEZIA_DNS_INIT" start 2>/dev/null || true   # launch the procd watchdog (was only started at boot)
+    return 0
+  fi
   amz_log "dns: encrypted verify failed -> auto-revert"; cmd_disable; return 1
 }
 

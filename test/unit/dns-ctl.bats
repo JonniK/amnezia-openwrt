@@ -154,6 +154,15 @@ setup() {
   grep -q "nslookup -timeout=1" "$STUB_LOG"
 }
 
+@test "enable: starts the procd watchdog after successful apply+verify (HIGH)" {
+  # After enable succeeds, the watchdog init must be started (not just applied).
+  # Without this, encrypted-DNS is live but the watchdog is NOT running — if both
+  # tiers fail later nothing gates the router to plaintext until reboot.
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' enable"
+  [ "$status" -eq 0 ]
+  grep -q "amnezia-dns start" "$STUB_LOG"
+}
+
 @test "init: applies + launches watchdog only when enabled; hotplug keys on firewall reload" {
   INIT="$HARNESS_DIR/../openwrt/amnezia-dns.init"
   HP="$HARNESS_DIR/../openwrt/99-amnezia-dns.hotplug"
