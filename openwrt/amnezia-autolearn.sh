@@ -61,14 +61,14 @@ _al_record() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_d" "$_v" "$_cnt" "$_clients" "$_first" "$_ts" "$_reason" >> "$_tmp"
   mv "$_tmp" "$CAND"
   [ "$_cnt" -ge "$_thresh" ] || return 1
-  grep -qx "$_d" "$AUTO_LIST" 2>/dev/null && return 1   # already present
+  grep -Fqx "$_d" "$AUTO_LIST" 2>/dev/null && return 1   # already present
   # Size cap with LRU eviction (never evicts force-tunnel.list/manual entries).
   _cap=$(_uci amnezia.config.autolearn_max_entries); _cap=${_cap:-500}
   _count=$(awk 'END{print NR}' "$AUTO_LIST" 2>/dev/null); _count=${_count:-0}
   if [ "$_count" -ge "$_cap" ] 2>/dev/null; then
     _victim=$(awk -F'\t' 'NR==FNR{auto[$0]=1; next} ($1 in auto){print $6"\t"$1}' \
                 "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
-    [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
+    [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
   fi
   printf '%s\n' "$_d" >> "$AUTO_LIST"
   return 0
@@ -88,7 +88,7 @@ _al_revalidate() {
     [ -n "$_pin" ] || continue
     _v=$(zapret-probe "$_d" "$_pin" | grep -o '"verdict":"[^"]*"' | sed 's/.*:"//;s/"//')
     if [ "$_v" = direct_ok ]; then
-      _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_d" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"
+      _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_d" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"
       _changed_local=1
     else
       # refresh last_probe so we don't re-probe every pass
@@ -162,7 +162,7 @@ while read -r _dom _ip; do
   case "$_dom" in *.ru) continue ;; esac
   al_name_is_probeable "$_dom" || continue
   al_deny_match "$_dom" "$DENY" && continue
-  grep -qx "$_dom" "$AUTO_LIST" 2>/dev/null && continue
+  grep -Fqx "$_dom" "$AUTO_LIST" 2>/dev/null && continue
   printf '%s\t%s\n' "$_dom" "$_ip" >> "$_cand_tmp"
 done < "${_cand_tmp}.raw"
 rm -f "${_cand_tmp}.raw"

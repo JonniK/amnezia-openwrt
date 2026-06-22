@@ -10,7 +10,7 @@ AL_LOCK="${AL_LOCK:-/var/lock/amnezia-autolearn.lock}"
 AMNEZIA_FORCE_LOAD="${AMNEZIA_FORCE_LOAD:-amnezia-force-load}"
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 
-_je() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t'; }
+_je() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t' | tr -d '\000-\037'; }
 _reload() { "$AMNEZIA_FORCE_LOAD" >/dev/null 2>&1 || true; }
 _lock() { exec 9>"$AL_LOCK" 2>/dev/null || true; flock -n 9 2>/dev/null || true; }
 
@@ -37,21 +37,22 @@ case "$cmd" in
     ;;
   veto)
     _d="${2:?domain}"; _lock
-    _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_d" "$AUTO_LIST" 2>/dev/null > "$_t"; mv "$_t" "$AUTO_LIST"
-    grep -qx "$_d" "$DENY" 2>/dev/null || printf '%s\n' "$_d" >> "$DENY"
+    _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_d" "$AUTO_LIST" 2>/dev/null > "$_t"; mv "$_t" "$AUTO_LIST"
+    grep -Fqx "$_d" "$DENY" 2>/dev/null || printf '%s\n' "$_d" >> "$DENY"
     _reload
     ;;
   promote)
     _d="${2:?domain}"; _lock
-    grep -qx "$_d" "$MANUAL" 2>/dev/null || printf '%s\n' "$_d" >> "$MANUAL"
-    _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_d" "$AUTO_LIST" 2>/dev/null > "$_t"; mv "$_t" "$AUTO_LIST"
+    grep -Fqx "$_d" "$MANUAL" 2>/dev/null || printf '%s\n' "$_d" >> "$MANUAL"
+    _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_d" "$AUTO_LIST" 2>/dev/null > "$_t"; mv "$_t" "$AUTO_LIST"
     _reload
     ;;
   purge)
     _lock; : > "$AUTO_LIST"; : > "$CAND"; _reload
     ;;
   set-enabled)
-    _v="${2:?0|1}"; uci set "amnezia.config.autolearn_enabled=$_v"; uci commit amnezia
+    _v="${2:?0|1}"; case "$_v" in 0|1) ;; *) echo '{"error":"invalid"}'; exit 2 ;; esac
+    uci set "amnezia.config.autolearn_enabled=$_v"; uci commit amnezia
     ;;
   *) echo '{"error":"unknown command"}'; exit 2 ;;
 esac
