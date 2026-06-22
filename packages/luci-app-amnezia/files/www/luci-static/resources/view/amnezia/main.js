@@ -37,9 +37,6 @@ var autolearnToggleInFlight = false;
 var autolearnVetoInFlight = false;
 var autolearnPromoteInFlight = false;
 var autolearnPurgeInFlight = false;
-// "never-observed" boolean ref for the autolearn toggle. Project rule: null is
-// in-domain for string state so we use an explicit boolean instead of === null.
-var autolearnToggleHasObserved = false;
 
 // Signature of the most recently rendered candidate list. paintApply() skips
 // rebuilding the <select> when the signature is unchanged -- otherwise an
@@ -721,8 +718,8 @@ function parseAutolearnList(text) {
 }
 
 // Paint the autolearn status dot + toggle button. Reconciles optimistic toggle
-// against polled state using an explicit hasObserved boolean (project rule:
-// never use === null as a "never-observed" sentinel when null is in-domain).
+// against polled state via btn.dataset.busy: the handler sets busy=1 and owns
+// the button during flight; paintAutolearnStatus skips the button when busy is set.
 function paintAutolearnStatus(st, errMsg) {
 	var dot = document.getElementById('autolearn-dot');
 	var label = document.getElementById('autolearn-state-label');
@@ -740,9 +737,8 @@ function paintAutolearnStatus(st, errMsg) {
 	if (dot) dot.style.background = enabled ? '#3c763d' : '#888';
 	if (label) label.textContent = enabled ? _('ON') : _('OFF');
 	if (countEl) countEl.textContent = st.count ? (st.count + ' ' + _('entries')) : '';
-	// Reconcile: only sync the button text/class from live state once per load,
-	// and only when not mid-flight (the handler owns those bits during a click).
-	autolearnToggleHasObserved = true;
+	// Reconcile: sync button text/class from live state only when not mid-flight
+	// (dataset.busy is set by the handler for the duration of the RPC call).
 	if (btn && !btn.dataset.busy) {
 		btn.textContent = enabled ? _('Disable') : _('Enable');
 		btn.className = 'btn ' + (enabled ? 'cbi-button-negative' : 'cbi-button-positive');
