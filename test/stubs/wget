@@ -12,6 +12,7 @@ for _a in "$@"; do
     -O) _prev=O ;;
     -qO) _prev=O ;;
     -sLo) _prev=O ;;
+    -o) _prev=O ;;
     *)
       if [ "$_prev" = O ]; then
         _outfile="$_a"; _prev=""
