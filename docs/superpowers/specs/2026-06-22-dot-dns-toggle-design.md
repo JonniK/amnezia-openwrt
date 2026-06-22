@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-22
 **Branch:** `feat/autolearn-bypass` (DNS work may move to its own `feat/dot-dns` branch at plan time)
-**Status:** approved (brainstorm) → design-review, 3 cycles. C1: 3 C + 9 H (leak-free chain rework). C2: 2 H (concurrency lock + flap hysteresis; DoH hostname+bootstrap cert fix). C3: 3 H about the C2 fixes themselves — lock scope (mutation-only, verify outside lock), lock fd (distinct fd vs force-load's fd 9), two-resolver-IP pinning + DoH doc-consistency — all resolved here. Pending: cycle-4 re-converge → writing-plans.
+**Status:** approved (brainstorm) → design-review, 3 cycles. C1: 3 C + 9 H (leak-free chain rework). C2: 2 H (concurrency lock + flap hysteresis; DoH hostname+bootstrap cert fix). C3: 3 H about the C2 fixes themselves — lock scope (mutation-only, verify outside lock), lock fd (distinct fd vs force-load's fd 9), two-resolver-IP pinning + DoH doc-consistency — all resolved. **Cycle 4: 0 C / 0 H — CONVERGED.** Ready for writing-plans.
 
 ## Goal
 
