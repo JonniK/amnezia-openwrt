@@ -6,6 +6,9 @@ setup() {
   export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   export UCI_GET_amnezia_config_dns_provider=quad9
   export UCI_GET_amnezia_config_dot_enabled=1
+  # L7: resolv.auto fixture for plaintext-fallback tests
+  printf 'nameserver 109.195.112.1\n' > "$BATS_TEST_TMPDIR/resolv.auto"
+  export AMNEZIA_RESOLV_AUTO="$BATS_TEST_TMPDIR/resolv.auto"
 }
 
 @test "apply (binaries present) renders both daemons, encrypted dnsmasq, ip rule, reload" {
@@ -17,14 +20,20 @@ setup() {
   grep -q "dnsmasq restart" "$STUB_LOG"
 }
 
-@test "apply with missing binary -> plain + active_tier=plaintext, never wedges" {
+@test "apply with missing binary -> plain + active_tier=plaintext, never wedges (L7)" {
+  # L7: also assert that the plaintext provider IP from resolv.auto is added
+  # (not just the tier label) so the missing-binary path is fully exercised.
   run sh -c "AMNEZIA_HAS_BIN=0 AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' apply"
   [ "$status" -eq 0 ]
   run grep -q "stubby restart" "$STUB_LOG"; [ "$status" -ne 0 ]
   grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"
+  grep -q "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
 }
 
-@test "enable verifies the encrypted listeners (not #53) and persists enabled" {
+@test "enable applies encrypted upstreams and persists dot_enabled=1 (L6)" {
+  # L6: renamed from "verifies the encrypted listeners (not #53)" — this test
+  # asserts apply-side config (encrypted upstreams wired + dot_enabled persisted),
+  # not the verify probe path (covered by auto-revert + set-provider-rollback tests).
   run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' enable"
   [ "$status" -eq 0 ]
   grep -q "127.0.0.1#5453" "$STUB_LOG"
@@ -123,6 +132,26 @@ setup() {
   COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
   run sh -c ". '$COMMON'; . '$LIB'; dns_profile custom"
   [ "$status" -ne 0 ]
+}
+
+@test "status: when disabled, reports enabled:false encrypted:false healthy:false without probing (L5)" {
+  export UCI_GET_amnezia_config_dot_enabled=0
+  run sh -c "sh '$CTL' status"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"enabled":false'
+  echo "$output" | grep -q '"encrypted":false'
+  echo "$output" | grep -q '"healthy":false'
+  # L5: no nslookup probe when disabled
+  run grep -q "nslookup" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "status: probe uses 1s timeout (L1/L4)" {
+  # When dot_enabled=1, _probe_listener must use -timeout=1 not -timeout=3.
+  # Use the real nslookup stub (no AMNEZIA_VERIFY_DOT) so the timeout arg is logged.
+  run sh -c "sh '$CTL' status"
+  [ "$status" -eq 0 ]
+  # The nslookup stub logs 'nslookup -timeout=1 ...' when the timeout is 1s.
+  grep -q "nslookup -timeout=1" "$STUB_LOG"
 }
 
 @test "init: applies + launches watchdog only when enabled; hotplug keys on firewall reload" {

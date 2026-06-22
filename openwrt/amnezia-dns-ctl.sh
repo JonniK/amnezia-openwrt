@@ -37,7 +37,8 @@ _probe_listener() {                    # $1 = 127.0.0.1#<port>
     *"#$DOT_PORT") [ -n "${AMNEZIA_VERIFY_DOT:-}" ] && { [ "$AMNEZIA_VERIFY_DOT" = pass ]; return; } ;;
     *"#$DOH_PORT") [ -n "${AMNEZIA_VERIFY_DOH:-}" ] && { [ "$AMNEZIA_VERIFY_DOH" = pass ]; return; } ;;
   esac
-  "$AMNEZIA_NSLOOKUP" -timeout=3 openwrt.org "$1" >/dev/null 2>&1
+  # L1/L4: honor _PROBE_TIMEOUT override (status path sets 1s; default 3s).
+  "$AMNEZIA_NSLOOKUP" "-timeout=${_PROBE_TIMEOUT:-3}" openwrt.org "$1" >/dev/null 2>&1
 }
 _verify_encrypted() { _probe_listener "127.0.0.1#$DOT_PORT" || _probe_listener "127.0.0.1#$DOH_PORT"; }
 
@@ -148,9 +149,16 @@ cmd_watchdog() {
 cmd_status() {
   _en=$(uci -q get amnezia.config.dot_enabled || echo 0)
   _pr=$(uci -q get amnezia.config.dns_provider || echo quad9)
-  _tier=$(uci -q get amnezia.config.dns_active_tier || echo dot)
+  _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo off)
+  # L5: short-circuit when disabled — no probe needed, report honestly.
+  if [ "$_en" != 1 ]; then
+    printf '{"enabled":false,"provider":"%s","active_tier":"%s","encrypted":false,"healthy":false}\n' \
+      "$_pr" "$_tier"
+    return 0
+  fi
   _enc=false; case "$_tier" in dot|doh) _enc=true ;; esac
-  _hl=false; _verify_encrypted && _hl=true
+  # L1/L4: status path uses 1s probe timeout to keep status calls snappy.
+  _hl=false; _PROBE_TIMEOUT=1 _verify_encrypted && _hl=true
   printf '{"enabled":%s,"provider":"%s","active_tier":"%s","encrypted":%s,"healthy":%s}\n' \
     "$([ "$_en" = 1 ] && echo true || echo false)" "$_pr" "$_tier" "$_enc" "$_hl"
 }
