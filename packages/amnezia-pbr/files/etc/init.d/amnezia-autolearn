@@ -6,6 +6,7 @@ USE_PROCD=0
 AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
 AL_CRON="${AL_CRON:-/etc/crontabs/root}"
 AL_LOG="/tmp/dnsmasq-queries.log"
+AL_RCD="${AL_RCD:-/etc/rc.d}"
 
 _interval() { uci -q get amnezia.config.autolearn_interval_min 2>/dev/null || echo 30; }
 
@@ -35,6 +36,8 @@ enable() {
   grep -q 'amnezia-autolearn' "$AL_CRON" || \
     printf '*/%s * * * * /usr/sbin/amnezia-autolearn\n' "$(_interval)" >> "$AL_CRON"
   /etc/init.d/cron reload >/dev/null 2>&1 || true
+  # Create boot symlink (mirrors what rc.common's built-in enable would do).
+  ln -sf ../init.d/amnezia-autolearn "${AL_RCD}/S${START}amnezia-autolearn" 2>/dev/null || true
 }
 
 disable() {
@@ -55,6 +58,8 @@ disable() {
     /etc/init.d/cron reload >/dev/null 2>&1 || true
   fi
   rm -f "$AL_LOG"
+  # Remove boot symlink.
+  rm -f "${AL_RCD}/S${START}amnezia-autolearn" 2>/dev/null || true
 }
 
 start() { [ "$(uci -q get amnezia.config.autolearn_enabled)" = 1 ] && enable || true; }
