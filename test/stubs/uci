@@ -10,6 +10,21 @@ case "$_verb" in
   del_list) exit 0 ;;
   add_list) exit 0 ;;
 esac
+
+# UCI_GET_* dynamic resolution: maps "uci -q get a.b.c" -> env var UCI_GET_a_b_c.
+# Checked BEFORE hardcoded arms so tests can override any key.
+if [ "$1" = get ]; then
+  _envk="UCI_GET_$(printf '%s' "$2" | tr '.-' '__')"
+  eval _envv="\${$_envk+set}"
+  if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+fi
+
+# UCI_SHOW_network dynamic resolution: emits the env var content when set.
+# Checked BEFORE the hardcoded "show network" arm.
+if [ "$1" = show ] && [ "$2" = network ] && [ -n "${UCI_SHOW_network:-}" ]; then
+  printf '%s\n' "$UCI_SHOW_network"; exit 0
+fi
+
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;
