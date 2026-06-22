@@ -23,3 +23,34 @@ setup() {
   run grep -q "stubby restart" "$STUB_LOG"; [ "$status" -ne 0 ]
   grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"
 }
+
+@test "enable verifies the encrypted listeners (not #53) and persists enabled" {
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' enable"
+  [ "$status" -eq 0 ]
+  grep -q "127.0.0.1#5453" "$STUB_LOG"
+  grep -q "set amnezia.config.dot_enabled=1" "$STUB_LOG"
+}
+
+@test "enable auto-reverts to plain when BOTH encrypted tiers fail verify" {
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' enable"
+  [ "$status" -ne 0 ]
+  grep -q "set amnezia.config.dot_enabled=0" "$STUB_LOG"
+  grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"
+}
+
+@test "disable restores resolvfile, clears the ip rule, stops the watchdog" {
+  run sh -c "AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"
+  grep -q "rule del to 9.9.9.9 lookup 100 pref 30900" "$STUB_LOG"
+  grep -q "amnezia-dns stop" "$STUB_LOG"
+}
+
+@test "set-provider: new fails verify -> rolls back to previous provider (UCI), non-zero exit" {
+  export UCI_GET_amnezia_config_dns_provider=quad9
+  # adguard verify fails; quad9 (prev) passes
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' set-provider adguard"
+  [ "$status" -ne 0 ]
+  grep -q "set amnezia.config.dns_provider_prev=quad9" "$STUB_LOG"
+  grep -q "set amnezia.config.dns_provider=quad9" "$STUB_LOG"   # rolled back
+}
