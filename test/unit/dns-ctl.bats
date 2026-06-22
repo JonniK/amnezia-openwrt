@@ -197,3 +197,29 @@ setup() {
   grep -q 'ACTION.*=.*reload' "$HP" || grep -q '"$ACTION" = reload' "$HP"
   grep -q "amnezia-dns-ctl apply" "$HP"
 }
+
+@test "status: disabled reports active_tier:off regardless of stale UCI value (LOW)" {
+  # When dot_enabled=0, cmd_status must force active_tier=off even if UCI
+  # still holds a stale value (e.g. 'dot' from a previous enabled run).
+  export UCI_GET_amnezia_config_dot_enabled=0
+  export UCI_GET_amnezia_config_dns_active_tier=dot
+  run sh -c "sh '$CTL' status"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"active_tier":"off"'
+}
+
+@test "init: stop_service sets AMNEZIA_DNS_STOPPING=1 sentinel (H1 guard)" {
+  # Static assertion: stop_service must set AMNEZIA_DNS_STOPPING=1 before
+  # calling cmd_disable to prevent infinite recursion (H1).
+  INIT="$HARNESS_DIR/../openwrt/amnezia-dns.init"
+  grep -q "AMNEZIA_DNS_STOPPING=1" "$INIT"
+}
+
+@test "_enter_plain: does not mark plaintext tier when dnsmasq reload fails (LOW)" {
+  # Gate tier/timestamp commit on reload success.  When dnsmasq --test fails
+  # (AMNEZIA_DNSMASQ_FAIL=1 in stub), _enter_plain must NOT set dns_active_tier
+  # or dns_plain_ts (the set, not the get that cmd_watchdog always does).
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_DNS_WD_N=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNSMASQ_FAIL=1 sh '$CTL' watchdog"
+  run grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"; [ "$status" -ne 0 ]
+  run grep -q "set amnezia.config.dns_plain_ts" "$STUB_LOG"; [ "$status" -ne 0 ]
+}

@@ -97,7 +97,10 @@ _now() { [ -n "${AMNEZIA_NOW:-}" ] && { echo "$AMNEZIA_NOW"; return; }; date +%s
 _set_tier() { uci set "amnezia.config.dns_active_tier=$1"; uci commit amnezia; }
 
 _enter_plain() {
-  dnsmasq_lock; dns_dnsmasq_add_plain; dns_dnsmasq_reload || true; dnsmasq_unlock
+  dnsmasq_lock; dns_dnsmasq_add_plain
+  if dns_dnsmasq_reload; then _r=0; else _r=1; fi
+  dnsmasq_unlock
+  [ "$_r" = 0 ] || { amz_log "dns: plaintext reload failed; not marking plaintext tier"; return 1; }
   _set_tier plaintext
   # M4: persist entry timestamp so dwell survives procd respawn.
   uci set "amnezia.config.dns_plain_ts=$(_now)"; uci commit amnezia
@@ -155,9 +158,10 @@ cmd_status() {
   _pr=$(uci -q get amnezia.config.dns_provider || echo quad9)
   _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo off)
   # L5: short-circuit when disabled — no probe needed, report honestly.
+  # Force active_tier=off regardless of stale UCI value (disabled status fix).
   if [ "$_en" != 1 ]; then
-    printf '{"enabled":false,"provider":"%s","active_tier":"%s","encrypted":false,"healthy":false}\n' \
-      "$_pr" "$_tier"
+    printf '{"enabled":false,"provider":"%s","active_tier":"off","encrypted":false,"healthy":false}\n' \
+      "$_pr"
     return 0
   fi
   _enc=false; case "$_tier" in dot|doh) _enc=true ;; esac
