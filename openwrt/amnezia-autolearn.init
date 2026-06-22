@@ -1,0 +1,68 @@
+#!/bin/sh /etc/rc.common
+# amnezia-autolearn: enable/disable reversible dnsmasq query logging + cron.
+# shellcheck disable=SC2034
+START=97
+USE_PROCD=0
+AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
+AL_CRON="${AL_CRON:-/etc/crontabs/root}"
+AL_LOG="/tmp/dnsmasq-queries.log"
+
+_interval() { uci -q get amnezia.config.autolearn_interval_min 2>/dev/null || echo 30; }
+
+# Set a dhcp option only if it differs; returns 0 when it changed (and called
+# `uci set`), 1 when it was already the right value. Lets the caller restart
+# dnsmasq ONLY on a real change (avoids a boot restart storm).
+_set_if_diff() {  # <uci-path> <value>
+  _cur=$(uci -q get "$1" 2>/dev/null)
+  [ "$_cur" = "$2" ] && return 1
+  uci set "$1=$2"; return 0
+}
+
+enable() {
+  _ch=0
+  _set_if_diff dhcp.@dnsmasq[0].logqueries 1 && _ch=1
+  _set_if_diff "dhcp.@dnsmasq[0].logfacility" "$AL_LOG" && _ch=1
+  _set_if_diff dhcp.@dnsmasq[0].log-async 5 && _ch=1
+  if [ "$_ch" = 1 ]; then
+    uci commit dhcp
+    "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
+    # Fail-closed visibility: if the build rejected log-async/logqueries, the
+    # option won't read back — warn (no harvest is internet-safe, just inert).
+    [ "$(uci -q get dhcp.@dnsmasq[0].logqueries)" = 1 ] || \
+      logger -t amnezia-autolearn "WARNING: dnsmasq did not accept logqueries; harvesting inert"
+  fi
+  touch "$AL_CRON"
+  grep -q 'amnezia-autolearn' "$AL_CRON" || \
+    printf '*/%s * * * * /usr/sbin/amnezia-autolearn\n' "$(_interval)" >> "$AL_CRON"
+  /etc/init.d/cron reload >/dev/null 2>&1 || true
+}
+
+disable() {
+  # Unconditional + idempotent (uci -q delete is a no-op if absent). disable is
+  # a deliberate, infrequent action, so an unconditional dnsmasq restart here is
+  # fine (the boot-storm concern is the enable/start path, guarded above).
+  uci -q delete dhcp.@dnsmasq[0].logqueries 2>/dev/null
+  uci -q delete dhcp.@dnsmasq[0].logfacility 2>/dev/null
+  uci -q delete dhcp.@dnsmasq[0].log-async 2>/dev/null
+  uci commit dhcp
+  "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
+  if [ -f "$AL_CRON" ] && grep -q 'amnezia-autolearn' "$AL_CRON"; then
+    _t=$(mktemp 2>/dev/null || echo "$AL_CRON.$$"); grep -v 'amnezia-autolearn' "$AL_CRON" > "$_t"; mv "$_t" "$AL_CRON"
+    /etc/init.d/cron reload >/dev/null 2>&1 || true
+  fi
+  rm -f "$AL_LOG"
+}
+
+start() { [ "$(uci -q get amnezia.config.autolearn_enabled)" = 1 ] && enable || true; }
+stop() { disable; }
+
+# Test-env dispatch: when run directly as `sh "$INIT" <cmd>` (bats, dev), the
+# #!/bin/sh shebang is honoured but rc.common never sources or dispatches us.
+# On-device, the init system invokes `/etc/init.d/amnezia-autolearn <cmd>` via
+# the shebang `/bin/sh /etc/rc.common` — rc.common sources the file and then
+# calls the function named by $1.  We detect the direct-run case by the absence
+# of the `boot` function that rc.common defines before sourcing us; if it is
+# absent we are running standalone and must dispatch ourselves.
+if ! type boot >/dev/null 2>&1; then
+  case "${1:-}" in enable) enable ;; disable) disable ;; start) start ;; stop) stop ;; esac
+fi
