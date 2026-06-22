@@ -73,6 +73,26 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
 }
 
+@test "watchdog: _enter_plain failure leaves no latch, retries on next tick (HIGH)" {
+  # Bug: the watchdog unconditionally latched _tier=plaintext after calling
+  # _enter_plain, even when it returned 1 (dnsmasq reload failed). Once latched,
+  # the re-entry guard (_tier != plaintext) became permanently false, preventing
+  # any retry — DNS stayed hard-down forever.
+  # Fix: only latch on success (if _enter_plain; then _tier=plaintext; ...; fi).
+  # With AMNEZIA_DNSMASQ_FAIL=1, TICKS=2, N=1:
+  # - tick 1: both down, _fail=1 >= N=1, _enter_plain called but fails -> no latch
+  # - tick 2: both still down, _fail=2 >= N=1, _enter_plain called again (retry)
+  # Assert: dns_active_tier=plaintext is never set (no latch)
+  # Assert: dnsmasq --test is attempted TWICE (once per tick, showing retry)
+  run sh -c "AMNEZIA_DNS_WD_TICKS=2 AMNEZIA_DNS_WD_N=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNSMASQ_FAIL=1 sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # No plaintext latch
+  run grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # _enter_plain retried: dnsmasq called at least twice (--test invoked per tick)
+  _dnsmasq_count=$(grep -c "dnsmasq --test" "$STUB_LOG" 2>/dev/null || echo 0)
+  [ "$_dnsmasq_count" -ge 2 ]
+}
+
 @test "status emits JSON and never calls apply" {
   run sh -c "AMNEZIA_VERIFY_DOT=pass sh '$CTL' status"
   [ "$status" -eq 0 ]

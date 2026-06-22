@@ -143,7 +143,12 @@ cmd_watchdog() {
       fi
     else
       _ok=0; _fail=$((_fail + 1))
-      if [ "$_tier" != plaintext ] && [ "$_fail" -ge "$_n" ]; then _enter_plain; _tier=plaintext; _entered=$(_now); fi
+      # HIGH: only latch plaintext state when _enter_plain succeeds (dnsmasq reload
+      # passed). On failure, _tier stays unchanged so _fail keeps accumulating and
+      # _enter_plain is retried on the next tick instead of getting stuck hard-down.
+      if [ "$_tier" != plaintext ] && [ "$_fail" -ge "$_n" ]; then
+        if _enter_plain; then _tier=plaintext; _entered=$(_now); fi
+      fi
     fi
     # H2: AMNEZIA_DNS_WD_ONCE=1 is a backward-compatible alias for TICKS=1.
     # AMNEZIA_DNS_WD_TICKS=N runs exactly N iterations then exits (no sleep when
