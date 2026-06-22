@@ -186,3 +186,33 @@ setup() {
   grep -qx 'block.com' "$AL_DIR/force.d/auto.list"
   grep -q 'amnezia-force-load' "$STUB_LOG"
 }
+
+# Regression guard for the BusyBox awk missing-file abort that wiped
+# candidates.tsv each pass (count never exceeded 1, nothing was ever learned).
+# BusyBox awk aborts when a named input file does not exist; BSD/macOS awk
+# tolerates it — so this test MAY pass on macOS even without the fix. It
+# exists to (a) document the regression and (b) prevent removal of the
+# ensure-exists guard lines in amnezia-autolearn.sh.
+#
+# Critically: this test does NOT pre-create auto.list or candidates.tsv so
+# that the ensure-exists guard is the only thing preventing awk from aborting
+# and wiping candidates.tsv on pass 1.
+@test "busybox-awk-regression: count accumulates across passes without pre-created auto.list" {
+  export ZP_VERDICT_geo2_com="direct_geoblocked"; export NSLOOKUP_ADDR="93.184.216.34"
+  # Neither auto.list nor candidates.tsv exists before pass 1 — the ensure-exists
+  # guard must create them so awk never aborts on a missing file argument.
+  rm -f "$AL_DIR/force.d/auto.list" "$AL_DIR/autolearn/candidates.tsv"
+  # Pass 1: append fresh query lines for two distinct clients.
+  printf 'query[A] geo2.com from 192.168.1.2\nquery[A] geo2.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # After pass 1: geo2.com must NOT be in auto.list yet (count=1, threshold=2).
+  run sh -c "grep -qx 'geo2.com' '$AL_DIR/force.d/auto.list' 2>/dev/null"; [ "$status" -ne 0 ]
+  # candidates.tsv must be non-empty (count persisted, not wiped by awk abort).
+  [ -s "$AL_DIR/autolearn/candidates.tsv" ]
+  # Pass 2: append more fresh bytes so the offset advances and geo2.com is re-harvested.
+  printf 'query[A] geo2.com from 192.168.1.2\nquery[A] geo2.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # After pass 2: count reaches 2 -> geo2.com must be in auto.list.
+  grep -qx 'geo2.com' "$AL_DIR/force.d/auto.list"
+  grep -q 'amnezia-force-load' "$STUB_LOG"
+}

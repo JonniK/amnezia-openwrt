@@ -46,6 +46,12 @@ _dbg "gate: all_down=$_alldown"
 _dbg "gate: PASSED"
 
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
+# BusyBox awk aborts on a missing input file (BSD awk tolerates it). The prune
+# and LRU steps read auto.list + candidates.tsv via awk before either may exist,
+# which silently wiped candidates.tsv each pass on the router. Guarantee both
+# exist (empty) up front.
+[ -e "$AUTO_LIST" ] || : > "$AUTO_LIST"
+[ -e "$CAND" ] || : > "$CAND"
 
 # --- Lock (portable mkdir mutex; BusyBox flock fd-form is unreliable) ---------
 # Self-heal a stale lock left by a crashed pass (> 30 min old; one pass is
@@ -92,7 +98,7 @@ _al_record() {
   _cap=$(_uci amnezia.config.autolearn_max_entries); _cap=${_cap:-500}
   _count=$(awk 'END{print NR}' "$AUTO_LIST" 2>/dev/null); _count=${_count:-0}
   if [ "$_count" -ge "$_cap" ] 2>/dev/null; then
-    _victim=$(awk -F'\t' 'NR==FNR{auto[$0]=1; next} ($1 in auto){print $6"\t"$1}' \
+    _victim=$(awk -F'\t' -v al="$AUTO_LIST" 'FILENAME==al{auto[$0]=1; next} ($1 in auto){print $6"\t"$1}' \
                 "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
     [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
   fi
@@ -134,7 +140,7 @@ _al_prune_candidates() {
   _days=$(_uci amnezia.config.autolearn_candidate_retention_days); _days=${_days:-30}
   _cut=$(( $(_now) - _days*86400 ))
   _t=$(mktemp 2>/dev/null || echo "$CAND.$$")
-  awk -F'\t' -v cut="$_cut" 'NR==FNR{auto[$0]=1; next}
+  awk -F'\t' -v al="$AUTO_LIST" -v cut="$_cut" 'FILENAME==al{auto[$0]=1; next}
     ($1 in auto) || ($6+0 >= cut) {print}' "$AUTO_LIST" "$CAND" > "$_t" && mv "$_t" "$CAND"
 }
 
