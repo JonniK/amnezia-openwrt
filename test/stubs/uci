@@ -64,6 +64,12 @@ case "$1 $2" in
       echo "firewall.vpn.network=${_line}"
     fi ;;
   get*)
+    # Generic UCI_GET_<normalized_key> env lookup (normalized via tr '.-' '__').
+    # Allows tests to export UCI_GET_amnezia_config_foo='bar' and have
+    # `uci -q get amnezia.config.foo` return 'bar'.
+    _envk="UCI_GET_$(printf '%s' "$2" | tr '.-' '__')"
+    eval _envv="\${$_envk+set}"
+    if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
     # Dynamic uci -q get for force_source attributes: serve from UCI_FAKE_SOURCES.
     # Pattern: "get amnezia.<name>.<opt>" where <name> appears in UCI_FAKE_SOURCES.
     _key="$2"
