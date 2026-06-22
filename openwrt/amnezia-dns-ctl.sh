@@ -100,7 +100,7 @@ _exit_plain() {
 
 cmd_watchdog() {
   _n=${AMNEZIA_DNS_WD_N:-3}; _m=${AMNEZIA_DNS_WD_M:-2}; _dwell=${AMNEZIA_DNS_WD_DWELL:-120}
-  _fail=0; _ok=0
+  _fail=0; _ok=0; _ticks_done=0
   _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo "")
   # M4: load persisted entry timestamp (survives procd respawn while in plaintext).
   _entered=$(uci -q get amnezia.config.dns_plain_ts 2>/dev/null || echo 0)
@@ -126,8 +126,16 @@ cmd_watchdog() {
       _ok=0; _fail=$((_fail + 1))
       if [ "$_tier" != plaintext ] && [ "$_fail" -ge "$_n" ]; then _enter_plain; _tier=plaintext; _entered=$(_now); fi
     fi
+    # H2: AMNEZIA_DNS_WD_ONCE=1 is a backward-compatible alias for TICKS=1.
+    # AMNEZIA_DNS_WD_TICKS=N runs exactly N iterations then exits (no sleep when
+    # TICKS is active so tests never block on the 20s interval).
     [ -n "${AMNEZIA_DNS_WD_ONCE:-}" ] && break
-    sleep "${AMNEZIA_DNS_WD_INTERVAL:-20}"
+    if [ -n "${AMNEZIA_DNS_WD_TICKS:-}" ]; then
+      _ticks_done=$((_ticks_done + 1))
+      [ "$_ticks_done" -ge "${AMNEZIA_DNS_WD_TICKS}" ] && break
+    else
+      sleep "${AMNEZIA_DNS_WD_INTERVAL:-20}"
+    fi
   done
   return 0
 }

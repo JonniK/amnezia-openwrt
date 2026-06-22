@@ -39,6 +39,40 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
 }
 
+@test "N-threshold: 2 ticks with N=3 does NOT enter plaintext (accumulation not reached)" {
+  # H2: drop the _fail >= _n guard and this test breaks (tier would enter plain after 1 fail).
+  run sh -c "AMNEZIA_DNS_WD_TICKS=2 AMNEZIA_DNS_WD_N=3 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  run grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "N-threshold: 3 ticks with N=3 DOES enter plaintext (threshold reached)" {
+  run sh -c "AMNEZIA_DNS_WD_TICKS=3 AMNEZIA_DNS_WD_N=3 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"
+}
+
+@test "dwell hold: tier=plaintext, ts=1000, now=1050 (50s < 120s) — plaintext NOT exited" {
+  # H2: mutate dwell guard to 'true' and this test breaks (would exit plain despite not elapsed).
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
+  run sh -c "AMNEZIA_DNS_WD_TICKS=1 AMNEZIA_DNS_WD_M=1 AMNEZIA_NOW=1050 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # del_list of provider IP = exit-plain signal; must NOT be present
+  run grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # tier must remain plaintext (no dns_active_tier=dot logged)
+  run grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "dwell elapsed: tier=plaintext, ts=1000, now=1200 (200s >= 120s) — plaintext IS exited" {
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
+  run sh -c "AMNEZIA_DNS_WD_TICKS=1 AMNEZIA_DNS_WD_M=1 AMNEZIA_NOW=1200 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
+  grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"
+}
+
 @test "status emits JSON and never calls apply" {
   run sh -c "AMNEZIA_VERIFY_DOT=pass sh '$CTL' status"
   [ "$status" -eq 0 ]
