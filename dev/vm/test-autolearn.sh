@@ -256,10 +256,12 @@ log "===== STEP 2: run amnezia-autolearn twice (geoblock threshold=2) ====="
 
 # First run: geoblock domain reaches candidates.tsv with count=1 (below threshold 2).
 log "first run of amnezia-autolearn (count will reach 1 for geoblock domain)"
+log "--- amnezia-autolearn run 1 stdout+stderr ---"
 # shellcheck disable=SC2086
 ssh $VM_SSH_OPTS "root@$SSH_HOST" \
   "AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
-  >/dev/null 2>&1 || true
+  2>&1 || true
+log "--- end run 1 ---"
 
 _auto_after1=$(vm_run "cat /etc/amnezia/force.d/auto.list 2>/dev/null || true" 2>/dev/null || true)
 log "auto.list after run 1: '$(echo "$_auto_after1" | tr '\n' '|')'"
@@ -271,15 +273,27 @@ else
   assert_pass "T2-1" "geoblock domain NOT in auto.list after run 1 (count=1, below threshold 2 -- correct)"
 fi
 
-# Second run: same log (offset was saved to end, so reset it to 0 to re-harvest same lines).
-# This simulates the next cron tick where the same pair appears again.
-# (In production, new query lines accumulate; in the test we re-read from offset 0.)
-vm_run "rm -f /etc/amnezia/autolearn/.dnsmasq-log.offset 2>/dev/null || true"
+# Second run: APPEND the same query-log lines to the file (mirror the unit-test pattern).
+# Run 1 advanced the byte-offset to EOF, so run 2 reads nothing without new data.
+# Appending the same lines ensures the new offset range contains the geoblock domain again;
+# the incremented count reaches the threshold of 2 and the domain is promoted to auto.list.
+# This mirrors what production does: new query lines accumulate at the tail between cron ticks.
+log "appending query-log lines before second run (so domain is re-harvested at new offset)"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" \
+  "cat >> /tmp/dnsmasq-queries.log" <<QLOG_APPEND_EOF 2>/dev/null || true
+Jun 22 10:00:04 dnsmasq[1234]: query[A] ${GEOBLOCK_DOMAIN} from ${CLIENT_A}
+Jun 22 10:00:05 dnsmasq[1234]: query[A] ${GEOBLOCK_DOMAIN} from ${CLIENT_B}
+Jun 22 10:00:06 dnsmasq[1234]: query[A] ${INTERNAL_DOMAIN} from ${CLIENT_A}
+QLOG_APPEND_EOF
+
 log "second run of amnezia-autolearn (count will reach 2, geoblock domain promoted to auto.list)"
+log "--- amnezia-autolearn run 2 stdout+stderr ---"
 # shellcheck disable=SC2086
 ssh $VM_SSH_OPTS "root@$SSH_HOST" \
   "AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
-  >/dev/null 2>&1 || true
+  2>&1 || true
+log "--- end run 2 ---"
 
 log "Step 2 done. PASS=${ASSERT_PASS} FAIL=${ASSERT_FAIL}"
 
@@ -333,20 +347,18 @@ else
   assert_fail "T4-1" "amnezia_force4 nft set not found in inet fw4 -- fw4 may not be running"
 fi
 
-# T4-2: dnsmasq conf-dir contains an nftset directive for the geoblock domain.
-# amnezia-force-load chunks domain sets into /etc/amnezia/dnsmasq.d/*.conf files.
-_dnsmasq_d=$(vm_run "grep -r '${GEOBLOCK_DOMAIN}' /etc/amnezia/dnsmasq.d/ 2>/dev/null | head -3 || true" 2>/dev/null || true)
-if echo "$_dnsmasq_d" | grep -q "$GEOBLOCK_DOMAIN"; then
-  assert_pass "T4-2" "dnsmasq conf-dir contains nftset directive for geoblock domain"
+# T4-2: the geoblock domain must be resolvable to the nftset path, meaning
+# amnezia-force-load actually ingested auto.list and wrote the nftset directive.
+# Primary check: dnsmasq conf-dir (/etc/amnezia/dnsmasq.d/) contains an nftset
+# line for the geoblock domain (the chunked-conf-dir path used for large domain
+# sets, per the dnsmasq line-length cap rule).
+_dnsmasq_d=$(vm_run "grep -rl '${GEOBLOCK_DOMAIN}' /etc/amnezia/dnsmasq.d/ 2>/dev/null | head -3 || true" 2>/dev/null || true)
+_dnsmasq_match=$(vm_run "grep -r '${GEOBLOCK_DOMAIN}' /etc/amnezia/dnsmasq.d/ 2>/dev/null | head -3 || true" 2>/dev/null || true)
+log "T4-2 dnsmasq conf-dir grep: '$(echo "$_dnsmasq_match" | head -3 | tr '\n' '|')'"
+if echo "$_dnsmasq_match" | grep -q "$GEOBLOCK_DOMAIN"; then
+  assert_pass "T4-2" "dnsmasq conf-dir /etc/amnezia/dnsmasq.d/ contains nftset directive for geoblock domain (force-load wrote chunked conf)"
 else
-  # Fallback: check if force-load placed the domain in the UCI ipset or amnezia_force4 directly.
-  _uci_force=$(vm_run "uci show dhcp.amnezia_force 2>/dev/null || true" 2>/dev/null || true)
-  _force_list=$(vm_run "cat /etc/amnezia/force.d/*.list 2>/dev/null | grep '${GEOBLOCK_DOMAIN}' | head -1 || true" 2>/dev/null || true)
-  if echo "$_uci_force" | grep -q "amnezia_force4" || [ -n "$_force_list" ]; then
-    assert_pass "T4-2" "geoblock domain present in force list/UCI ipset (force-load ran, dnsmasq conf-dir may not be wired yet in this Tier-1 VM)"
-  else
-    assert_fail "T4-2" "geoblock domain NOT found in dnsmasq conf-dir, UCI ipset, or force.d lists -- force-load may not have run"
-  fi
+  assert_fail "T4-2" "geoblock domain '${GEOBLOCK_DOMAIN}' NOT found in /etc/amnezia/dnsmasq.d/ -- amnezia-force-load did not ingest auto.list into the dnsmasq conf-dir"
 fi
 
 log "Step 4 done. PASS=${ASSERT_PASS} FAIL=${ASSERT_FAIL}"

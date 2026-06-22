@@ -84,20 +84,24 @@ al_resolve_public() {
 al_querylog_pairs() {
   _f="$1"; _off="${2:-0}"
   [ -f "$_f" ] || return 0
-  # Strip leading/trailing whitespace (wc -c on some systems emits padded output).
-  _off=$(printf '%s' "$_off" | tr -d ' \t')
+  _off=$(printf '%s' "$_off" | tr -d ' \t\n')
   case "$_off" in *[!0-9]*|'') _off=0 ;; esac
-  _size=$(wc -c < "$_f" 2>/dev/null || echo 0)
+  _size=$(wc -c < "$_f" 2>/dev/null | tr -d ' \t\n'); _size=${_size:-0}
+  case "$_size" in *[!0-9]*|'') _size=0 ;; esac
   [ "$_off" -gt "$_size" ] 2>/dev/null && _off=0   # shrink/rotation guard
-  # tail -c +N is 1-based; read bytes after the offset. Far cheaper than
-  # `dd bs=1` (one syscall per byte) on a near-2MiB tmpfs log. The awk scans
-  # fields for one starting `query[` so it is robust to a `dnsmasq[pid]:`
-  # daemon-tag prefix; the client IP is the last field (`... from <ip>`).
-  tail -c "+$((_off + 1))" "$_f" 2>/dev/null \
-    | awk '
-        /query\[[A-Za-z]+\] [^ ]+ from [0-9]/ {
-          for (i=1;i<=NF;i++) if ($i ~ /^query\[/) { print $(i+1), $NF }
-        }'
+  # BusyBox tail has no `-c +N`; seek with dd block-skip instead (skip exactly
+  # _off bytes = one block of size _off, then read the remainder).
+  # When _off=0 use cat (dd bs=0 is invalid on BusyBox).
+  # The awk scans fields for one starting `query[` so it is robust to a
+  # `dnsmasq[pid]:` daemon-tag prefix; the client IP is the last field.
+  if [ "$_off" -gt 0 ]; then
+    dd if="$_f" bs="$_off" skip=1 2>/dev/null
+  else
+    cat "$_f" 2>/dev/null
+  fi | awk '
+      /query\[[A-Za-z]+\] [^ ]+ from [0-9]/ {
+        for (i=1;i<=NF;i++) if ($i ~ /^query\[/) { print $(i+1), $NF }
+      }'
 }
 
 # al_deny_match <domain> <denyfile>: exit 0 iff <domain> == an entry or a
