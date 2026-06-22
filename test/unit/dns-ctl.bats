@@ -154,6 +154,31 @@ setup() {
   grep -q "nslookup -timeout=1" "$STUB_LOG"
 }
 
+@test "apply: flushes stale pref-30900 rule before setting the new one (M1 revert-path)" {
+  # A failed provider switch that reverted via cmd_apply leaves the failed
+  # provider's ip rule lingering.  cmd_apply must call dns_iprule_flush
+  # (rule del pref 30900) BEFORE dns_iprule_set so every apply leaves exactly
+  # one pref-30900 rule.
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' apply"
+  [ "$status" -eq 0 ]
+  # rule del pref 30900 (flush) must appear BEFORE rule add to 9.9.9.9 (set)
+  _flush_line=$(grep -n "rule del pref 30900" "$STUB_LOG" | head -1 | cut -d: -f1)
+  _add_line=$(grep -n "rule add to 9.9.9.9 lookup 100 pref 30900" "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$_flush_line" ] && [ -n "$_add_line" ]
+  [ "$_flush_line" -lt "$_add_line" ]
+}
+
+@test "set-provider: failed switch leaves no stale pref-30900 rule for new provider (M1 revert-leak)" {
+  # Scenario: quad9 active, switch to adguard fails, reverts to quad9.
+  # After revert, adguard's ip (94.140.14.14) must not have a rule; the
+  # revert cmd_apply's dns_iprule_flush fires during rollback.
+  export UCI_GET_amnezia_config_dns_provider=quad9
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' set-provider adguard"
+  [ "$status" -ne 0 ]
+  # dns_iprule_flush (rule del pref 30900) must appear in log (fired by revert apply)
+  grep -q "rule del pref 30900" "$STUB_LOG"
+}
+
 @test "enable: starts the procd watchdog after successful apply+verify (HIGH)" {
   # After enable succeeds, the watchdog init must be started (not just applied).
   # Without this, encrypted-DNS is live but the watchdog is NOT running — if both
