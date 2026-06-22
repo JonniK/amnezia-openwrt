@@ -42,13 +42,22 @@ _probe_listener() {                    # $1 = 127.0.0.1#<port>
 _verify_encrypted() { _probe_listener "127.0.0.1#$DOT_PORT" || _probe_listener "127.0.0.1#$DOH_PORT"; }
 
 cmd_disable() {
-  dnsmasq_lock; dns_dnsmasq_restore; dns_dnsmasq_reload || true; dnsmasq_unlock
-  _prov=$(uci -q get amnezia.config.dns_provider || echo quad9)
-  dns_profile "$_prov" 2>/dev/null && dns_iprule_clear "$DNS_DOT_IP"
+  # Capture whether DoT was actually enabled before we change anything (L8).
+  _was_enabled=$(uci -q get amnezia.config.dot_enabled 2>/dev/null || echo 0)
+  # H1: guard against re-entry from stop_service (sentinel prevents recursion).
+  # M3: stop the watchdog (amnezia-dns stop) FIRST, before tearing down the
+  #     daemons it monitors, so it can't race and flip us back to plaintext.
+  [ -n "${AMNEZIA_DNS_STOPPING:-}" ] || "$AMNEZIA_DNS_INIT" stop 2>/dev/null || true
+  # Stop encrypted-DNS daemons.
   "$AMNEZIA_STUBBY_INIT" stop 2>/dev/null || true
   # shellcheck disable=SC2153
   "$AMNEZIA_DOH_INIT" stop 2>/dev/null || true
-  "$AMNEZIA_DNS_INIT" stop 2>/dev/null || true
+  # L8: only restore/reload dnsmasq if DoT was previously active (idempotent when already plain).
+  if [ "$_was_enabled" = 1 ]; then
+    dnsmasq_lock; dns_dnsmasq_restore; dns_dnsmasq_reload || true; dnsmasq_unlock
+  fi
+  # L3: unconditional ip-rule flush — doesn't depend on profile parsing succeeding.
+  dns_iprule_flush
   uci set amnezia.config.dot_enabled=0
   uci -q delete amnezia.config.dns_active_tier 2>/dev/null || true
   uci commit amnezia

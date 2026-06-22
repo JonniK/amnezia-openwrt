@@ -38,11 +38,13 @@ setup() {
   grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"
 }
 
-@test "disable restores resolvfile, clears the ip rule, stops the watchdog" {
+@test "disable restores resolvfile, flushes the ip rule, stops the watchdog" {
+  # setup() exports dot_enabled=1 so the restore path runs
   run sh -c "AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
   [ "$status" -eq 0 ]
   grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"
-  grep -q "rule del to 9.9.9.9 lookup 100 pref 30900" "$STUB_LOG"
+  # L3: unconditional flush via dns_iprule_flush (pref-based, no IP needed)
+  grep -q "ip rule del pref 30900" "$STUB_LOG"
   grep -q "amnezia-dns stop" "$STUB_LOG"
 }
 
@@ -53,6 +55,48 @@ setup() {
   [ "$status" -ne 0 ]
   grep -q "set amnezia.config.dns_provider_prev=quad9" "$STUB_LOG"
   grep -q "set amnezia.config.dns_provider=quad9" "$STUB_LOG"   # rolled back
+}
+
+@test "disable: sentinel prevents recursion (exactly one amnezia-dns stop logged)" {
+  # When disable is called normally (no AMNEZIA_DNS_STOPPING), it calls amnezia-dns stop.
+  # That init's stop_service sets AMNEZIA_DNS_STOPPING=1 before re-calling disable,
+  # so the second invocation must NOT call amnezia-dns stop again.
+  # We cannot simulate the full re-entry here, but we can verify that when the sentinel
+  # IS set, amnezia-dns stop is NOT invoked.
+  export UCI_GET_amnezia_config_dot_enabled=1
+  run sh -c "AMNEZIA_DNS_STOPPING=1 AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  run grep -q "amnezia-dns stop" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "disable: watchdog stop happens before stubby/doh stop (M3 teardown order)" {
+  export UCI_GET_amnezia_config_dot_enabled=1
+  run sh -c "AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  # amnezia-dns stop must appear before stubby stop in the log
+  _dns_line=$(grep -n "amnezia-dns stop" "$STUB_LOG" | head -1 | cut -d: -f1)
+  _stubby_line=$(grep -n "stubby stop" "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$_dns_line" ] && [ -n "$_stubby_line" ]
+  [ "$_dns_line" -lt "$_stubby_line" ]
+}
+
+@test "disable: skips dnsmasq restore when dot was never enabled (L8)" {
+  export UCI_GET_amnezia_config_dot_enabled=0
+  run sh -c "AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  run grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # But still stops daemons and sets dot_enabled=0
+  grep -q "set amnezia.config.dot_enabled=0" "$STUB_LOG"
+}
+
+@test "disable: ip rule flush is unconditional even when profile fails (L3)" {
+  # Use a provider that doesn't exist so dns_profile returns non-zero
+  export UCI_GET_amnezia_config_dns_provider=badprovider
+  export UCI_GET_amnezia_config_dot_enabled=1
+  run sh -c "AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  # ip rule del must still be attempted regardless of profile failure
+  grep -q "ip rule del" "$STUB_LOG"
 }
 
 @test "init: applies + launches watchdog only when enabled; hotplug keys on firewall reload" {
