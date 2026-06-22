@@ -54,3 +54,13 @@ setup() {
   grep -q "set amnezia.config.dns_provider_prev=quad9" "$STUB_LOG"
   grep -q "set amnezia.config.dns_provider=quad9" "$STUB_LOG"   # rolled back
 }
+
+@test "init: applies + launches watchdog only when enabled; hotplug keys on firewall reload" {
+  INIT="$HARNESS_DIR/../openwrt/amnezia-dns.init"
+  HP="$HARNESS_DIR/../openwrt/99-amnezia-dns.hotplug"
+  grep -q "amnezia-dns-ctl apply" "$INIT"
+  grep -q "procd_set_param command /usr/bin/amnezia-dns-ctl watchdog" "$INIT"
+  grep -q 'dot_enabled' "$INIT"
+  grep -q 'ACTION.*=.*reload' "$HP" || grep -q '"$ACTION" = reload' "$HP"
+  grep -q "amnezia-dns-ctl apply" "$HP"
+}

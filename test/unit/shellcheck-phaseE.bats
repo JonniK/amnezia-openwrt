@@ -6,6 +6,8 @@ load '../lib/harness.bash'
     openwrt/amnezia-failover \
     openwrt/amnezia-failover.init \
     openwrt/amnezia-status.sh \
-    openwrt/amnezia-failover-ctl.sh
+    openwrt/amnezia-failover-ctl.sh \
+    openwrt/amnezia-dns.init \
+    openwrt/99-amnezia-dns.hotplug
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
