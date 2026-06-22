@@ -24,7 +24,8 @@
 				"/usr/bin/amnezia-status":          [ "exec" ],
 				"/usr/bin/amnezia-tunnel-ctl":      [ "exec" ],
 				"/usr/bin/amnezia-force-load":      [ "exec" ],
-				"/usr/bin/amnezia-force-update":    [ "exec" ]
+				"/usr/bin/amnezia-force-update":    [ "exec" ],
+				"/usr/bin/amnezia-autolearn-ctl":   [ "exec" ]
 			}
 		}
 	}
