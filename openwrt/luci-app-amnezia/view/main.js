@@ -9,6 +9,13 @@
 // (i.e. the user navigated to another page). On return, render() registers
 // a fresh poller. Steady state during navigation: 0 active pollers.
 var pollFn = null;
+// True once refresh() has seen the view's DOM anchor at least once. LuCI's
+// poll.add() fires one synchronous step() *before* render() returns (and thus
+// before LuCI inserts the rendered DOM), so the very first poll runs with the
+// anchor absent. We must NOT treat that as "navigated away" -- otherwise the
+// poller kills itself on initial load and refresh-only fields (the force-update
+// stamp) are never painted. Only self-unregister once the anchor has appeared.
+var domSeen = false;
 
 // In-flight flag for apply/revert. While true, the 5s poll's paintApply()
 // must not touch the apply/revert buttons -- otherwise a poll landing
@@ -1479,11 +1486,17 @@ return view.extend({
 	},
 
 	refresh: function() {
-		// Self-unregister when the view's DOM is gone (user navigated away).
+		// Anchor absent: either the rendered DOM is not inserted yet (first
+		// synchronous poll step fired by poll.add() before render() returns) or
+		// the user navigated away. Self-unregister only in the latter case --
+		// i.e. once the anchor has been seen at least once -- so the poller does
+		// not kill itself on initial load (which would leave refresh-only fields
+		// such as the force-update stamp stuck on "never updated").
 		if (!document.getElementById('failover-tunnel-table')) {
-			if (pollFn) { poll.remove(pollFn); pollFn = null; }
+			if (domSeen && pollFn) { poll.remove(pollFn); pollFn = null; }
 			return Promise.resolve();
 		}
+		domSeen = true;
 		var self = this;
 		var p1 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
 			paintRuStamp(parseRuStamp(text));
@@ -1578,19 +1591,20 @@ return view.extend({
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), ''),
 			L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), ''),
-			L.resolveDefault(fs.read('/etc/amnezia/force-tunnel.list'), '')
-			// M3: force-update.json dropped from load() — refresh()'s p6 reads it
-			// on every poll, so the initial paint comes from the first refresh() call.
+			L.resolveDefault(fs.read('/etc/amnezia/force-tunnel.list'), ''),
+			// force-update.json is read at load so the stamp paints on the very
+			// first render (not only on the first poll tick). refresh()'s p6 keeps
+			// it live afterwards.
+			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '')
 		]);
 	},
 
 	render: function(data) {
-		// load() returns 9 entries:
+		// load() returns 10 entries:
 		// [0] ru-update.json, [1] zapret-status, [2] blockcheck.json,
 		// [3] blockcheck log, [4] zapret-apply state, [5] zapret-apply parse,
 		// [6] seed-must-tunnel.list, [7] amnezia-failover.json,
-		// [8] force-tunnel.list
-		// (force-update.json is no longer in load() — refresh()'s p6 reads it)
+		// [8] force-tunnel.list, [9] force-update.json
 		var stamp = parseRuStamp(data && data[0]);
 		var zap = parseZapret((data && data[1] && data[1].stdout) || '');
 		var bc = parseBlockcheck(data && data[2]);
@@ -1600,8 +1614,19 @@ return view.extend({
 		var seedList = parseSeedList((data && data[6]) || '');
 		var failoverState = parseFailoverState((data && data[7]) || '');
 		var forceTunnelList = (data && data[8]) || '';
-		// forceUpdateStamp is not available at render time (M3: dropped from load).
-		// The force-update panel starts empty and is filled on first refresh() call.
+		// force-update stamp baked into the initial render (mirrors paintForceStamp)
+		// so "Last update" shows on page load, not only after the first poll tick.
+		var forceStamp = parseRuStamp(data && data[9]);
+		var forceWhen = forceStamp ? fmtAge(forceStamp.ts) : _('never updated');
+		var forceTotal = 0, forceFailed = false;
+		if (forceStamp && forceStamp.sources) {
+			var _fsn = Object.keys(forceStamp.sources);
+			for (var _fi = 0; _fi < _fsn.length; _fi++) {
+				var _fs = forceStamp.sources[_fsn[_fi]];
+				if (_fs && _fs.count) forceTotal += (_fs.count || 0);
+				if (_fs && _fs.status === 'failed') forceFailed = true;
+			}
+		}
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
@@ -1810,11 +1835,12 @@ return view.extend({
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Last update')),
 						E('div', { 'class': 'cbi-value-field' }, [
-							E('strong', { 'id': 'force-when' },
-								_('never updated')),  // M3: filled by first refresh() poll
+							E('strong', { 'id': 'force-when' }, forceWhen),
 							E('span', { 'id': 'force-count', 'style': 'margin-left:12px;color:#666;' },
-								''),
-							E('span', { 'id': 'force-status', 'style': 'margin-left:8px;' }, '')
+								forceTotal ? (forceTotal + ' entries') : ''),
+							E('span', { 'id': 'force-status',
+								'style': 'margin-left:8px;color:' + (forceStamp ? (forceFailed ? '#a94442' : '#3c763d') : '') + ';' },
+								forceStamp ? (forceFailed ? _('some sources failed') : _('ok')) : '')
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
