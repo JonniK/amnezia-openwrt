@@ -1,3 +1,15 @@
 #!/bin/sh
 echo "dnsmasq $*" >> "${STUB_LOG:-/dev/null}"
+case " $* " in *" --test "*)
+  _f=""; _p=0; for a in "$@"; do [ "$_p" = 1 ] && { _f=$a; _p=0; }; [ "$a" = "-C" ] && _p=1; done
+  [ -n "$_f" ] && [ -f "$_f" ] || exit 1   # a --test with no readable -C file is a failure, not a pass
+  while IFS= read -r l; do
+    [ "${#l}" -gt 1024 ] && { echo "dnsmasq: bad option" >&2; exit 1; }
+    case "$l" in
+      server=*) printf '%s' "$l" | grep -Eq '^server=([0-9A-Fa-f:.]+)(#[0-9]+)?$' || { echo "dnsmasq: bad server" >&2; exit 1; } ;;
+      nftset=*) printf '%s' "$l" | grep -q '#' || { echo "dnsmasq: bad nftset" >&2; exit 1; } ;;
+    esac
+  done < "$_f"
+  exit 0 ;;
+esac
 exit 0

@@ -73,3 +73,61 @@ dns_render_doh() {
   uci commit https-dns-proxy
   "$AMNEZIA_DOH_INIT" restart 2>/dev/null || true
 }
+
+AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
+AMNEZIA_RESOLV_AUTO="${AMNEZIA_RESOLV_AUTO:-/tmp/resolv.conf.d/resolv.conf.auto}"
+
+dnsmasq_lock() {                       # fd 8 — DISTINCT from force-load's fd 9
+  exec 8>"$DNSMASQ_LOCK" 2>/dev/null || return 0
+  flock -x 8 2>/dev/null || true
+}
+dnsmasq_unlock() { flock -u 8 2>/dev/null || true; exec 8>&- 2>/dev/null || true; }
+
+dns_iprule_set() {
+  ip rule del to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT" 2>/dev/null || true
+  ip rule add to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT"
+}
+dns_iprule_clear() { ip rule del to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT" 2>/dev/null || true; }
+
+dns_dnsmasq_encrypted() {
+  uci set "dhcp.@dnsmasq[0].noresolv=1"
+  uci set "dhcp.@dnsmasq[0].strictorder=1"
+  uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
+  uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
+  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+}
+
+_resolv_provider_ips() { awk '/^nameserver /{print $2}' "$AMNEZIA_RESOLV_AUTO" 2>/dev/null; }
+dns_dnsmasq_add_plain() {
+  for _ip in $(_resolv_provider_ips); do
+    uci -q del_list "dhcp.@dnsmasq[0].server=$_ip"; uci add_list "dhcp.@dnsmasq[0].server=$_ip"
+  done
+}
+dns_dnsmasq_del_plain() {
+  for _ip in $(_resolv_provider_ips); do uci -q del_list "dhcp.@dnsmasq[0].server=$_ip"; done
+}
+dns_dnsmasq_restore() {
+  uci -q delete "dhcp.@dnsmasq[0].noresolv" 2>/dev/null || true
+  uci -q delete "dhcp.@dnsmasq[0].strictorder" 2>/dev/null || true
+  uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
+  uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+  dns_dnsmasq_del_plain
+}
+
+# Render the candidate dnsmasq options we control to a temp file and --test THAT
+# (deterministic; never a router-instance hash path). Restart only on pass.
+dns_dnsmasq_reload() {
+  uci commit dhcp 2>/dev/null || true
+  _tf=$(mktemp 2>/dev/null || echo /tmp/amz-dnsmasq-test.$$)
+  {
+    [ "$(uci -q get dhcp.@dnsmasq[0].noresolv)" = 1 ] && echo "no-resolv"
+    [ "$(uci -q get dhcp.@dnsmasq[0].strictorder)" = 1 ] && echo "strict-order"
+    for _s in $(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null); do echo "server=$_s"; done
+    _cd=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null); [ -n "$_cd" ] && echo "conf-dir=$_cd"
+  } > "$_tf"
+  if dnsmasq --test -C "$_tf" >/dev/null 2>&1; then
+    rm -f "$_tf"; "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true; return 0
+  fi
+  rm -f "$_tf"; return 1
+}
