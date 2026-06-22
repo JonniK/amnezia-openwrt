@@ -30,6 +30,8 @@ dns_profile() {
       DNS_DOT_IP=${_dot%@*}
       DNS_DOT_HOST=${_dot##*#}
       DNS_DOH_HOST=$(printf '%s' "$_doh" | sed -e 's#^https://##' -e 's#/.*##')
+      # M2: reject non-bare-IPv4 DoT IP (CIDR, garbage, or empty).
+      printf '%s' "$DNS_DOT_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
       # reject IP-literal host: must contain at least one non-digit, non-dot label char
       printf '%s' "$DNS_DOH_HOST" | grep -q '[A-Za-z]' || return 1
       [ -n "$DNS_DOT_IP" ] && [ -n "$DNS_DOH_HOST" ] && [ -n "$DNS_DOH_BOOTSTRAP" ] || return 1
@@ -88,6 +90,12 @@ dns_iprule_set() {
   ip rule add to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT"
 }
 dns_iprule_clear() { ip rule del to "$1" lookup "$TBL_STICKY" pref "$RULE_PREF_DOT" 2>/dev/null || true; }
+# Flush ALL pref-RULE_PREF_DOT rules unconditionally (no-IP needed). Safe as
+# an idempotent teardown even when the current profile can't be parsed.
+dns_iprule_flush() {
+  _k=0
+  while [ "$_k" -lt 16 ] && ip rule del pref "$RULE_PREF_DOT" 2>/dev/null; do _k=$((_k+1)); done
+}
 
 dns_dnsmasq_encrypted() {
   uci set "dhcp.@dnsmasq[0].noresolv=1"
@@ -117,8 +125,9 @@ dns_dnsmasq_restore() {
 
 # Render the candidate dnsmasq options we control to a temp file and --test THAT
 # (deterministic; never a router-instance hash path). Restart only on pass.
+# M5: commit dhcp ONLY after --test passes; revert on failure so a bad candidate
+#     is never persisted (would take DNS down on the next dnsmasq restart/reboot).
 dns_dnsmasq_reload() {
-  uci commit dhcp 2>/dev/null || true
   _tf=$(mktemp 2>/dev/null || echo /tmp/amz-dnsmasq-test.$$)
   {
     [ "$(uci -q get dhcp.@dnsmasq[0].noresolv)" = 1 ] && echo "no-resolv"
@@ -127,7 +136,12 @@ dns_dnsmasq_reload() {
     _cd=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null); [ -n "$_cd" ] && echo "conf-dir=$_cd"
   } > "$_tf"
   if dnsmasq --test -C "$_tf" >/dev/null 2>&1; then
-    rm -f "$_tf"; "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true; return 0
+    rm -f "$_tf"
+    uci commit dhcp 2>/dev/null || true
+    "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+    return 0
   fi
-  rm -f "$_tf"; return 1
+  rm -f "$_tf"
+  uci revert dhcp 2>/dev/null || true
+  return 1
 }

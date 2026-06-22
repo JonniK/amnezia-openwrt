@@ -14,5 +14,7 @@ start_service() {
 }
 
 stop_service() {
-  /usr/bin/amnezia-dns-ctl disable >/dev/null 2>&1 || true
+  # H1: set sentinel so cmd_disable does NOT call "$AMNEZIA_DNS_INIT" stop again
+  # (which would re-enter stop_service → infinite recursion + fork storm).
+  AMNEZIA_DNS_STOPPING=1 /usr/bin/amnezia-dns-ctl disable >/dev/null 2>&1 || true
 }
