@@ -90,24 +90,26 @@ setup() { . "$LIB"; }
 
 - [ ] **Step 2: Run → FAIL** (`UCI_GET_*` not honored).
 
-- [ ] **Step 3: Implement** — in `test/stubs/uci`, in the `get`/`-q get` handler, BEFORE the existing hardcoded `case`, add an env lookup that maps the dotted path to `UCI_GET_<a>_<b>_<c>` (dots/hyphens → underscores) and, if that var is set, echoes it and exits 0; otherwise falls through to the existing hardcoded arms (which keep `routing_mode=tunnel-default` etc.), and a truly-unknown key still exits non-zero like real `uci -q get`:
+- [ ] **Step 3: Implement** — in `test/stubs/uci`: the stub `shift`s past `-q`, so the verb is `$1` and the dotted key is `$2`. ONLY under the `get` verb, BEFORE the existing hardcoded `case`, add an env lookup mapping the key to `UCI_GET_<a>_<b>_<c>` (dots/hyphens → underscores); if that var is set, echo it and exit 0; otherwise fall through to the existing hardcoded arms (keeping `routing_mode=tunnel-default`), and a truly-unknown key still exits non-zero like real `uci -q get`:
 
 ```sh
-# (inside the `get` path, after parsing "$KEY"=a.b.c)
-_envk="UCI_GET_$(printf '%s' "$KEY" | tr '.-' '__')"
-eval _envv="\${$_envk+set}"
-if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
-# ...existing hardcoded case arms follow unchanged...
+# (inside the `get` verb branch, with the dotted key in $2)
+if [ "$1" = get ]; then
+  _envk="UCI_GET_$(printf '%s' "$2" | tr '.-' '__')"
+  eval _envv="\${$_envk+set}"
+  if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+fi
+# ...existing hardcoded `get` case arms follow unchanged...
 ```
 
-Also extend the `show` path so `uci -q show network` emits `$UCI_SHOW_network` when set (used by `al_router_lan_cidrs`):
+Also, in the `show` verb branch, add the `$UCI_SHOW_network` arm **BEFORE** the existing hardcoded `"show network")` arm (else the hardcoded `@interface[0]` line wins and `al_router_lan_cidrs` finds no static section):
 
 ```sh
-# (inside the `show` path)
-case "$2 $3" in
-  *network*) [ -n "${UCI_SHOW_network:-}" ] && printf '%s\n' "$UCI_SHOW_network"; exit 0 ;;
-esac
-# ...existing show behavior follows...
+# (inside the `show` verb branch, FIRST — short-circuits only when the var is set)
+if [ "$1" = show ] && [ "$2" = network ] && [ -n "${UCI_SHOW_network:-}" ]; then
+  printf '%s\n' "$UCI_SHOW_network"; exit 0
+fi
+# ...existing hardcoded `show network` arm follows unchanged...
 ```
 
 - [ ] **Step 4: Run → PASS**; also `bats test/unit/state-write.bats` → still PASS (no regression).
@@ -617,15 +619,15 @@ eval _v="\${$_key:-\${ZP_VERDICT_DEFAULT:-direct_ok}}"
 printf '{"domain":"%s","verdict":"%s","reason":"stub"}\n' "$_dom" "$_v"
 ```
 
-- [ ] **Step 2:** create `test/stubs/kill` (so the pass's `kill -USR2` is observable and never signals the test runner):
+- [ ] **Step 2:** create `test/stubs/al-kill` — a logging shim the pass calls via the `AL_KILL` indirection (a PATH stub named `kill` would be shadowed by the shell builtin, so the pass uses `"$AL_KILL"` and the test sets `AL_KILL=al-kill`):
 
 ```sh
 #!/bin/sh
-echo "kill $*" >> "${STUB_LOG:-/dev/null}"
+echo "kill $*" >> "${STUB_LOG:-/dev/null}"   # observable; never signals a real pid
 exit 0
 ```
 
-- [ ] **Step 3: Commit** — `git add test/stubs/zapret-probe test/stubs/kill && git commit -m "test(autolearn): stubs for zapret-probe + kill"`
+- [ ] **Step 3: Commit** — `git add test/stubs/zapret-probe test/stubs/al-kill && git commit -m "test(autolearn): stubs for zapret-probe + al-kill signal shim"`
 
 ### Task 5.2: gate — exit unless direct-default + enabled + fresh-healthy
 
@@ -694,6 +696,9 @@ OFFSET_F="$AL_DIR/autolearn/.dnsmasq-log.offset"
 AUTOLEARN_STATE_MAX_AGE=120
 AUTOLEARN_LOG_MAX_BYTES=2097152
 AMNEZIA_FORCE_LOAD="${AMNEZIA_FORCE_LOAD:-amnezia-force-load}"
+# `kill` is a shell builtin — a PATH stub is never reached. Route the signal
+# through this indirection so tests can inject a logging shim via AL_KILL.
+AL_KILL="${AL_KILL:-kill}"
 
 _uci() { uci -q get "$1" 2>/dev/null; }
 _now() { date +%s 2>/dev/null || echo 0; }
@@ -870,7 +875,7 @@ _al_record() {
   grep -qx "$_d" "$AUTO_LIST" 2>/dev/null && return 1   # already present
   # Size cap with LRU eviction (never evicts force-tunnel.list/manual entries).
   _cap=$(_uci amnezia.config.autolearn_max_entries); _cap=${_cap:-500}
-  _count=$(grep -c . "$AUTO_LIST" 2>/dev/null || echo 0)
+  _count=$(awk 'END{print NR}' "$AUTO_LIST" 2>/dev/null); _count=${_count:-0}
   if [ "$_count" -ge "$_cap" ] 2>/dev/null; then
     _victim=$(awk -F'\t' 'NR==FNR{auto[$0]=1; next} ($1 in auto){print $6"\t"$1}' \
                 "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
@@ -981,16 +986,17 @@ _al_prune_candidates() {
 ```bash
 @test "log rotation: oversize log is mv'd, dnsmasq sent USR2, offset reset" {
   export AUTOLEARN_LOG_MAX_BYTES=64        # tiny so the test log is "oversize"
+  export AL_KILL=al-kill                   # logging shim (kill is a builtin)
   export DNSMASQ_PID_FILE="$BATS_TEST_TMPDIR/dnsmasq.pid"; echo 4242 > "$DNSMASQ_PID_FILE"
   # fill the log past the cap with non-query noise so nothing is added
   head -c 200 /dev/zero | tr '\0' 'x' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
-  grep -q 'kill -USR2 4242' "$STUB_LOG"            # reopen signalled
+  grep -q 'kill -USR2 4242' "$STUB_LOG"            # reopen signalled (via AL_KILL)
   [ "$(cat "$AL_DIR/autolearn/.dnsmasq-log.offset")" = "0" ]   # offset reset
-  [ ! -f "$AL_QUERYLOG.1" ]                          # rotated file drained+unlinked
+  [ ! -f "$AL_QUERYLOG.1" ]                          # rotated file unlinked
 }
 @test "log rotation: skipped (no truncate) when dnsmasq pid cannot be resolved" {
-  export AUTOLEARN_LOG_MAX_BYTES=64
+  export AUTOLEARN_LOG_MAX_BYTES=64; export AL_KILL=al-kill
   export DNSMASQ_PID_FILE="$BATS_TEST_TMPDIR/none.pid"   # absent
   head -c 200 /dev/zero | tr '\0' 'x' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
@@ -1018,7 +1024,7 @@ _al_rotate_log() {
   [ "$_sz" -gt "$AUTOLEARN_LOG_MAX_BYTES" ] 2>/dev/null || return 0
   _pid=$(_al_dnsmasq_pid); [ -n "$_pid" ] || return 0
   mv "$AL_QUERYLOG" "$AL_QUERYLOG.1" 2>/dev/null || return 0
-  kill -USR2 "$_pid" 2>/dev/null || true     # dnsmasq reopens AL_QUERYLOG at 0
+  "$AL_KILL" -USR2 "$_pid" 2>/dev/null || true   # dnsmasq reopens AL_QUERYLOG at 0
   rm -f "$AL_QUERYLOG.1"
   printf '0\n' > "$OFFSET_F"
   # Accepted minor loss: query lines dnsmasq wrote to .1 between this pass's
@@ -1066,6 +1072,13 @@ setup() {
   run sh "$SCRIPT" status
   echo "$output" | grep -q '"enabled":1'
   echo "$output" | grep -q '"count":2'
+}
+@test "status on an EMPTY auto.list is valid single-line JSON with count 0" {
+  : > "$AUTO_LIST"
+  run sh "$SCRIPT" status
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | wc -l | tr -d ' ')" -le 1 ]   # no embedded newline
+  echo "$output" | grep -qx '{"enabled":1,"count":0}'
 }
 @test "veto removes from auto.list, adds to deny.list, runs force-load" {
   run sh "$SCRIPT" veto a.com; [ "$status" -eq 0 ]
@@ -1124,7 +1137,10 @@ case "$cmd" in
     ;;
   status)
     _en=$(uci -q get amnezia.config.autolearn_enabled 2>/dev/null); _en=${_en:-0}
-    _cnt=$(grep -c . "$AUTO_LIST" 2>/dev/null || echo 0)
+    # NOT `grep -c . || echo 0`: BusyBox grep -c on an empty file prints 0 AND
+    # exits 1, so `|| echo 0` would append a second 0 -> invalid JSON. Use the
+    # repo's awk NR idiom (cf. amnezia-force-update.sh).
+    _cnt=$(awk 'END{print NR}' "$AUTO_LIST" 2>/dev/null); _cnt=${_cnt:-0}
     printf '{"enabled":%s,"count":%s}\n' "$_en" "$_cnt"
     ;;
   veto)
