@@ -29,7 +29,10 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
 }
 
 @test "recovery: in plaintext, an encrypted tier up for M with dwell elapsed exits plaintext" {
+  # M4/M6: dwell is loaded from persisted dns_plain_ts; set ts=1000, now=99999 so
+  # elapsed >> 120s and the dwell is satisfied.
   export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
   run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_DNS_WD_M=1 AMNEZIA_NOW=99999 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
   [ "$status" -eq 0 ]
   grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"

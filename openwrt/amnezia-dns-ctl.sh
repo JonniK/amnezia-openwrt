@@ -89,15 +89,24 @@ _set_tier() { uci set "amnezia.config.dns_active_tier=$1"; uci commit amnezia; }
 _enter_plain() {
   dnsmasq_lock; dns_dnsmasq_add_plain; dns_dnsmasq_reload || true; dnsmasq_unlock
   _set_tier plaintext
+  # M4: persist entry timestamp so dwell survives procd respawn.
+  uci set "amnezia.config.dns_plain_ts=$(_now)"; uci commit amnezia
 }
 _exit_plain() {
   dnsmasq_lock; dns_dnsmasq_del_plain; dns_dnsmasq_reload || true; dnsmasq_unlock
+  # M4: clear stale timestamp when leaving plaintext tier.
+  uci -q delete amnezia.config.dns_plain_ts 2>/dev/null || true; uci commit amnezia
 }
 
 cmd_watchdog() {
   _n=${AMNEZIA_DNS_WD_N:-3}; _m=${AMNEZIA_DNS_WD_M:-2}; _dwell=${AMNEZIA_DNS_WD_DWELL:-120}
-  _fail=0; _ok=0; _entered=0
+  _fail=0; _ok=0
   _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo "")
+  # M4: load persisted entry timestamp (survives procd respawn while in plaintext).
+  _entered=$(uci -q get amnezia.config.dns_plain_ts 2>/dev/null || echo 0)
+  # If tier=plaintext but no timestamp (legacy / first-time), seed with now so
+  # the full dwell must still elapse before recovery — never skip it on respawn.
+  if [ "$_tier" = plaintext ] && [ "$_entered" = 0 ]; then _entered=$(_now); fi
   while true; do
     if _probe_listener "127.0.0.1#$DOT_PORT"; then
       _fail=0; _ok=$((_ok + 1))
