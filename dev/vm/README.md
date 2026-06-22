@@ -118,7 +118,7 @@ is installed (`--first-install`). `test-all.sh` runs this automatically as SCENA
 | T2-4 | `ip route get FORCE_IP mark 0x0b0000` → tunnel (not WAN) |
 | T2-5 | non-listed IP is unmarked/direct (no blanket pool-mark in direct-default chain) |
 | T3-3 | **C1 scale gate:** `uci commit dhcp` + dnsmasq restart <= 10 s, DNS-down <= 3 s |
-| T3-4 | force domain resolves into `amnezia_force4` via `config ipset` |
+| T3-4 | force domain materializes into `amnezia_force4` via dnsmasq conf-dir `nftset=` |
 | T4-1 | `amnezia_force4` IP half repopulated after `fw4 reload` (hotplug) |
 | T5-1 | `amnezia_force4` repopulated by boot-init run (cold-boot simulation) |
 | T6-1 | pool+sticky conntrack entries flushed after `set-routing-mode` |
