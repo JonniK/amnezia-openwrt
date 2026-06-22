@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-22
 **Branch:** `feat/autolearn-bypass` (DNS work may move to its own `feat/dot-dns` branch at plan time)
-**Status:** approved (brainstorm) → design-review converged over 2 cycles. Cycle 1: 3 C + 9 H (two reviewers) — resolved (leak-free chain rework). Cycle 2: cycle-1 items confirmed closed; 2 new H (dnsmasq/force-load concurrency lock + flap hysteresis; DoH hostname-URL+bootstrap cert fix) — resolved here. Pending: writing-plans.
+**Status:** approved (brainstorm) → design-review, 3 cycles. C1: 3 C + 9 H (leak-free chain rework). C2: 2 H (concurrency lock + flap hysteresis; DoH hostname+bootstrap cert fix). C3: 3 H about the C2 fixes themselves — lock scope (mutation-only, verify outside lock), lock fd (distinct fd vs force-load's fd 9), two-resolver-IP pinning + DoH doc-consistency — all resolved here. Pending: cycle-4 re-converge → writing-plans.
 
 ## Goal
 
@@ -69,7 +69,13 @@ A lightweight watchdog (procd-respawned `amnezia-dns-ctl watchdog`, ~every 20s) 
 - **Both encrypted tiers failing for `N` consecutive probes (enter threshold) ⇒** add provider IPs — **re-read live from `/tmp/resolv.conf.d/resolv.conf.auto` at gate-time** (not a stale cached capture) — as `server=` (plaintext, direct), reload dnsmasq, set a **persisted `active_tier=plaintext` warning flag**. The only path to cleartext, and *visible*.
 - **An encrypted tier healthy for `M` consecutive probes AND a minimum plaintext dwell elapsed (exit threshold) ⇒** remove the plaintext `server=`, clear the warning, reload. Asymmetric `N`/`M` + min-dwell prevents a borderline DoH endpoint from reloading dnsmasq every cycle.
 
-**Single-writer lock (gates "never break client internet").** The watchdog, `apply`, `enable`, `set-provider`, the boot init, **and force-load** all mutate `dhcp.@dnsmasq[0]` + reload dnsmasq. Without serialization, two concurrent `uci commit dhcp` are last-writer-wins (one side's edit silently dropped) and a reload racing a restart can leave a half-applied config — a live DNS outage. **All dnsmasq/`dhcp` mutations in this feature take a shared `flock` on `/var/lock/amnezia-dnsmasq.lock`**, and force-load's existing dnsmasq commit+restart is wrapped in the **same** lock (a minimal, serialization-only touch to force-load — no logic change, despite force-load being a non-goal otherwise). A bats test interleaves a watchdog plaintext-add with a force-load domain-change and asserts both edits survive.
+**Single-writer lock (gates "never break client internet").** The watchdog, `apply`, `enable`, `set-provider`, the boot init, **and force-load** all mutate `dhcp.@dnsmasq[0]` + reload dnsmasq. Without serialization, two concurrent `uci commit dhcp` are last-writer-wins (one side's edit silently dropped) and a reload racing a restart can leave a half-applied config — a live DNS outage. **All dnsmasq/`dhcp` mutations take a shared `flock` on `/var/lock/amnezia-dnsmasq.lock`**, with three pinned implementation constraints:
+
+- **Distinct fd, fixed nesting.** force-load already holds its own lock on **fd 9** (`exec 9>`); the dnsmasq lock MUST use a **different fd (e.g. fd 8)** or `exec 9>` on the new file would silently release force-load's lock and reopen the race it was built to prevent. force-load's wrap is therefore force-lock (fd 9, outer) → dnsmasq-lock (fd 8, inner); no dns-ctl path ever takes the force-lock, so the lock graph stays acyclic (no deadlock). This is the **only** touch to force-load — additive serialization around its existing commit+restart, logic-neutral.
+- **Lock scope = mutation only, never a network op.** The lock is held across **render UCI → commit → `dnsmasq --test` → reload** *only*. The multi-second **encrypted-tier verify** (a real DNS resolution) in `enable`/`set-provider` runs **outside** the lock; a rollback re-acquires the lock for its mutation. Holding the lock across the verify would let a stalled provider block the watchdog from gating in the plaintext last resort — turning a tunnel outage into a LAN DNS outage, the exact failure this feature prevents. The watchdog's lock-wait is bounded so a long holder can't wedge the probe loop.
+- **Reload completion.** Pin at plan time whether the backgrounded dnsmasq reload must be `wait`ed under the lock (so a following force-load synchronous restart can't begin mid-reload) or the overlap is accepted with rationale; the exact-value `.server` keying keeps the *config* safe regardless.
+
+A bats test interleaves a watchdog plaintext-add with a force-load domain-change and asserts both edits survive.
 
 This honors "if DoH fails, then provider DNS" (the user's explicit ask) **without** the per-query leak, because plaintext enters the candidate set only after confirmed total encrypted failure, and leaves the moment encryption returns. Tier-2 DoH (direct/WAN) already covers the common "tunnel down but internet up" case, so the plaintext tier should fire only when the ISP additionally blocks the DoH endpoint — genuinely rare, and now alarmed when it happens.
 
@@ -85,7 +91,7 @@ This honors "if DoH fails, then provider DNS" (the user's explicit ask) **withou
 
 ## Provider profiles
 
-A profile is a record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, dot_tls_host, doh_url(IP-literal) }`. `amnezia.config.dns_provider` selects one. Shipped (all free, non-Cloudflare):
+A profile is a record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, dot_tls_host, doh_host, doh_bootstrap_ip }`. `amnezia.config.dns_provider` selects one. Shipped (all free, non-Cloudflare):
 
 | Profile | Notes |
 |---|---|
@@ -96,7 +102,7 @@ A profile is a record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, 
 | `google` | Most robust uptime; **large US logging provider** — dropdown help-text states this so the choice is informed |
 | `custom` | user-supplied `dot_resolver` (`<ip>@853#<tls-host>`) and `doh_resolver` (`https://<host>/dns-query`) **plus a required bootstrap IP**; a hostname DoH URL is allowed (it must be, for cert validation) but the bootstrap IP is mandatory |
 
-> **Per-profile invariant, proven at plan time, not from memory:** for each shipped profile, record the concrete **DoT-IP** (stubby `address`), the **DoH hostname** (cert SAN), and the **DoH-IP** (`bootstrap_dns`), verified against the provider's published docs **and** a live resolution probe; assert (a) **DoT-IP ≠ DoH-IP** — the lookup-100 rule pins the DoT-IP into the tunnel, so the DoH bootstrap IP must be a *different* address or the DoH fallback gets dragged into the dead tunnel exactly when needed; (b) the DoH cert validates against its hostname via `bootstrap_dns` (no dnsmasq loop); (c) both IPs are stable published anycast literals; (d) no other `ip rule`/route references the DoH-IP. **Drop any profile that cannot satisfy this** rather than shipping a silently-broken fallback.
+> **Per-profile invariant, proven at plan time, not from memory:** for each shipped profile, record the concrete **DoT-IP** (stubby `address`), the **DoH hostname** (cert SAN), and the **DoH-bootstrap-IP** (`bootstrap_dns`), taken from the provider's **documented resolver anycast addresses** (NOT the website apex `A` record — a known trap; the resolver IPs differ from the marketing domain) and confirmed by a live resolution probe; assert (a) **DoT-IP ≠ DoH-bootstrap-IP** — the lookup-100 rule pins the DoT-IP into the tunnel, so the bootstrap IP must be a *different* address or the DoH fallback gets dragged into the dead tunnel exactly when needed; (b) the DoH cert validates against its hostname via `bootstrap_dns` (no dnsmasq loop); (c) both are stable published anycast literals; (d) no other `ip rule`/route references the bootstrap IP. **All six profiles must supply two distinct resolver IPs** — they do (Quad9 `9.9.9.9`/`149.112.112.112`, AdGuard `94.140.14.14`/`94.140.15.15`, Google `8.8.8.8`/`8.8.4.4`, dns0.eu `193.110.81.0`/`185.253.5.0`, Mullvad `194.242.2.2`/`194.242.2.3`; exact pin confirmed at plan time). **Drop any profile that cannot** rather than shipping a silently-broken fallback. A test asserts the rendered config carries two distinct IPs (it can't see a provider that has only one, so the plan-time pin is the real gate).
 
 ---
 
@@ -108,7 +114,8 @@ A profile is a record the `amnezia-dns-ctl` table owns: `name → { dot_ip@853, 
 option dot_enabled  '0'        # master toggle; 0 = today's provider DNS
 option dns_provider 'quad9'    # selected profile
 option dot_resolver ''         # custom only: <ip>@853#<tls-host>
-option doh_resolver ''         # custom only: https://<ip-literal>/dns-query
+option doh_resolver ''         # custom only: https://<host>/dns-query  (hostname, NOT an IP literal)
+option doh_bootstrap ''        # custom only: DoH bootstrap IP (required; distinct from the DoT IP)
 # runtime, written by the watchdog (not user-edited):
 option dns_active_tier 'dot'   # dot | doh | plaintext  (drives UI warning)
 ```
@@ -119,7 +126,7 @@ POSIX sh, sources `amnezia-common.sh`. UCI reads use `uci -q get` (quoting/list 
 
 - **`status`** → JSON `{ "enabled": bool, "provider": str, "active_tier": "dot|doh|plaintext", "encrypted": bool, "healthy": bool }`. `active_tier` is read from the watchdog flag; `encrypted` = active tier ∈ {dot,doh}. **Bounded** (each listener probe ≤1s) and **never triggers `apply`**, so the UI status call can't stall during an outage.
 - **`enable`** → preflight: confirm `stubby` + `https-dns-proxy` **binaries present** (else fail with "install packages first", no mutation). Set `dot_enabled=1`, commit → `apply` → **verify through an encrypted tier**: probe `127.0.0.1#5453` and `127.0.0.1#5454` directly (not `#53`, which could be answered by a plaintext tier). Success **only** if an encrypted tier resolves a control domain. On failure: **auto-revert** to plain provider DNS, `dot_enabled=0`, non-zero exit, message to UI.
-- **`set-provider <name>`** → validate (custom ⇒ DoH IP-literal). Persist `dns_provider_prev`, set new `dns_provider`. If `dot_enabled=1`: `apply` + encrypted-tier verify; on failure roll back to `dns_provider_prev` and re-verify; if that also fails, drop to `dot_enabled=0` plain. End-state matrix defined in the plan; UI reflects the actual landing state.
+- **`set-provider <name>`** → validate (custom ⇒ DoH `doh_resolver` is a hostname URL **and** `doh_bootstrap` IP present and ≠ the DoT IP). Persist `dns_provider_prev`, set new `dns_provider`. If `dot_enabled=1`: `apply` + encrypted-tier verify; on failure roll back to `dns_provider_prev` and re-verify; if that also fails, drop to `dot_enabled=0` plain. End-state matrix defined in the plan; UI reflects the actual landing state.
 - **`apply`** (idempotent; used by `enable`, `set-provider`, init, hotplug, watchdog) → **under the `/var/lock/amnezia-dnsmasq.lock` flock**: render stubby + https-dns-proxy **via their UCI** (see below); set dnsmasq via **UCI `dhcp.@dnsmasq[0]` options** — `.noresolv='1'`, `.strictorder='1'`, and `.server` **list** entries (`add_list`/`del_list` keyed by exact value `127.0.0.1#5453` / `127.0.0.1#5454`, so the watchdog can add/remove the plaintext entry without disturbing the encrypted ones, and `disable` removes exactly ours); install the `ip rule` (delete-then-add by normalized triple); restart stubby + https-dns-proxy; **`dnsmasq --test` the assembled config, and only on pass** do a **backgrounded** dnsmasq reload. **If a binary is missing** (e.g. post-sysupgrade), do **not** wedge DNS: fall back to plain provider config and set `active_tier=plaintext` + warning. **No auto-revert** here (boot/watchdog own degradation), but also **no silent encrypted-claim** — the missing-binary fallback is surfaced.
 - **`disable`** → restore dnsmasq to `resolvfile` (drop `noresolv`/`strict-order`/our `server=`), remove the `ip rule`, stop+disable stubby and https-dns-proxy and the watchdog, clear `active_tier`, `dot_enabled=0`, commit, backgrounded dnsmasq reload.
 - **`watchdog`** → the procd-respawned loop described in "Plaintext last resort."
@@ -130,7 +137,7 @@ POSIX sh, sources `amnezia-common.sh`. UCI reads use `uci -q get` (quoting/list 
 
 Both `stubby` and `https-dns-proxy` ship `/etc/config/{stubby,https-dns-proxy}` whose init scripts **regenerate** runtime config on start; hand-writing `stubby.yml` would be clobbered and could fall back to the packages' **Cloudflare/Quad9 default upstreams** (a no-Cloudflare violation). Therefore `apply` drives **their UCI**:
 - **stubby** — `uci -q delete` **all** stock `stubby.@resolver[*]` sections, add a single resolver = profile DoT (`address`, `tls_auth_name`, strict `tls_authentication`/spki), listen `127.0.0.1@5453` only, short timeout; `uci commit stubby; /etc/init.d/stubby restart`.
-- **https-dns-proxy** — `uci -q delete` **all** stock `@https-dns-proxy[*]` sections (the Cloudflare defaults), add a single section = profile DoH IP-literal URL, listen `127.0.0.1:5454`, `bootstrap_dns` = the same pinned IP; commit + restart.
+- **https-dns-proxy** — `uci -q delete` **all** stock `@https-dns-proxy[*]` sections (the Cloudflare defaults), add a single section: `resolver_url=https://<doh_host>/dns-query` (**hostname**, so the TLS cert validates), `bootstrap_dns=<doh_bootstrap_ip>` (the pinned DoH IP, **distinct from the DoT IP** per the invariant; resolves the host in-process via c-ares, never through dnsmasq), `listen_addr=127.0.0.1` + `listen_port=5454`; commit + restart. (UCI schema confirmed: `resolver_url`/`bootstrap_dns`/`listen_port` are all per-resolver options.)
 - A test asserts **no Cloudflare IP/host** remains in either rendered config.
 
 ### Persistence — triggers (mirrors force-load's robustness)
@@ -162,8 +169,8 @@ bats unit tests with stubs in the **exact real output format** (CLAUDE.md rule):
 5. `set-provider` for each shipped profile renders a **DoT-IP ≠ DoH-bootstrap-IP** (asserts the two-distinct-IP invariant), a **hostname** DoH `resolver_url` + `bootstrap_dns=<DoH-IP>`, and a stubby/https-dns-proxy UCI with **no Cloudflare** surviving; `custom` parses user endpoints, **accepts a hostname DoH URL**, and **requires a bootstrap IP** (rejects a missing one).
 6. `apply` idempotent (run twice → identical state, single `ip rule`; uses the kernel-normalized selector so boot-init + hotplug double-apply can't duplicate).
 7. **Watchdog state machine:** both-encrypted-down for `N` probes → adds plaintext (live-read provider IPs) + sets warning flag; recovery for `M` probes + min-dwell → removes plaintext + clears flag; a borderline tier toggling each probe does **not** flap (hysteresis holds).
-8b. **Lock serialization:** interleave a watchdog plaintext-add with a force-load domain-change (both under `/var/lock/amnezia-dnsmasq.lock`) → both edits survive, dnsmasq never reloaded on a half-written `dhcp` section.
 8. **`dnsmasq --test` gate is actually exercised** — the current stub (`exit 0` for everything) makes the headline safety test vacuous; **upgrade the dnsmasq stub** to reject the malformation classes the gate guards (oversized `server=`/line, malformed `server=`, bad `nftset`) — or run real `dnsmasq --test` in CI. A deliberately-bad render must be rejected **before** reload.
+9. **Lock serialization:** interleave a watchdog plaintext-add with a force-load domain-change (both under `/var/lock/amnezia-dnsmasq.lock`, distinct fds) → both edits survive, dnsmasq never reloaded on a half-written `dhcp` section.
 
 **Live-only gates (explicit — a green bats run is not proof; the VM's dnsmasq doesn't serve real queries):**
 - **Leak test:** enable DoT, `tcpdump` WAN `:53` while resolving control domains with tier-1 artificially **stalled** (not just down) — assert **zero** cleartext `:53` to the provider until the watchdog deliberately gates plaintext.
