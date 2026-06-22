@@ -10,7 +10,8 @@ AMNEZIA_LIB="${AMNEZIA_LIB:-/usr/lib/amnezia}"
 AL_DIR="${AL_DIR:-/etc/amnezia}"
 AL_STATE="${AL_STATE:-/var/run/amnezia-failover.json}"
 AL_QUERYLOG="${AL_QUERYLOG:-/tmp/dnsmasq-queries.log}"
-AL_LOCK="${AL_LOCK:-/var/lock/amnezia-autolearn.lock}"
+# AL_LOCK is no longer used (replaced by the mkdir-based AL_LOCKDIR below).
+AL_LOCKDIR="${AL_LOCKDIR:-$AL_DIR/autolearn/.pass.lock}"
 AUTO_LIST="$AL_DIR/force.d/auto.list"
 CAND="$AL_DIR/autolearn/candidates.tsv"
 DENY="$AL_DIR/autolearn/deny.list"
@@ -45,6 +46,22 @@ _dbg "gate: all_down=$_alldown"
 _dbg "gate: PASSED"
 
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
+
+# --- Lock (portable mkdir mutex; BusyBox flock fd-form is unreliable) ---------
+# Self-heal a stale lock left by a crashed pass (> 30 min old; one pass is
+# bounded by autolearn_max_probes * curl max-time, well under that).
+if [ -d "$AL_LOCKDIR" ]; then
+  _lk_m=$(stat -c %Y "$AL_LOCKDIR" 2>/dev/null || date -r "$AL_LOCKDIR" +%s 2>/dev/null || echo 0)
+  _lk_m=$(printf '%s' "$_lk_m" | tr -dc '0-9'); _lk_m=${_lk_m:-0}
+  [ $(( $(_now) - _lk_m )) -gt 1800 ] 2>/dev/null && rmdir "$AL_LOCKDIR" 2>/dev/null || true
+fi
+if mkdir "$AL_LOCKDIR" 2>/dev/null; then
+  trap 'rmdir "$AL_LOCKDIR" 2>/dev/null' EXIT INT TERM
+else
+  _dbg "lock held by another pass/purge; skipping"
+  exit 0
+fi
+_dbg "lock acquired"
 
 # _al_record <domain> <verdict> <clients_csv>: update candidates.tsv; on
 # threshold, append to auto.list (with LRU eviction at the cap). Returns 0 iff
@@ -146,12 +163,6 @@ _al_rotate_log() {
   # Harmless — the candidate pool is recurring popularity, not a one-shot signal;
   # any dropped domain reappears in a later pass's harvest.
 }
-
-# --- Lock (advisory; flock may be absent in dev/test) -----------------------
-# Skip-on-busy: if another pass or purge holds the lock, exit cleanly — matches
-# awg-ru-update.sh idiom. When flock is absent (dev/test), proceed unconditionally.
-exec 9>"$AL_LOCK" 2>/dev/null || true
-if command -v flock >/dev/null 2>&1; then flock -n 9 2>/dev/null || exit 0; fi
 
 _changed=0                          # declared BEFORE revalidation so a drop counts
 _al_revalidate && _changed=1        # drop stale recovered entries

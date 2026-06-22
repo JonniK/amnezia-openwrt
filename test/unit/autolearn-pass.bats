@@ -158,3 +158,31 @@ setup() {
   # Robust negative: kill -USR2 should NOT be called when no pid
   run grep -q 'kill -USR2' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
+
+@test "lock: skip-on-busy exits 0 without recording; normal run after lock release does record" {
+  export ZP_VERDICT_block_com="direct_geoblocked"; export NSLOOKUP_ADDR="93.184.216.34"
+  # Two distinct clients: block.com would be eligible for probing.
+  printf 'query[A] block.com from 192.168.1.2\nquery[A] block.com from 192.168.1.3\n' > "$AL_QUERYLOG"
+  # Pre-seed candidates.tsv so one more pass would reach the threshold (count=1 already).
+  _ts=$(date +%s)
+  printf 'block.com\tdirect_geoblocked\t1\t192.168.1.2\t%s\t%s\tgeoblock\n' "$_ts" "$_ts" \
+    > "$AL_DIR/autolearn/candidates.tsv"
+  # Simulate a concurrently-running pass by holding the lock dir.
+  export AL_LOCKDIR="$AL_DIR/autolearn/.pass.lock"
+  mkdir "$AL_LOCKDIR"
+  # --- Busy run: should exit 0 but must NOT probe or record ---
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # Robust negative: zapret-probe must not have been called while lock was held
+  run grep -q 'zapret-probe' "$STUB_LOG"; [ "$status" -ne 0 ]
+  # Robust negative: block.com must not have been added to auto.list
+  run sh -c "grep -qx 'block.com' '$AL_DIR/force.d/auto.list' 2>/dev/null"; [ "$status" -ne 0 ]
+  # --- Release the lock and retry: same log bytes but offset is 0 (we reset below) ---
+  rmdir "$AL_LOCKDIR"
+  # Reset offset so the pass re-harvests the same log content.
+  rm -f "$AL_DIR/autolearn/.dnsmasq-log.offset"
+  : > "$STUB_LOG"   # clear call log so fresh assertions are clean
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # This is the 2nd probe -> count reaches 2 -> block.com is added
+  grep -qx 'block.com' "$AL_DIR/force.d/auto.list"
+  grep -q 'amnezia-force-load' "$STUB_LOG"
+}

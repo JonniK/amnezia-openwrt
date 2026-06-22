@@ -6,14 +6,26 @@ AUTO_LIST="${AUTO_LIST:-$AL_DIR/force.d/auto.list}"
 CAND="$AL_DIR/autolearn/candidates.tsv"
 DENY="$AL_DIR/autolearn/deny.list"
 MANUAL="$AL_DIR/force-tunnel.list"
-AL_LOCK="${AL_LOCK:-/var/lock/amnezia-autolearn.lock}"
+# AL_LOCKDIR must match the same default used by the pass script so they
+# genuinely mutually-exclude each other.
+AL_LOCKDIR="${AL_LOCKDIR:-$AL_DIR/autolearn/.pass.lock}"
 AMNEZIA_FORCE_LOAD="${AMNEZIA_FORCE_LOAD:-amnezia-force-load}"
 AL_INIT="${AL_INIT:-/etc/init.d/amnezia-autolearn}"
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 
 _je() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t' | tr -d '\000-\037'; }
 _reload() { "$AMNEZIA_FORCE_LOAD" >/dev/null 2>&1 || true; }
-_lock() { exec 9>"$AL_LOCK" 2>/dev/null || return 0; if command -v flock >/dev/null 2>&1; then flock -w 25 9 2>/dev/null || true; fi; }  # 25s < rpcd ~30s exec timeout; on timeout we proceed rather than hang
+# Bounded poll-wait (~25s) so a ctl op waits for a running pass but never hangs
+# past rpcd's ~30s exec timeout. Proceeds best-effort on timeout.
+_lock() {
+  mkdir -p "$AL_DIR/autolearn" 2>/dev/null || true
+  _i=0
+  while ! mkdir "$AL_LOCKDIR" 2>/dev/null; do
+    _i=$((_i+1)); [ "$_i" -ge 25 ] && return 0   # ~25s bound -> proceed best-effort
+    sleep 1
+  done
+  trap 'rmdir "$AL_LOCKDIR" 2>/dev/null' EXIT INT TERM
+}
 
 cmd="${1:-status}"
 case "$cmd" in
