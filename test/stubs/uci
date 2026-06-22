@@ -6,10 +6,16 @@ if [ "$_verb" = "-q" ]; then shift; _verb="$1"; fi
 # delete always returns 1: real UCI returns 1 when the section/option does not
 # exist (the while-loop teardown idiom relies on this to terminate).
 case "$_verb" in
+  add) echo "amzsec"; exit 0 ;;
   delete) exit 1 ;;
   del_list) exit 0 ;;
   add_list) exit 0 ;;
 esac
+if [ "$1" = show ] && [ -n "$2" ]; then
+  _showk="UCI_SHOW_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
+  eval _showv="\${$_showk+set}"
+  if [ "${_showv:-}" = set ]; then eval printf '%s\\n' "\"\$$_showk\""; exit 0; fi
+fi
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;
@@ -64,10 +70,10 @@ case "$1 $2" in
       echo "firewall.vpn.network=${_line}"
     fi ;;
   get*)
-    # Generic UCI_GET_<normalized_key> env lookup (normalized via tr '.-' '__').
+    # Generic UCI_GET_<normalized_key> env lookup (normalized via tr -c '[:alnum:]' '_').
     # Allows tests to export UCI_GET_amnezia_config_foo='bar' and have
-    # `uci -q get amnezia.config.foo` return 'bar'.
-    _envk="UCI_GET_$(printf '%s' "$2" | tr '.-' '__')"
+    # `uci -q get amnezia.config.foo` return 'bar'. Handles @[]-brackets too.
+    _envk="UCI_GET_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
     eval _envv="\${$_envk+set}"
     if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
     # Dynamic uci -q get for force_source attributes: serve from UCI_FAKE_SOURCES.

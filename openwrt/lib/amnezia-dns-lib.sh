@@ -38,3 +38,38 @@ dns_profile() {
   esac
   [ -n "$DNS_DOT_IP" ] && [ "$DNS_DOT_IP" != "$DNS_DOH_BOOTSTRAP" ]
 }
+
+AMNEZIA_STUBBY_INIT="${AMNEZIA_STUBBY_INIT:-/etc/init.d/stubby}"
+AMNEZIA_DOH_INIT="${AMNEZIA_DOH_INIT:-/etc/init.d/https-dns-proxy}"
+
+# Delete every @<type> section of <cfg>. Count type lines (unquoted, grep-safe
+# per CLAUDE.md), then delete that many @type[0]; bounded so it never depends on
+# `uci delete`'s exit status (real UCI returns 0; the test stub returns 1).
+_uci_drop_all() {
+  _n=$(uci -q show "$1" 2>/dev/null | grep -c "=$2$")
+  _i=0; while [ "$_i" -lt "$_n" ]; do uci -q delete "$1.@$2[0]" 2>/dev/null || true; _i=$((_i+1)); done
+}
+
+dns_render_stubby() {
+  _uci_drop_all stubby resolver
+  _s=$(uci add stubby resolver)
+  uci set "stubby.$_s.address=$DNS_DOT_IP"
+  uci set "stubby.$_s.tls_auth_name=$DNS_DOT_HOST"
+  uci set "stubby.$_s.tls_authentication=1"
+  uci -q delete stubby.global.listen_address 2>/dev/null || true
+  uci add_list "stubby.global.listen_address=127.0.0.1@$DOT_PORT"
+  uci set "stubby.global.tls_connection_timeout=2"   # short: bound the tunnel-down stall
+  uci commit stubby
+  "$AMNEZIA_STUBBY_INIT" restart 2>/dev/null || true
+}
+
+dns_render_doh() {
+  _uci_drop_all https-dns-proxy https-dns-proxy
+  _d=$(uci add https-dns-proxy https-dns-proxy)
+  uci set "https-dns-proxy.$_d.resolver_url=https://$DNS_DOH_HOST/dns-query"
+  uci set "https-dns-proxy.$_d.bootstrap_dns=$DNS_DOH_BOOTSTRAP"
+  uci set "https-dns-proxy.$_d.listen_addr=127.0.0.1"
+  uci set "https-dns-proxy.$_d.listen_port=$DOH_PORT"
+  uci commit https-dns-proxy
+  "$AMNEZIA_DOH_INIT" restart 2>/dev/null || true
+}
