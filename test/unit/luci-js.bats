@@ -111,3 +111,12 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
 @test "main.js failover-tunnel-table anchor is preserved (poll self-unregister)" {
   grep -q "failover-tunnel-table" "$F"
 }
+
+@test "main.js wires the DoT toggle + provider dropdown + plaintext warning" {
+  JS="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
+  grep -q "amnezia-dns-ctl" "$JS"
+  grep -Eq "'enable'|\"enable\"" "$JS"
+  grep -q "set-provider" "$JS"
+  grep -q "active_tier" "$JS"
+  grep -q "plaintext" "$JS"
+}
