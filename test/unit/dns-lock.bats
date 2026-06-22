@@ -49,3 +49,11 @@ COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
   [ "$status" -eq 0 ]
   grep -q "dnsmasq restart" "$STUB_LOG"
 }
+
+@test "force-load takes the fd-8 dnsmasq lock around its dnsmasq restart (not fd 9)" {
+  FL="$HARNESS_DIR/../openwrt/amnezia-force-load.sh"
+  grep -q "dnsmasq_lock" "$FL"
+  grep -q "dnsmasq_unlock" "$FL"
+  run grep -Eq 'exec[[:space:]]+9>.*dnsmasq|flock[[:space:]]+-x[[:space:]]+9.*dnsmasq' "$FL"
+  [ "$status" -ne 0 ]
+}
