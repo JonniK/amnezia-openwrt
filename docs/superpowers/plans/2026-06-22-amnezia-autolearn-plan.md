@@ -52,6 +52,8 @@
 
 Commit after every task. Run `bats test/unit/<file>.bats` for unit gates; the full suite is `bats test/unit/`.
 
+> **Commit hygiene (MANDATORY):** the working tree may carry **unrelated uncommitted changes** belonging to the `feat/multi-tunnel-failover` branch (a parallel force-update fix touched `openwrt/amnezia-force-update.sh`, `openwrt/lib/amnezia-common.sh`, `test/stubs/*`, `test/unit/force-update.bats`, and their `packages/` copies). **Never `git add -A` / `git add .` / `git commit -am`** — always stage the explicit paths each task names, and run `git status` before every commit to confirm no foreign file is staged. Before starting execution, reconcile the tree (commit those changes to their own branch, or stash them) so they don't intermix — see the pre-execution note at the end of this plan.
+
 ---
 
 ## Phase 1 — Library `amnezia-autolearn-lib.sh`
@@ -59,11 +61,13 @@ Commit after every task. Run `bats test/unit/<file>.bats` for unit gates; the fu
 **Files:**
 - Create: `openwrt/lib/amnezia-autolearn-lib.sh`
 - Test: `test/unit/autolearn-lib.bats`
-- Stub (extend): `test/stubs/nslookup`
+- Stub (extend): `test/stubs/nslookup`, `test/stubs/uci`
 
-### Task 1.1: `al_ip_is_public`
+### Task 1.0: extend the `uci` stub with `UCI_GET_*` resolution (PREREQUISITE)
 
-- [ ] **Step 1: Write the failing test** — append to a new `test/unit/autolearn-lib.bats`:
+The repo `uci` stub has only hardcoded `case` arms and **no** `UCI_GET_*` mechanism — every Phase-1/5/6 gate, cidr, and status test depends on one. Add it WITHOUT breaking existing tests (`state-write.bats` asserts `routing_mode` defaults to `tunnel-default`).
+
+- [ ] **Step 1: Failing test** — `test/unit/autolearn-lib.bats` (created here; reused by later tasks):
 
 ```bash
 #!/usr/bin/env bats
@@ -71,6 +75,49 @@ load '../lib/harness.bash'
 LIB="$HARNESS_DIR/../openwrt/lib/amnezia-autolearn-lib.sh"
 setup() { . "$LIB"; }
 
+@test "uci stub: UCI_GET_* override resolves, unset key exits non-zero" {
+  export UCI_GET_amnezia_config_autolearn_enabled="1"
+  run uci -q get amnezia.config.autolearn_enabled
+  [ "$status" -eq 0 ]; [ "$output" = "1" ]
+  run uci -q get amnezia.config.does_not_exist
+  [ "$status" -ne 0 ]; [ -z "$output" ]
+}
+@test "uci stub: existing hardcoded routing_mode default preserved when unset" {
+  run uci -q get amnezia.config.routing_mode
+  [ "$output" = "tunnel-default" ]    # unchanged for state-write.bats
+}
+```
+
+- [ ] **Step 2: Run → FAIL** (`UCI_GET_*` not honored).
+
+- [ ] **Step 3: Implement** — in `test/stubs/uci`, in the `get`/`-q get` handler, BEFORE the existing hardcoded `case`, add an env lookup that maps the dotted path to `UCI_GET_<a>_<b>_<c>` (dots/hyphens → underscores) and, if that var is set, echoes it and exits 0; otherwise falls through to the existing hardcoded arms (which keep `routing_mode=tunnel-default` etc.), and a truly-unknown key still exits non-zero like real `uci -q get`:
+
+```sh
+# (inside the `get` path, after parsing "$KEY"=a.b.c)
+_envk="UCI_GET_$(printf '%s' "$KEY" | tr '.-' '__')"
+eval _envv="\${$_envk+set}"
+if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+# ...existing hardcoded case arms follow unchanged...
+```
+
+Also extend the `show` path so `uci -q show network` emits `$UCI_SHOW_network` when set (used by `al_router_lan_cidrs`):
+
+```sh
+# (inside the `show` path)
+case "$2 $3" in
+  *network*) [ -n "${UCI_SHOW_network:-}" ] && printf '%s\n' "$UCI_SHOW_network"; exit 0 ;;
+esac
+# ...existing show behavior follows...
+```
+
+- [ ] **Step 4: Run → PASS**; also `bats test/unit/state-write.bats` → still PASS (no regression).
+- [ ] **Step 5: Commit** — `git add test/stubs/uci test/unit/autolearn-lib.bats && git commit -m "test(autolearn): uci stub honors UCI_GET_* with hardcoded fallback"`
+
+### Task 1.1: `al_ip_is_public`
+
+- [ ] **Step 1: Write the failing test** — append to `test/unit/autolearn-lib.bats` (created in Task 1.0):
+
+```bash
 @test "al_ip_is_public accepts a global address" {
   run al_ip_is_public 8.8.8.8
   [ "$status" -eq 0 ]
@@ -160,7 +207,7 @@ al_name_is_probeable() {
 ```
 
 - [ ] **Step 4: Run → PASS.**
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): al_name_is_probeable public-FQDN gate"`
+- [ ] **Step 5: Commit** — `git add openwrt/lib/amnezia-autolearn-lib.sh test/unit/autolearn-lib.bats && git commit -m "feat(autolearn): al_name_is_probeable public-FQDN gate"` (explicit paths — never `-am`; the tree may carry unrelated `feat/multi-tunnel-failover` changes)
 
 ### Task 1.3: `al_router_lan_cidrs` + `al_resolve_public`
 
@@ -196,15 +243,22 @@ exit 0
   [ -z "$output" ]
 }
 @test "al_router_lan_cidrs reads configured LAN address" {
-  # uci stub returns canned values via UCI_GET_* env (see test note below)
+  export UCI_SHOW_network="network.lan=interface"   # stub: drives uci -q show network
   export UCI_GET_network_lan_ipaddr="192.168.1.1"
   export UCI_GET_network_lan_netmask="255.255.255.0"
   run al_router_lan_cidrs
   echo "$output" | grep -q "192.168.1."
 }
+@test "al_resolve_public rejects a PUBLIC address that is inside the router LAN" {
+  export UCI_SHOW_network="network.lan=interface"
+  export UCI_GET_network_lan_ipaddr="93.184.216.1"   # public-looking LAN (test)
+  export NSLOOKUP_ADDR="93.184.216.34"               # same /24 as router LAN
+  run al_resolve_public example.com
+  [ -z "$output" ]                                    # rejected as same-LAN
+}
 ```
 
-> Test note: the repo `uci` stub already resolves `uci -q get a.b.c` from env `UCI_GET_a_b_c` when set (see `test/stubs/uci`). If a given key is unset it echoes nothing and exits non-zero, matching real `uci -q get`.
+> Test note: Task 1.0 extended the `uci` stub to resolve `uci -q get a.b.c` from `UCI_GET_a_b_c` (and to exit non-zero when unset). `al_router_lan_cidrs` also calls `uci -q show network`; extend the stub's `show` arm in Task 1.0 to emit `$UCI_SHOW_network` when set (one `network.<sec>=interface` line per section), else nothing. Add this to the Task 1.0 implement step and its commit.
 
 - [ ] **Step 3: Implement** — append to the lib:
 
@@ -224,27 +278,33 @@ al_router_lan_cidrs() {
   done
 }
 
-# _al_same_lan <ip>: exit 0 iff <ip> shares the /24 of any router LAN address.
+# _al_same_lan <ip>: return 0 iff <ip> shares the /24 of any router LAN address.
+# No pipeline-subshell (avoids any ambiguity about exit propagation): capture
+# the CIDR list into a var, iterate with a plain for-loop.
 _al_same_lan() {
   _q="$1"; _q3="${_q%.*}"
-  al_router_lan_cidrs | while IFS= read -r _line; do
-    _la="${_line%%/*}"; [ "${_la%.*}" = "$_q3" ] && exit 0
+  _cidrs=$(al_router_lan_cidrs)
+  for _line in $_cidrs; do
+    _la="${_line%%/*}"
+    [ "${_la%.*}" = "$_q3" ] && return 0
   done
-  # `while` runs in a subshell; translate its exit via $?.
-  [ $? -eq 0 ]
+  return 1
 }
 
 # al_resolve_public <domain>: echo first public, non-LAN A record (or empty).
+# Anchor to the ANSWER section: skip the leading Server:/Address: block (the
+# resolver's own address) so an upstream like 8.8.8.8#53 is not mistaken for an
+# A record of the domain.
 al_resolve_public() {
   _d="$1"
-  nslookup "$_d" 2>/dev/null \
-    | awk '/^Address: ?[0-9]/{print $2}' \
-    | sed 's/#.*//' \
-    | while IFS= read -r _a; do
-        al_ip_is_public "$_a" || continue
-        _al_same_lan "$_a" && continue
-        printf '%s\n' "$_a"; break
-      done
+  _addrs=$(nslookup "$_d" 2>/dev/null | awk '
+    /^Name:/ {ans=1; next}                 # answer section starts at first Name:
+    ans && /^Address: ?[0-9]/ {sub(/#.*/,"",$2); print $2}')
+  for _a in $_addrs; do
+    al_ip_is_public "$_a" || continue
+    _al_same_lan "$_a" && continue
+    printf '%s\n' "$_a"; break
+  done
 }
 ```
 
@@ -284,18 +344,23 @@ al_resolve_public() {
 al_querylog_pairs() {
   _f="$1"; _off="${2:-0}"
   [ -f "$_f" ] || return 0
+  case "$_off" in *[!0-9]*|'') _off=0 ;; esac
   _size=$(wc -c < "$_f" 2>/dev/null || echo 0)
   [ "$_off" -gt "$_size" ] 2>/dev/null && _off=0   # shrink/rotation guard
-  dd if="$_f" bs=1 skip="$_off" 2>/dev/null \
+  # tail -c +N is 1-based; read bytes after the offset. Far cheaper than
+  # `dd bs=1` (one syscall per byte) on a near-2MiB tmpfs log. The awk scans
+  # fields for one starting `query[` so it is robust to a `dnsmasq[pid]:`
+  # daemon-tag prefix; the client IP is the last field (`... from <ip>`).
+  tail -c "+$((_off + 1))" "$_f" 2>/dev/null \
     | awk '
         /query\[[A-Za-z]+\] [^ ]+ from [0-9]/ {
-          for (i=1;i<=NF;i++) if ($i ~ /^query\[/) { dom=$(i+1); ip=$(NF); print dom, ip }
+          for (i=1;i<=NF;i++) if ($i ~ /^query\[/) { print $(i+1), $NF }
         }'
 }
 ```
 
 - [ ] **Step 4: Run → PASS.**
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): al_querylog_pairs query-log harvester"`
+- [ ] **Step 5: Commit** — `git add openwrt/lib/amnezia-autolearn-lib.sh test/unit/autolearn-lib.bats && git commit -m "feat(autolearn): al_querylog_pairs query-log harvester"`
 
 ### Task 1.5: `al_deny_match`
 
@@ -337,7 +402,7 @@ al_deny_match() {
 ```
 
 - [ ] **Step 4: Run → PASS** (whole file: `bats test/unit/autolearn-lib.bats`).
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): al_deny_match suffix-aware deny test"`
+- [ ] **Step 5: Commit** — `git add openwrt/lib/amnezia-autolearn-lib.sh test/unit/autolearn-lib.bats && git commit -m "feat(autolearn): al_deny_match suffix-aware deny test"`
 
 ---
 
@@ -360,9 +425,13 @@ SCRIPT="$HARNESS_DIR/../openwrt/zapret-probe.sh"
   grep -q -- '--resolve example.com:80:93.184.216.34' "$STUB_LOG"
   grep -q -- '--max-redirs 0' "$STUB_LOG"
 }
-@test "unpinned invocation is unchanged (no --resolve)" {
+@test "unpinned invocation is byte-equivalent: -sL preserved, no --resolve/--max-redirs" {
   run sh "$SCRIPT" example.com
   ! grep -q -- '--resolve' "$STUB_LOG"
+  ! grep -q -- '--max-redirs' "$STUB_LOG"
+  grep -q -- '-sL' "$STUB_LOG"        # silent + follow-redirects retained
+  grep -q -- '-D ' "$STUB_LOG"        # header dump still requested
+  grep -q -- "%{http_code}" "$STUB_LOG"
 }
 @test "pinned-IP arg is validated (rejects non-IP)" {
   run sh "$SCRIPT" example.com not-an-ip
@@ -381,7 +450,10 @@ SCRIPT="$HARNESS_DIR/../openwrt/zapret-probe.sh"
 # redirects (a block manifests at the handshake / first response).
 pinned_ip=${2:-}
 RESOLVE_OPTS=""
-REDIR_OPTS="-L"
+# REDIR_OPTS carries the redirect policy. The unpinned (existing UI) path MUST
+# stay byte-equivalent to the original `-sL` — keep BOTH -s and -L. The pinned
+# path keeps -s but forbids redirects.
+REDIR_OPTS="-sL"
 if [ -n "$pinned_ip" ]; then
   case "$pinned_ip" in
     *.*.*.*) : ;;
@@ -389,11 +461,11 @@ if [ -n "$pinned_ip" ]; then
   esac
   case "$pinned_ip" in *[!0-9.]*) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;; esac
   RESOLVE_OPTS="--resolve $domain:443:$pinned_ip --resolve $domain:80:$pinned_ip"
-  REDIR_OPTS="--max-redirs 0"
+  REDIR_OPTS="-s --max-redirs 0"
 fi
 ```
 
-Then change the two `curl` invocations to use the new options. Replace lines 56–60:
+Then change the two `curl` invocations. Replace lines 56–60 (note `-sL` becomes `$REDIR_OPTS`, which is `-sL` when unpinned → byte-equivalent):
 
 ```sh
 out=$(curl --interface wan $RESOLVE_OPTS \
@@ -413,7 +485,7 @@ and the body-peek `curl` (lines 104–106):
 
 (Note: `$RESOLVE_OPTS`/`$REDIR_OPTS` are intentionally unquoted for word-splitting; they hold only validated tokens.)
 
-- [ ] **Step 4: Run → PASS.** Confirm the existing UI probe path is unaffected: `bats test/unit/` (no regressions in any zapret test).
+- [ ] **Step 4: Run → PASS.** Confirm the unpinned path is byte-equivalent and the full suite is green: `bats test/unit/` (no regressions).
 - [ ] **Step 5: Commit** — `git add openwrt/zapret-probe.sh test/unit/zapret-probe-pin.bats && git commit -m "feat(zapret-probe): optional pinned-IP arg (--resolve + no-redirect) for SSRF-safe probing"`
 
 ---
@@ -478,7 +550,7 @@ Then, immediately after the domain dedup (after line 134, where `_tmp_domains` i
   fi
 ```
 
-- [ ] **Step 4: Run → PASS** — `bats test/unit/force-load.bats`.
+- [ ] **Step 4: Run → PASS** — `bats test/unit/force-load.bats` AND the full suite `bats test/unit/` (force-load runs on the existing force-update cron path — assert zero regressions, esp. `force-update.bats`).
 - [ ] **Step 5: Commit** — `git add openwrt/amnezia-force-load.sh test/unit/force-load.bats && git commit -m "feat(force-load): guarded suffix-aware deny.list global exclusion"`
 
 ---
@@ -676,14 +748,16 @@ mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 }
 @test "dpi needs 3 confirmations" {
   export ZP_VERDICT_dpi_com="direct_dpi_blocked"; export NSLOOKUP_ADDR="93.184.216.34"
+  # APPEND fresh bytes each pass so the offset advances and dpi.com is
+  # re-harvested (a same-size rewrite would leave offset==size -> no harvest).
   for i in 1 2; do
-    printf 'query[A] dpi.com from 192.168.1.2\nquery[A] dpi.com from 192.168.1.3\n' > "$AL_QUERYLOG"
+    printf 'query[A] dpi.com from 192.168.1.2\nquery[A] dpi.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
     run sh "$SCRIPT"
   done
-  ! grep -q '^dpi.com$' "$AL_DIR/force.d/auto.list" 2>/dev/null   # only 2 -> not yet
-  printf 'query[A] dpi.com from 192.168.1.2\nquery[A] dpi.com from 192.168.1.3\n' > "$AL_QUERYLOG"
+  ! grep -qx 'dpi.com' "$AL_DIR/force.d/auto.list" 2>/dev/null    # only 2 -> not yet
+  printf 'query[A] dpi.com from 192.168.1.2\nquery[A] dpi.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
   run sh "$SCRIPT"
-  grep -q '^dpi.com$' "$AL_DIR/force.d/auto.list"                 # 3rd -> added
+  grep -qx 'dpi.com' "$AL_DIR/force.d/auto.list"                  # 3rd -> added
 }
 @test "RU domains and denied domains are skipped" {
   export ZP_VERDICT_DEFAULT="direct_geoblocked"; export NSLOOKUP_ADDR="93.184.216.34"
@@ -700,9 +774,18 @@ mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 - [ ] **Step 3: Implement** — append the harvest/probe/confirm body to `openwrt/amnezia-autolearn.sh`:
 
 ```sh
-# --- Lock (advisory) --------------------------------------------------------
+# Placeholders implemented in Tasks 5.4/5.5 — defined here as no-ops so this
+# task's script runs standalone; later tasks REPLACE these definitions.
+_al_revalidate() { return 1; }
+_al_rotate_log() { return 0; }
+_al_prune_candidates() { return 0; }
+
+# --- Lock (advisory; flock may be absent in dev/test) -----------------------
 exec 9>"$AL_LOCK" 2>/dev/null || true
-flock -n 9 2>/dev/null || exit 0
+flock -n 9 2>/dev/null || true     # NEVER `|| exit` — matches force-load idiom
+
+_changed=0                          # declared BEFORE revalidation so a drop counts
+_al_revalidate && _changed=1        # (defined in Task 5.4) drop stale recovered entries
 
 # --- Harvest pairs since offset --------------------------------------------
 _off=0; [ -f "$OFFSET_F" ] && _off=$(cat "$OFFSET_F" 2>/dev/null || echo 0)
@@ -711,75 +794,95 @@ _size=$(wc -c < "$AL_QUERYLOG" 2>/dev/null || echo 0)
 _pairs=$(al_querylog_pairs "$AL_QUERYLOG" "$_off")
 printf '%s\n' "$_size" > "$OFFSET_F"
 
-# Tally distinct clients per domain this pass (domain -> space-set of IPs).
-# Skip RU/.ru and denied domains up front.
-_cand_tmp=$(mktemp 2>/dev/null || echo "/tmp/al-cand.$$")
-printf '%s\n' "$_pairs" | while read -r _dom _ip; do
+# Tally (domain, client) pairs this pass. Skip RU/.ru and denied up front.
+# NOTE: write to the tmp file inside the loop's OWN process (here-string, not a
+# pipe) so it is not lost to a pipeline subshell.
+_cand_tmp=$(mktemp 2>/dev/null || echo "/tmp/al-cand.$$"); : > "$_cand_tmp"
+printf '%s\n' "$_pairs" > "${_cand_tmp}.raw"
+while read -r _dom _ip; do
   [ -n "$_dom" ] || continue
   case "$_dom" in *.ru) continue ;; esac
   al_name_is_probeable "$_dom" || continue
   al_deny_match "$_dom" "$DENY" && continue
   grep -qx "$_dom" "$AUTO_LIST" 2>/dev/null && continue
   printf '%s\t%s\n' "$_dom" "$_ip" >> "$_cand_tmp"
-done
+done < "${_cand_tmp}.raw"
+rm -f "${_cand_tmp}.raw"
 
-# Distinct-client count per domain.
-_eligible=$(awk -F'\t' '{seen[$1"\t"$2]++} END{ for(k in seen){split(k,a,"\t"); cnt[a[1]]++}
-  for(d in cnt) if(cnt[d]>=2) print d }' "$_cand_tmp" 2>/dev/null)
-rm -f "$_cand_tmp"
+# Per-client fairness cap + distinct-client (>=2) eligibility, in one awk.
+# - drop pairs beyond autolearn_max_per_client for any single client IP
+# - a domain is eligible iff >=2 DISTINCT client IPs resolved it
+# Also emit, for each eligible domain, its distinct-client CSV for candidates.tsv.
+_maxpc=$(_uci amnezia.config.autolearn_max_per_client); _maxpc=${_maxpc:-5}
+_eligible=$(awk -F'\t' -v maxpc="$_maxpc" '
+  { dom=$1; ip=$2
+    if (++perclient[ip] > maxpc) next            # fairness cap per client IP
+    if (!(dom SUBSEP ip in seenpair)) { seenpair[dom SUBSEP ip]=1; dcnt[dom]++ } }
+  END { for (d in dcnt) if (dcnt[d] >= 2) print d }' "$_cand_tmp")
+# clients CSV per domain (for the TSV record).
+_clients_for() {
+  awk -F'\t' -v d="$1" '$1==d{ if(!(d $2 in s)){s[d $2]=1; c=c (c?",":"") $2} } END{print c}' "$_cand_tmp"
+}
 
 _max_probes=$(_uci amnezia.config.autolearn_max_probes); _max_probes=${_max_probes:-20}
-_changed=0; _n=0
+_n=0
 for _dom in $_eligible; do
   [ "$_n" -lt "$_max_probes" ] || break
   _n=$((_n+1))
   _pin=$(al_resolve_public "$_dom"); [ -n "$_pin" ] || continue   # SSRF gate
   _verdict=$(zapret-probe "$_dom" "$_pin" | grep -o '"verdict":"[^"]*"' | sed 's/.*:"//;s/"//')
-  _al_record "$_dom" "$_verdict" && _changed=1
+  if _al_record "$_dom" "$_verdict" "$(_clients_for "$_dom")"; then _changed=1; fi
 done
+rm -f "$_cand_tmp"
 
+_al_rotate_log                                   # (Task 5.5) bound the tmpfs log
+_al_prune_candidates                             # (Task 5.4) retention
 [ "$_changed" = 1 ] && "$AMNEZIA_FORCE_LOAD" >/dev/null 2>&1
 exit 0
 ```
 
-And insert the `_al_record` helper **above** the harvest block (after the gate/mkdir), which owns the TSV confirm logic:
+And insert the `_al_record` helper **above** the harvest block (after the gate/mkdir). It returns **0 ONLY when it appends to auto.list**, 1 otherwise (so a `direct_ok`/non-trigger verdict never triggers `force-load`):
 
 ```sh
-# _al_record <domain> <verdict>: update candidates.tsv; on threshold, append to
-# auto.list. Returns 0 (success) and sets nothing if no add; prints nothing.
-# Echoes "ADD" to stdout-suppressed caller via return is awkward in sh, so we
-# signal an add by touching a marker file the caller checks.
-_AL_ADDED_MARK="${TMPDIR:-/tmp}/.al-added.$$"
+# _al_record <domain> <verdict> <clients_csv>: update candidates.tsv; on
+# threshold, append to auto.list (with LRU eviction at the cap). Returns 0 iff
+# a domain was newly appended to auto.list; 1 otherwise.
 _al_record() {
-  _d="$1"; _v="$2"; _ts=$(_now)
-  case "$_v" in direct_geoblocked) _reason=geoblock; _thresh=2 ;;
-                direct_dpi_blocked) _reason=dpi; _thresh=3 ;;
-                *) return 0 ;; esac   # ok/blocked/unreachable/error -> no-op
-  # Read prior row.
+  _d="$1"; _v="$2"; _clients="$3"; _ts=$(_now)
+  case "$_v" in
+    direct_geoblocked) _reason=geoblock; _thresh=2 ;;
+    direct_dpi_blocked) _reason=dpi; _thresh=3 ;;
+    *) return 1 ;;                      # ok/blocked/unreachable/error -> no add
+  esac
   _prev=$(awk -F'\t' -v d="$_d" '$1==d{print; exit}' "$CAND" 2>/dev/null)
   if [ -n "$_prev" ]; then
     _cnt=$(printf '%s' "$_prev" | cut -f3); _first=$(printf '%s' "$_prev" | cut -f5)
   else
     _cnt=0; _first=$_ts
   fi
+  case "$_cnt" in *[!0-9]*|'') _cnt=0 ;; esac
   _cnt=$((_cnt+1))
-  # Rewrite the row (drop old, append new).
   _tmp=$(mktemp 2>/dev/null || echo "$CAND.$$")
   awk -F'\t' -v d="$_d" '$1!=d' "$CAND" 2>/dev/null > "$_tmp"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_d" "$_v" "$_cnt" "" "$_first" "$_ts" "$_reason" >> "$_tmp"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_d" "$_v" "$_cnt" "$_clients" "$_first" "$_ts" "$_reason" >> "$_tmp"
   mv "$_tmp" "$CAND"
-  if [ "$_cnt" -ge "$_thresh" ] && ! grep -qx "$_d" "$AUTO_LIST" 2>/dev/null; then
-    printf '%s\n' "$_d" >> "$AUTO_LIST"
-    return 0
+  [ "$_cnt" -ge "$_thresh" ] || return 1
+  grep -qx "$_d" "$AUTO_LIST" 2>/dev/null && return 1   # already present
+  # Size cap with LRU eviction (never evicts force-tunnel.list/manual entries).
+  _cap=$(_uci amnezia.config.autolearn_max_entries); _cap=${_cap:-500}
+  _count=$(grep -c . "$AUTO_LIST" 2>/dev/null || echo 0)
+  if [ "$_count" -ge "$_cap" ] 2>/dev/null; then
+    _victim=$(awk -F'\t' 'NR==FNR{auto[$0]=1; next} ($1 in auto){print $6"\t"$1}' \
+                "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
+    [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
   fi
-  return 1
+  printf '%s\n' "$_d" >> "$AUTO_LIST"
+  return 0
 }
 ```
 
-> Note: replace the `_al_record … && _changed=1` call site so a return of 0 means "added". The simplest correct form (sh has no easy out-param) is: `if _al_record "$_dom" "$_verdict"; then _changed=1; fi`. Update the loop accordingly.
-
 - [ ] **Step 4: Run → PASS** (`bats test/unit/autolearn-pass.bats`). Fix any `uci` stub dot-mapping gap surfaced here.
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): harvest+eligibility+pinned-probe+confirm core"`
+- [ ] **Step 5: Commit** — `git add openwrt/amnezia-autolearn.sh test/unit/autolearn-pass.bats && git commit -m "feat(autolearn): harvest+eligibility+pinned-probe+confirm core"`
 
 ### Task 5.4: revalidation-drop, LRU size cap, candidate retention
 
@@ -801,10 +904,24 @@ _al_record() {
   printf 'lru.com\n' > "$AUTO_LIST"
   old=$(( $(date +%s) - 100 ))
   printf 'lru.com\tdirect_geoblocked\t2\t\t%s\t%s\tgeoblock\n' "$old" "$old" > "$CAND"
-  printf 'query[A] new.com from 192.168.1.2\nquery[A] new.com from 192.168.1.3\n' > "$AL_QUERYLOG"
-  run sh "$SCRIPT"; run sh "$SCRIPT"   # confirm new.com over 2 passes
+  # APPEND fresh bytes before each pass so new.com is harvested both times.
+  printf 'query[A] new.com from 192.168.1.2\nquery[A] new.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
+  run sh "$SCRIPT"   # count 1
+  printf 'query[A] new.com from 192.168.1.2\nquery[A] new.com from 192.168.1.3\n' >> "$AL_QUERYLOG"
+  run sh "$SCRIPT"   # count 2 -> confirmed -> evicts the LRU (lru.com)
   grep -qx 'new.com' "$AUTO_LIST"
   ! grep -qx 'lru.com' "$AUTO_LIST"     # evicted
+}
+@test "retention: stale candidate not in auto.list is pruned; an in-list one is kept" {
+  export UCI_GET_amnezia_config_autolearn_candidate_retention_days="30"
+  old=$(( $(date +%s) - 40*86400 ))            # older than 30 days
+  printf 'gone.com\tdirect_ok\t1\t\t%s\t%s\t\n' "$old" "$old"  > "$CAND"
+  printf 'kept.com\tdirect_geoblocked\t2\t\t%s\t%s\tgeoblock\n' "$old" "$old" >> "$CAND"
+  printf 'kept.com\n' > "$AUTO_LIST"           # kept.com is live in auto.list
+  : > "$AL_QUERYLOG"                            # nothing to harvest this pass
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  ! grep -q '^gone.com' "$CAND"                 # pruned (stale + not in auto.list)
+  grep -q '^kept.com' "$CAND"                   # retained (in auto.list)
 }
 ```
 
@@ -838,24 +955,24 @@ _al_revalidate() {
 }
 ```
 
-Call `_al_revalidate && _changed=1` once, before the harvest loop. In `_al_record`, before appending a new domain, enforce the cap:
+`_al_revalidate` is already wired into the pass body (Task 5.3: `_changed=0` then `_al_revalidate && _changed=1`, before harvest). The LRU size cap already lives inside `_al_record` (Task 5.3). This task adds `_al_revalidate` (above) plus candidate-retention pruning (`_al_prune_candidates`, called near the end of the pass body in Task 5.3). Add:
 
 ```sh
-  # Size cap with LRU eviction (never evicts promoted/manual entries — those
-  # live in force-tunnel.list, not auto.list).
-  _cap=$(_uci amnezia.config.autolearn_max_entries); _cap=${_cap:-500}
-  _count=$(grep -c . "$AUTO_LIST" 2>/dev/null || echo 0)
-  if [ "$_count" -ge "$_cap" ]; then
-    _victim=$(awk -F'\t' 'NR==FNR{auto[$1]=1; next} ($1 in auto){print $6"\t"$1}' \
-                "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
-    [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -vx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
-  fi
+# _al_prune_candidates: drop candidates.tsv rows whose last_probe is older than
+# autolearn_candidate_retention_days AND that are not currently in auto.list.
+# Bounds the flash-resident, client-IP-bearing privacy artifact.
+_al_prune_candidates() {
+  [ -s "$CAND" ] || return 0
+  _days=$(_uci amnezia.config.autolearn_candidate_retention_days); _days=${_days:-30}
+  _cut=$(( $(_now) - _days*86400 ))
+  _t=$(mktemp 2>/dev/null || echo "$CAND.$$")
+  awk -F'\t' -v cut="$_cut" 'NR==FNR{auto[$0]=1; next}
+    ($1 in auto) || ($6+0 >= cut) {print}' "$AUTO_LIST" "$CAND" > "$_t" && mv "$_t" "$CAND"
+}
 ```
 
-Also add candidate retention pruning at pass end (drop `candidates.tsv` rows whose `last_probe` is older than `autolearn_candidate_retention_days*86400` AND not in `auto.list`).
-
 - [ ] **Step 4: Run → PASS** (`bats test/unit/autolearn-pass.bats`).
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): revalidation-drop + LRU size cap + candidate retention"`
+- [ ] **Step 5: Commit** — `git add openwrt/amnezia-autolearn.sh test/unit/autolearn-pass.bats && git commit -m "feat(autolearn): revalidation-drop + candidate retention prune"`
 
 ### Task 5.5: tmpfs log rotation via `mv`-then-SIGUSR2 (design §3.1)
 
@@ -902,16 +1019,19 @@ _al_rotate_log() {
   _pid=$(_al_dnsmasq_pid); [ -n "$_pid" ] || return 0
   mv "$AL_QUERYLOG" "$AL_QUERYLOG.1" 2>/dev/null || return 0
   kill -USR2 "$_pid" 2>/dev/null || true     # dnsmasq reopens AL_QUERYLOG at 0
-  # any tail in .1 was already harvested this pass (offset==size); drop it.
   rm -f "$AL_QUERYLOG.1"
   printf '0\n' > "$OFFSET_F"
+  # Accepted minor loss: query lines dnsmasq wrote to .1 between this pass's
+  # harvest and the mv (a few KB, only when the log crossed 2 MiB) are dropped.
+  # Harmless — the candidate pool is recurring popularity, not a one-shot signal;
+  # any dropped domain reappears in a later pass's harvest.
 }
 ```
 
 Call `_al_rotate_log` just before `exit 0`. The kernel reopen itself is live-only-verify (the `dnsmasq` stub can't model a retained fd); the test asserts the `mv`+signal+offset-reset path.
 
 - [ ] **Step 4: Run → PASS** (`bats test/unit/autolearn-pass.bats`).
-- [ ] **Step 5: Commit** — `git commit -am "feat(autolearn): tmpfs log rotation via mv-then-SIGUSR2 (pid-safe, skip-on-empty)"`
+- [ ] **Step 5: Commit** — `git add openwrt/amnezia-autolearn.sh test/unit/autolearn-pass.bats && git commit -m "feat(autolearn): tmpfs log rotation via mv-then-SIGUSR2 (pid-safe, skip-on-empty)"`
 
 ---
 
@@ -1078,13 +1198,27 @@ AL_LOG="/tmp/dnsmasq-queries.log"
 
 _interval() { uci -q get amnezia.config.autolearn_interval_min 2>/dev/null || echo 30; }
 
+# Set a dhcp option only if it differs; echo "changed" when it did. Lets the
+# caller restart dnsmasq ONLY on a real change (avoids a boot restart storm).
+_set_if_diff() {  # <uci-path> <value>
+  _cur=$(uci -q get "$1" 2>/dev/null)
+  [ "$_cur" = "$2" ] && return 1
+  uci set "$1=$2"; return 0
+}
+
 enable() {
-  uci set dhcp.@dnsmasq[0].logqueries=1
-  uci set "dhcp.@dnsmasq[0].logfacility=$AL_LOG"
-  uci set dhcp.@dnsmasq[0].log-async=5
-  uci commit dhcp
-  "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
-  # Install cron line (idempotent).
+  _ch=0
+  _set_if_diff dhcp.@dnsmasq[0].logqueries 1 && _ch=1
+  _set_if_diff "dhcp.@dnsmasq[0].logfacility" "$AL_LOG" && _ch=1
+  _set_if_diff dhcp.@dnsmasq[0].log-async 5 && _ch=1
+  if [ "$_ch" = 1 ]; then
+    uci commit dhcp
+    "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
+    # Fail-closed visibility: if the build rejected log-async/logqueries, the
+    # option won't read back — warn (no harvest is internet-safe, just inert).
+    [ "$(uci -q get dhcp.@dnsmasq[0].logqueries)" = 1 ] || \
+      logger -t amnezia-autolearn "WARNING: dnsmasq did not accept logqueries; harvesting inert"
+  fi
   touch "$AL_CRON"
   grep -q 'amnezia-autolearn' "$AL_CRON" || \
     printf '*/%s * * * * /usr/sbin/amnezia-autolearn\n' "$(_interval)" >> "$AL_CRON"
@@ -1092,12 +1226,15 @@ enable() {
 }
 
 disable() {
+  # Unconditional + idempotent (uci -q delete is a no-op if absent). disable is
+  # a deliberate, infrequent action, so an unconditional dnsmasq restart here is
+  # fine (the boot-storm concern is the enable/start path, guarded above).
   uci -q delete dhcp.@dnsmasq[0].logqueries 2>/dev/null
   uci -q delete dhcp.@dnsmasq[0].logfacility 2>/dev/null
   uci -q delete dhcp.@dnsmasq[0].log-async 2>/dev/null
   uci commit dhcp
   "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
-  if [ -f "$AL_CRON" ]; then
+  if [ -f "$AL_CRON" ] && grep -q 'amnezia-autolearn' "$AL_CRON"; then
     _t=$(mktemp 2>/dev/null || echo "$AL_CRON.$$"); grep -v 'amnezia-autolearn' "$AL_CRON" > "$_t"; mv "$_t" "$AL_CRON"
     /etc/init.d/cron reload >/dev/null 2>&1 || true
   fi
@@ -1106,9 +1243,16 @@ disable() {
 
 start() { [ "$(uci -q get amnezia.config.autolearn_enabled)" = 1 ] && enable || true; }
 stop() { disable; }
+
+# Test-env dispatch: when /etc/rc.common is ABSENT (bats), it never sourced us
+# and never dispatched $1, so do it here. On-device rc.common IS present and
+# handles $1 itself, so this block is skipped (no double-dispatch).
+if [ ! -f /etc/rc.common ]; then
+  case "${1:-}" in enable) enable ;; disable) disable ;; start) start ;; stop) stop ;; esac
+fi
 ```
 
-> Note: `/etc/rc.common` is unavailable in the bats env. Guard the test by invoking the action functions directly is awkward via the shebang; instead the init file should `. /etc/rc.common` only when present, else define `enable`/`disable` callable as `sh "$INIT" <action>`. Implement a small dispatcher at the bottom: `case "${1:-}" in enable) enable;; disable) disable;; esac` so the test path works without rc.common, while procd still uses the standard hooks on-device.
+> Note: the `#!/bin/sh /etc/rc.common` shebang only takes effect when the file is executed directly on-device; the bats tests run it as `sh "$INIT" enable`, where the shebang is inert and the bottom `if [ ! -f /etc/rc.common ]` block dispatches. On-device, rc.common is present → it dispatches `$1` and the bottom block is skipped. `_set_if_diff` makes both enable and disable restart dnsmasq only on a real change, so a boot `start` with options already set causes no restart.
 
 - [ ] **Step 4: Run → PASS** (`bats test/unit/autolearn-init.bats`). Ensure the `uci` stub records `set/delete/commit` to `STUB_LOG`.
 - [ ] **Step 5: Commit** — `git add openwrt/amnezia-autolearn.init test/unit/autolearn-init.bats && git commit -m "feat(autolearn): init — reversible query logging + cron wiring"`
@@ -1148,7 +1292,7 @@ stop() { disable; }
 
 ## Phase 9 — sync-to-packages + install wiring
 
-**Files:** Modify `openwrt/install-amnezia-pbr.sh` (add `_amz_wire_autolearn`); run `dev/sync-to-packages.sh`; Test: extend `test/unit/sync.bats` / `test/unit/packaging.bats`.
+**Files:** Modify `openwrt/install-amnezia-pbr.sh` (add `_amz_wire_autolearn`); **modify `dev/sync-to-packages.sh`** (it stages via hardcoded `cp` lists — globs won't pick up the new files); run it; Test: extend `test/unit/sync.bats` / `test/unit/packaging.bats`.
 
 ### Task 9.1: install wiring + package parity
 
@@ -1166,14 +1310,30 @@ stop() { disable; }
 
 - [ ] **Step 2: Run → FAIL.**
 - [ ] **Step 3: Implement** —
-  1. In `install-amnezia-pbr.sh`, add `_amz_wire_autolearn` (called from both fresh-install and migrate paths, like `_amz_wire_force_engine`): place the four new files, `chmod +x`, and — only if `autolearn_enabled=1` — call `/etc/init.d/amnezia-autolearn enable`. Default-OFF means a normal install does nothing visible.
-  2. Ensure the new source files are listed wherever the installer/`.ipk` staging enumerates files (the same list that the CI sync-parity check reads).
-  3. Run `dev/sync-to-packages.sh` to mirror `openwrt/ → packages/`.
+  1. **`dev/sync-to-packages.sh`** — add the four new files to the existing hardcoded `cp` lists (no globs exist):
+     - in the `/usr/bin` wrapper `for src in … ` loop, append `amnezia-autolearn-ctl.sh` (→ `/usr/bin/amnezia-autolearn-ctl`);
+     - add a dedicated `/usr/sbin` line (the pass is sbin, like `amnezia-failover`): `cp "$SRC/amnezia-autolearn.sh" "$PBR_PKG/usr/sbin/amnezia-autolearn"` + add it to that block's `chmod 0755`;
+     - add the lib: `cp "$SRC/lib/amnezia-autolearn-lib.sh" "$PBR_PKG/usr/lib/amnezia/amnezia-autolearn-lib.sh"` + add to the `chmod 0644` lib group;
+     - add the init: `cp "$SRC/amnezia-autolearn.init" "$PBR_PKG/etc/init.d/amnezia-autolearn"` + add to the init `chmod 0755` group.
+  2. In `install-amnezia-pbr.sh`, add `_amz_wire_autolearn` (called from both fresh-install and migrate paths, like `_amz_wire_force_engine`): place the four files, `chmod +x` the executables, and — only if `autolearn_enabled=1` — call `/etc/init.d/amnezia-autolearn enable`. Default-OFF means a normal install does nothing visible.
+  3. Run `dev/sync-to-packages.sh` to regenerate `packages/`.
 
-- [ ] **Step 4: Run → PASS** — `bats test/unit/packaging.bats test/unit/sync.bats`; confirm `openwrt ↔ packages` parity (the CI check) is clean.
-- [ ] **Step 5: Commit** — `git add -A openwrt/install-amnezia-pbr.sh packages test/unit/packaging.bats && git commit -m "feat(autolearn): install wiring + package-tree sync parity"`
+- [ ] **Step 4: Run → PASS** — `bats test/unit/packaging.bats test/unit/sync.bats`; confirm `openwrt ↔ packages` parity is clean (run `dev/sync-to-packages.sh` then `git status` shows no further `packages/` drift — the CI gate).
+- [ ] **Step 5: Commit** — review `git status` first, then stage EXPLICIT paths (never `git add -A` / `git add .` from root, and exclude the unrelated `feat/multi-tunnel-failover` working-tree changes if present):
 
-> Exception to the never-`git add -A` rule is NOT taken here: stage `packages/` explicitly with the exact paths `sync-to-packages.sh` changed (review `git status` first), plus the two source/test files. Never `git add -A` from the repo root.
+```bash
+git add openwrt/amnezia-autolearn.sh openwrt/amnezia-autolearn-ctl.sh \
+        openwrt/amnezia-autolearn.init openwrt/lib/amnezia-autolearn-lib.sh \
+        openwrt/install-amnezia-pbr.sh dev/sync-to-packages.sh \
+        openwrt/config/amnezia openwrt/zapret-probe.sh openwrt/amnezia-force-load.sh \
+        openwrt/luci-app-amnezia \
+        packages/amnezia-pbr packages/luci-app-amnezia \
+        test/stubs test/unit/autolearn-lib.bats test/unit/autolearn-pass.bats \
+        test/unit/autolearn-ctl.bats test/unit/autolearn-init.bats \
+        test/unit/zapret-probe-pin.bats test/unit/force-load.bats \
+        test/unit/uci-schema.bats test/unit/luci-js.bats test/unit/packaging.bats test/unit/sync.bats
+git commit -m "feat(autolearn): install wiring + sync-to-packages + parity"
+```
 
 ---
 
@@ -1194,7 +1354,7 @@ stop() { disable; }
 - [ ] **Step 3: Run** — `SSH_HOST=… dev/vm/test-all.sh autolearn` (or the harness's invocation) → expect OVERALL PASS.
 - [ ] **Step 4: Commit** — `git add dev/vm/test-autolearn.sh dev/vm/test-all.sh && git commit -m "test(autolearn): VM end-to-end direct-default learning scenario"`
 
-> Live-router carry-over (cannot be simulated — verify by hand after deploy): (a) `SIGUSR2` log rotation actually reopens dnsmasq's fd and harvest continues; (b) LAN DNS stays up during an `auto.list`-driven `force-load`; (c) the tmpfs query log does not grow unbounded; (d) `log-async=5` is accepted by the on-device dnsmasq build.
+> Live-router carry-over (cannot be simulated — verify by hand after deploy): (a) `SIGUSR2` log rotation actually reopens dnsmasq's fd and harvest continues; (b) LAN DNS stays up during an `auto.list`-driven `force-load`; (c) the tmpfs query log does not grow unbounded; (d) `log-async=5` is accepted by the on-device dnsmasq build (the init's fail-closed check logs a warning if not); (e) **capture one real line from `/tmp/dnsmasq-queries.log` and confirm it matches the harvester regex** — the `al_querylog_pairs` awk scans fields for one starting `query[`, so a `dnsmasq[pid]: query[A] <domain> from <ip>` daemon-tag prefix is already handled, but if the on-device build emits a materially different shape, pin the regex to the captured line and update the bats `dnsmasq`-format fixture to mirror it exactly (hard-won stub rule).
 
 ---
 
@@ -1206,4 +1366,14 @@ stop() { disable; }
 
 **Type/name consistency:** lib functions (`al_*`), file paths, UCI keys, TSV columns, and thresholds are defined once in "Locked contracts" and referenced verbatim throughout.
 
-**Note for the SIGUSR2 rotation:** the detailed `mv`-then-signal + procd-pidfile logic from the design §3.1 is implemented inside the P5 pass (the harvest step) — add it as a sub-task there during execution if the pass file grows large; it is unit-testable except the kernel reopen (live-only), per the design.
+**Note for the SIGUSR2 rotation:** the detailed `mv`-then-signal + procd-pidfile logic from the design §3.1 is implemented in P5 Task 5.5; it is unit-testable except the kernel reopen (live-only), per the design.
+
+## Pre-execution: reconcile the working tree FIRST
+
+Before Phase 1, the shared working tree may hold uncommitted `feat/multi-tunnel-failover` changes from a parallel force-update fix (`openwrt/amnezia-force-update.sh`, `openwrt/lib/amnezia-common.sh`, `test/stubs/wget`+`ip`, `test/unit/force-update.bats`, and their `packages/` copies). Resolve this before executing so they never intermix with autolearn commits:
+
+1. `git status` — confirm what's modified.
+2. Decide with the user (or per their standing instruction): either **(a)** commit those changes on `feat/multi-tunnel-failover` (their home branch) and rebase/merge this branch onto the result, or **(b)** `git stash` them for the duration. Do NOT commit them as part of any autolearn task.
+3. Re-run `bats test/unit/` to establish a green baseline (the parallel fix added tests — they should pass) before starting Phase 1.
+
+This is a hard prerequisite: skipping it risks the recurring "changes landed on the wrong branch / got swept into an unrelated commit" failure.
