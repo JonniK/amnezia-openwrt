@@ -10,8 +10,8 @@ SCRIPT="$HARNESS_DIR/../openwrt/zapret-probe.sh"
 }
 @test "unpinned invocation is byte-equivalent: -sL preserved, no --resolve/--max-redirs" {
   run sh "$SCRIPT" example.com
-  ! grep -q -- '--resolve' "$STUB_LOG"
-  ! grep -q -- '--max-redirs' "$STUB_LOG"
+  run grep -q -- '--resolve' "$STUB_LOG"; [ "$status" -ne 0 ]
+  run grep -q -- '--max-redirs' "$STUB_LOG"; [ "$status" -ne 0 ]
   grep -q -- '-sL' "$STUB_LOG"        # silent + follow-redirects retained
   grep -q -- '-D ' "$STUB_LOG"        # header dump still requested
   grep -q -- "%{http_code}" "$STUB_LOG"

@@ -84,6 +84,8 @@ al_resolve_public() {
 al_querylog_pairs() {
   _f="$1"; _off="${2:-0}"
   [ -f "$_f" ] || return 0
+  # Strip leading/trailing whitespace (wc -c on some systems emits padded output).
+  _off=$(printf '%s' "$_off" | tr -d ' \t')
   case "$_off" in *[!0-9]*|'') _off=0 ;; esac
   _size=$(wc -c < "$_f" 2>/dev/null || echo 0)
   [ "$_off" -gt "$_size" ] 2>/dev/null && _off=0   # shrink/rotation guard

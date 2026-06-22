@@ -76,10 +76,10 @@ setup() { . "$LIB"; }
   } >> "$log"
   run al_querylog_pairs "$log" "$off"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q '^foo.com 192.168.1.10$'
-  echo "$output" | grep -q '^baz.com 192.168.1.11$'
-  ! echo "$output" | grep -q 'skip.example'   # before offset
-  ! echo "$output" | grep -q 'bar.com'         # not a query[ line
+  echo "$output" | grep -q '^foo\.com 192\.168\.1\.10$'
+  echo "$output" | grep -q '^baz\.com 192\.168\.1\.11$'
+  run sh -c "printf '%s\n' \"$output\" | grep -q skip.example"; [ "$status" -ne 0 ]   # before offset
+  run sh -c "printf '%s\n' \"$output\" | grep -q bar.com"; [ "$status" -ne 0 ]         # not a query[ line
 }
 
 @test "al_deny_match matches domain and subdomains, not look-alikes" {
