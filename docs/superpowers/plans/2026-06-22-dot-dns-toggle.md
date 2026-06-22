@@ -10,6 +10,8 @@
 
 **Design doc:** `docs/superpowers/specs/2026-06-22-dot-dns-toggle-design.md` (design-review converged, cycle 4, 0C/0H). Read it before starting.
 
+**Plan-review status:** converged over 3 cycles (C1 6C+9H → C2 1C+5H → C3 0C/0H). Ready for execution (NOT yet executed — pipeline stopped here per run owner).
+
 ## Global Constraints
 
 - **Source of truth is `openwrt/`**; `dev/sync-to-packages.sh` mirrors into `packages/` (CI sync-check enforces parity). Every new file is an explicit edit to the sync script's copy lists.
@@ -638,7 +640,7 @@ git commit -m "feat(dns): amnezia-dns-ctl apply with missing-binary fallback"
   grep -q "amnezia-dns stop" "$STUB_LOG"
 }
 
-@test "set-provider: new fails verify, previous OK -> rolls back to previous, stays enabled-on-prev" {
+@test "set-provider: new fails verify -> rolls back to previous provider (UCI), non-zero exit" {
   export UCI_GET_amnezia_config_dns_provider=quad9
   # adguard verify fails; quad9 (prev) passes
   run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail sh '$CTL' set-provider adguard"
