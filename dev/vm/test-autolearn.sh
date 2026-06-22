@@ -259,7 +259,7 @@ log "first run of amnezia-autolearn (count will reach 1 for geoblock domain)"
 log "--- amnezia-autolearn run 1 stdout+stderr ---"
 # shellcheck disable=SC2086
 ssh $VM_SSH_OPTS "root@$SSH_HOST" \
-  "AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
+  "AL_DEBUG=1 AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
   2>&1 || true
 log "--- end run 1 ---"
 
@@ -291,7 +291,7 @@ log "second run of amnezia-autolearn (count will reach 2, geoblock domain promot
 log "--- amnezia-autolearn run 2 stdout+stderr ---"
 # shellcheck disable=SC2086
 ssh $VM_SSH_OPTS "root@$SSH_HOST" \
-  "AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
+  "AL_DEBUG=1 AL_QUERYLOG=/tmp/dnsmasq-queries.log ${GEOBLOCK_KEY}=direct_geoblocked amnezia-autolearn 2>&1 || true" \
   2>&1 || true
 log "--- end run 2 ---"
 

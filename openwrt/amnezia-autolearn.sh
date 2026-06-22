@@ -24,17 +24,25 @@ AL_KILL="${AL_KILL:-kill}"
 
 _uci() { uci -q get "$1" 2>/dev/null; }
 _now() { date +%s 2>/dev/null || echo 0; }
+_dbg() { [ "${AL_DEBUG:-0}" = 1 ] && echo "[autolearn-dbg] $*" >&2 || true; }
 
 # --- Gate -------------------------------------------------------------------
 [ "$(_uci amnezia.config.routing_mode)" = "direct-default" ] || exit 0
+_dbg "gate: mode ok"
 [ "$(_uci amnezia.config.autolearn_enabled)" = "1" ] || exit 0
+_dbg "gate: enabled ok"
 # Tunnel health: state file must exist, be fresh, and report all_down:false.
 [ -f "$AL_STATE" ] || exit 0
-_mtime=$(date -r "$AL_STATE" +%s 2>/dev/null || stat -c %Y "$AL_STATE" 2>/dev/null || echo 0)
+_dbg "gate: state file present"
+_mtime=$(stat -c %Y "$AL_STATE" 2>/dev/null || date -r "$AL_STATE" +%s 2>/dev/null || echo 0)
+_mtime=$(printf '%s' "$_mtime" | tr -dc '0-9'); _mtime=${_mtime:-0}
 _age=$(( $(_now) - _mtime ))
+_dbg "gate: mtime=$_mtime age=$_age (max $AUTOLEARN_STATE_MAX_AGE)"
 [ "$_age" -le "$AUTOLEARN_STATE_MAX_AGE" ] 2>/dev/null || exit 0
 _alldown=$(grep -o '"all_down":[a-z]*' "$AL_STATE" 2>/dev/null | head -n1 | sed 's/.*://')
+_dbg "gate: all_down=$_alldown"
 [ "$_alldown" = "false" ] || exit 0
+_dbg "gate: PASSED"
 
 mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 
@@ -56,6 +64,7 @@ _al_record() {
   fi
   case "$_cnt" in *[!0-9]*|'') _cnt=0 ;; esac
   _cnt=$((_cnt+1))
+  _dbg "record $_d verdict=$_v count=$_cnt thresh=$_thresh"
   _tmp=$(mktemp 2>/dev/null || echo "$CAND.$$")
   awk -F'\t' -v d="$_d" '$1!=d' "$CAND" 2>/dev/null > "$_tmp"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_d" "$_v" "$_cnt" "$_clients" "$_first" "$_ts" "$_reason" >> "$_tmp"
@@ -70,6 +79,7 @@ _al_record() {
                 "$AUTO_LIST" "$CAND" 2>/dev/null | sort -n | head -n1 | cut -f2)
     [ -n "$_victim" ] && { _t=$(mktemp 2>/dev/null || echo "$AUTO_LIST.$$"); grep -Fvx "$_victim" "$AUTO_LIST" > "$_t"; mv "$_t" "$AUTO_LIST"; }
   fi
+  _dbg "ADDED $_d to auto.list"
   printf '%s\n' "$_d" >> "$AUTO_LIST"
   return 0
 }
@@ -152,6 +162,7 @@ case "$_off" in *[!0-9]*) _off=0 ;; esac
 _size=$(wc -c < "$AL_QUERYLOG" 2>/dev/null || echo 0)
 _size=$(printf '%s' "$_size" | tr -d ' \t')
 _pairs=$(al_querylog_pairs "$AL_QUERYLOG" "$_off")
+_dbg "harvest: offset=$_off size=$_size pairs=$(printf '%s' "$_pairs" | grep -c .)"
 printf '%s\n' "$_size" > "$OFFSET_F"
 
 # Tally (domain, client) pairs this pass. Skip RU/.ru and denied up front.
@@ -184,13 +195,15 @@ _clients_for() {
   awk -F'\t' -v d="$1" '$1==d{ if(!(d SUBSEP $2 in s)){s[d SUBSEP $2]=1; c=c (c?",":"") $2} } END{print c}' "$_cand_tmp"
 }
 
+_dbg "eligible domains: $(printf '%s' "$_eligible" | grep -c .)"
 _max_probes=$(_uci amnezia.config.autolearn_max_probes); _max_probes=${_max_probes:-20}
 _n=0
 for _dom in $_eligible; do
   [ "$_n" -lt "$_max_probes" ] || break
   _n=$((_n+1))
-  _pin=$(al_resolve_public "$_dom"); [ -n "$_pin" ] || continue   # SSRF gate
+  _pin=$(al_resolve_public "$_dom"); [ -n "$_pin" ] || { _dbg "probe $_dom pin=EMPTY (SSRF gate)"; continue; }   # SSRF gate
   _verdict=$(zapret-probe "$_dom" "$_pin" | grep -o '"verdict":"[^"]*"' | sed 's/.*:"//;s/"//')
+  _dbg "probe $_dom pin=$_pin -> $_verdict"
   if _al_record "$_dom" "$_verdict" "$(_clients_for "$_dom")"; then _changed=1; fi
 done
 rm -f "$_cand_tmp"
