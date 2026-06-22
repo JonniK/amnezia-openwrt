@@ -88,7 +88,7 @@ _exit_plain() {
 cmd_watchdog() {
   _n=${AMNEZIA_DNS_WD_N:-3}; _m=${AMNEZIA_DNS_WD_M:-2}; _dwell=${AMNEZIA_DNS_WD_DWELL:-120}
   _fail=0; _ok=0; _entered=0
-  _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo dot)
+  _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo "")
   while true; do
     if _probe_listener "127.0.0.1#$DOT_PORT"; then
       _fail=0; _ok=$((_ok + 1))
