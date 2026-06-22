@@ -179,7 +179,7 @@ _eligible=$(awk -F'\t' -v maxpc="$_maxpc" '
   END { for (d in dcnt) if (dcnt[d] >= 2) print d }' "$_cand_tmp")
 # clients CSV per domain (for the TSV record).
 _clients_for() {
-  awk -F'\t' -v d="$1" '$1==d{ if(!(d $2 in s)){s[d $2]=1; c=c (c?",":"") $2} } END{print c}' "$_cand_tmp"
+  awk -F'\t' -v d="$1" '$1==d{ if(!(d SUBSEP $2 in s)){s[d SUBSEP $2]=1; c=c (c?",":"") $2} } END{print c}' "$_cand_tmp"
 }
 
 _max_probes=$(_uci amnezia.config.autolearn_max_probes); _max_probes=${_max_probes:-20}

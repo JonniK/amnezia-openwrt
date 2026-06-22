@@ -15,22 +15,34 @@ setup() {
 
 @test "gate: tunnel-default mode -> no-op (no probe, no force-load)" {
   export UCI_GET_amnezia_config_routing_mode="tunnel-default"
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  printf 'query[A] gated.com from 192.168.1.2\nquery[A] gated.com from 192.168.1.3\n' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
   # Robust negative: must NOT have called zapret-probe
   run grep -q 'zapret-probe' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 @test "gate: disabled -> no-op" {
   export UCI_GET_amnezia_config_autolearn_enabled="0"
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  printf 'query[A] gated.com from 192.168.1.2\nquery[A] gated.com from 192.168.1.3\n' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
   run grep -q 'zapret-probe' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 @test "gate: all_down true -> no add" {
   printf '{"all_down":true}\n' > "$AL_STATE"
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  printf 'query[A] gated.com from 192.168.1.2\nquery[A] gated.com from 192.168.1.3\n' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
   run grep -q 'zapret-probe' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 @test "gate: stale state file (old mtime) -> no add" {
   touch -t 197001010000 "$AL_STATE"
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  printf 'query[A] gated.com from 192.168.1.2\nquery[A] gated.com from 192.168.1.3\n' > "$AL_QUERYLOG"
   run sh "$SCRIPT"; [ "$status" -eq 0 ]
   run grep -q 'zapret-probe' "$STUB_LOG"; [ "$status" -ne 0 ]
 }
@@ -50,6 +62,7 @@ setup() {
 }
 @test "eligibility: single client -> never probed" {
   export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  export NSLOOKUP_ADDR="93.184.216.34"
   printf 'query[A] solo.com from 192.168.1.2\n' > "$AL_QUERYLOG"
   run sh "$SCRIPT"
   # Robust negative: zapret-probe should NOT have been called for solo.com
