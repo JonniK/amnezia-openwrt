@@ -29,7 +29,7 @@ config amnezia 'config'
 	option dot_resolver ''
 	option doh_resolver ''
 	option doh_bootstrap ''
-	option dns_active_tier 'dot'
+	option dns_active_tier 'off'
 
 config globals 'globals'
 	option mode 'failover'
