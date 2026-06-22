@@ -120,8 +120,9 @@ dns_dnsmasq_restore() {
 
 # Render the candidate dnsmasq options we control to a temp file and --test THAT
 # (deterministic; never a router-instance hash path). Restart only on pass.
+# M5: commit dhcp ONLY after --test passes; revert on failure so a bad candidate
+#     is never persisted (would take DNS down on the next dnsmasq restart/reboot).
 dns_dnsmasq_reload() {
-  uci commit dhcp 2>/dev/null || true
   _tf=$(mktemp 2>/dev/null || echo /tmp/amz-dnsmasq-test.$$)
   {
     [ "$(uci -q get dhcp.@dnsmasq[0].noresolv)" = 1 ] && echo "no-resolv"
@@ -130,7 +131,12 @@ dns_dnsmasq_reload() {
     _cd=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null); [ -n "$_cd" ] && echo "conf-dir=$_cd"
   } > "$_tf"
   if dnsmasq --test -C "$_tf" >/dev/null 2>&1; then
-    rm -f "$_tf"; "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true; return 0
+    rm -f "$_tf"
+    uci commit dhcp 2>/dev/null || true
+    "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+    return 0
   fi
-  rm -f "$_tf"; return 1
+  rm -f "$_tf"
+  uci revert dhcp 2>/dev/null || true
+  return 1
 }

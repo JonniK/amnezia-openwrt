@@ -50,6 +50,16 @@ COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
   grep -q "dnsmasq restart" "$STUB_LOG"
 }
 
+@test "reload gate: on test failure, candidate is NOT persisted (uci revert, no commit)" {
+  # M5: uci commit dhcp must NOT happen when dnsmasq --test fails.
+  export UCI_GET_dhcp__dnsmasq_0__server='not a valid server'
+  export UCI_GET_dhcp__dnsmasq_0__noresolv='1'
+  run sh -c ". '$COMMON'; . '$LIB'; dns_dnsmasq_reload"
+  [ "$status" -ne 0 ]
+  grep -q "uci revert dhcp" "$STUB_LOG"
+  run grep -q "uci commit dhcp" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
 @test "force-load takes the fd-8 dnsmasq lock around its dnsmasq restart (not fd 9)" {
   FL="$HARNESS_DIR/../openwrt/amnezia-force-load.sh"
   grep -q "dnsmasq_lock" "$FL"
