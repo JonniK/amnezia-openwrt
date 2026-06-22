@@ -24,6 +24,12 @@ cmd_apply() {
   if ! dns_profile "$_prov"; then amz_log "dns: bad profile $_prov"; dnsmasq_unlock; return 1; fi
   dns_render_stubby; dns_render_doh
   dns_dnsmasq_encrypted
+  # HIGH leak fix: drop any plaintext servers that may be ahead of the encrypted
+  # listeners (e.g. watchdog entered plaintext between applies). Then re-append
+  # them AFTER encrypted listeners so the order is always [5453, 5454, WAN...]
+  # under strict-order — never plaintext-first.
+  dns_dnsmasq_del_plain
+  [ "$(uci -q get amnezia.config.dns_active_tier)" = plaintext ] && dns_dnsmasq_add_plain
   dns_iprule_flush   # clear any stale pref-30900 rule (revert-path leak fix)
   dns_iprule_set "$DNS_DOT_IP"
   if dns_dnsmasq_reload; then dnsmasq_unlock; return 0; fi

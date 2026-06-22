@@ -215,6 +215,28 @@ setup() {
   grep -q "AMNEZIA_DNS_STOPPING=1" "$INIT"
 }
 
+@test "apply: in plaintext tier, re-establishes encrypted-first ordering (HIGH leak fix)" {
+  # Bug: dns_dnsmasq_encrypted does del+add of encrypted listeners which appends
+  # them to the TAIL if plaintext IPs are already present. apply must then
+  # dns_dnsmasq_del_plain and, since we are in plaintext fallback, re-append
+  # plaintext AFTER encrypted so the final order is [5453, 5454, WAN] not
+  # [WAN, 5453, 5454] which would put plaintext-first under strict-order.
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' apply"
+  [ "$status" -eq 0 ]
+  # Encrypted listener was (re-)added
+  grep -q "add_list dhcp.@dnsmasq\[0\].server=127.0.0.1#5453" "$STUB_LOG"
+  # Plaintext IP was deleted (drop before re-append)
+  grep -q "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
+  # Plaintext IP was re-added AFTER the encrypted listener (ordering fix)
+  grep -q "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"
+  # del must appear before the final add_list for the plaintext IP
+  _del_line=$(grep -n "del_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG" | tail -1 | cut -d: -f1)
+  _add_line=$(grep -n "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG" | tail -1 | cut -d: -f1)
+  [ -n "$_del_line" ] && [ -n "$_add_line" ]
+  [ "$_del_line" -lt "$_add_line" ]
+}
+
 @test "_enter_plain: does not mark plaintext tier when dnsmasq reload fails (LOW)" {
   # Gate tier/timestamp commit on reload success.  When dnsmasq --test fails
   # (AMNEZIA_DNSMASQ_FAIL=1 in stub), _enter_plain must NOT set dns_active_tier
