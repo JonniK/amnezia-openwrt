@@ -128,6 +128,67 @@ assert_contains "S0-4" "zapret-probe shim returns canned verdict for geoblock do
   "${GEOBLOCK_KEY}=direct_geoblocked zapret-probe '${GEOBLOCK_DOMAIN}' 203.0.113.1 2>/dev/null || true" \
   "direct_geoblocked"
 
+# 0-d2: install an nslookup shim on the VM so al_resolve_public gets a
+# controlled public IP for GEOBLOCK_DOMAIN (so it passes the SSRF gate and
+# the probe runs) and an RFC1918 IP for INTERNAL_DOMAIN (so the SSRF gate
+# still rejects it, keeping T3-2 green).
+#
+# The shim emits the exact BusyBox nslookup output shape that al_resolve_public
+# parses:
+#   Server:    127.0.0.1
+#   Address:   127.0.0.1#53
+#                                   <- blank line
+#   Name:      <domain>             <- triggers ans=1 in the awk
+#   Address: <ip>                   <- captured by ^Address: ?[0-9] pattern
+#
+# NSLOOKUP_GEOBLOCK_IP / NSLOOKUP_INTERNAL_IP allow the shim to be driven by
+# env vars so test steps can override if needed.
+log "installing nslookup shim on VM"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" \
+  "cat > /usr/bin/nslookup-shim.sh" <<'NSLOOKUP_SHIM_EOF' 2>/dev/null || true
+#!/bin/sh
+_dom="$1"
+_geoblock="${NSLOOKUP_GEOBLOCK_DOMAIN:-blocked-example-test.example.org}"
+_internal="${NSLOOKUP_INTERNAL_DOMAIN:-internal-only.home.arpa}"
+if [ "$_dom" = "$_geoblock" ]; then
+  _ip="${NSLOOKUP_GEOBLOCK_IP:-203.0.113.1}"
+elif [ "$_dom" = "$_internal" ]; then
+  _ip="${NSLOOKUP_INTERNAL_IP:-10.0.0.5}"
+else
+  # Unknown domain: return a public TEST-NET IP so probes proceed.
+  _ip="${NSLOOKUP_DEFAULT_IP:-203.0.113.99}"
+fi
+printf 'Server:    127.0.0.1\n'
+printf 'Address:   127.0.0.1#53\n'
+printf '\n'
+printf 'Name:      %s\n' "$_dom"
+printf 'Address: %s\n' "$_ip"
+NSLOOKUP_SHIM_EOF
+vm_run "chmod +x /usr/bin/nslookup-shim.sh 2>/dev/null || true"
+# Back up the real nslookup and replace it.
+vm_run "cp /usr/bin/nslookup /usr/bin/nslookup.real 2>/dev/null || true; cp /usr/bin/nslookup-shim.sh /usr/bin/nslookup 2>/dev/null || true"
+# Wire the domain constants into the VM's environment via a wrapper that sets
+# NSLOOKUP_GEOBLOCK_DOMAIN / NSLOOKUP_INTERNAL_DOMAIN so the shim matches the
+# exact test-domain values (in case defaults diverge from GEOBLOCK_DOMAIN).
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" \
+  "cat > /usr/bin/nslookup" <<NSLOOKUP_WRAPPER_EOF 2>/dev/null || true
+#!/bin/sh
+NSLOOKUP_GEOBLOCK_DOMAIN="${GEOBLOCK_DOMAIN}" \\
+NSLOOKUP_INTERNAL_DOMAIN="${INTERNAL_DOMAIN}" \\
+exec /usr/bin/nslookup-shim.sh "\$@"
+NSLOOKUP_WRAPPER_EOF
+vm_run "chmod +x /usr/bin/nslookup 2>/dev/null || true"
+# Quick sanity: shim must return a Name:/Address: block for geoblock domain.
+assert_contains "S0-5" "nslookup shim returns public IP for geoblock domain" \
+  "nslookup '${GEOBLOCK_DOMAIN}' 2>/dev/null || true" \
+  "Address: 203.0.113.1"
+# And an RFC1918 IP for the internal domain (SSRF gate will reject it).
+assert_contains "S0-6" "nslookup shim returns RFC1918 IP for internal domain" \
+  "nslookup '${INTERNAL_DOMAIN}' 2>/dev/null || true" \
+  "Address: 10.0.0.5"
+
 # 0-e: wire a fake /etc/amnezia/autolearn/ directory and clear any stale state.
 vm_run "mkdir -p /etc/amnezia/force.d /etc/amnezia/autolearn; : > /etc/amnezia/force.d/auto.list 2>/dev/null || true; : > /etc/amnezia/autolearn/candidates.tsv 2>/dev/null || true; : > /etc/amnezia/autolearn/deny.list 2>/dev/null || true"
 
@@ -189,14 +250,9 @@ log "===== STEP 2: run amnezia-autolearn twice (geoblock threshold=2) ====="
 #   - AL_QUERYLOG=/tmp/dnsmasq-queries.log
 #   - AL_STATE=/var/run/amnezia-failover.json  (already seeded)
 #   - zapret-probe shim (already installed)
-#   - nslookup on INTERNAL_DOMAIN must return an RFC1918 address so al_resolve_public rejects it.
-#
-# We need nslookup on INTERNAL_DOMAIN to return a private IP so the SSRF gate triggers.
-# Inject a stub /etc/hosts entry so nslookup answers without real DNS.
-vm_run "printf '192.168.99.1 ${INTERNAL_DOMAIN}\n' >> /etc/hosts 2>/dev/null || true"
-# GEOBLOCK_DOMAIN should not resolve to anything (or to a public IP for the probe to proceed).
-# We inject a public stub address so al_resolve_public passes and the probe runs.
-vm_run "printf '203.0.113.1 ${GEOBLOCK_DOMAIN}\n' >> /etc/hosts 2>/dev/null || true"
+#   - nslookup shim (installed in Step 0-d2):
+#       GEOBLOCK_DOMAIN -> 203.0.113.1 (public, passes al_ip_is_public -> probe runs)
+#       INTERNAL_DOMAIN -> 10.0.0.5   (RFC1918, al_ip_is_public rejects -> SSRF gate fires)
 
 # First run: geoblock domain reaches candidates.tsv with count=1 (below threshold 2).
 log "first run of amnezia-autolearn (count will reach 1 for geoblock domain)"
