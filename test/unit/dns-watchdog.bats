@@ -126,3 +126,30 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   echo "$output" | grep -q '"active_tier"'
   run grep -q "stubby restart" "$STUB_LOG"; [ "$status" -ne 0 ]
 }
+
+@test "structural: _enter_plain commits tier INSIDE the lock (before dnsmasq_unlock)" {
+  # Regression guard: if _set_tier plaintext is moved back outside the lock,
+  # a cross-process interleave can leave UCI saying plaintext while dnsmasq has
+  # no plaintext server — DNS hard-down.  Assert the line number of the
+  # '_set_tier plaintext' call inside _enter_plain is less than the line number
+  # of the NEXT 'dnsmasq_unlock' call that follows it in the function.
+  _src="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
+  # Line number of _set_tier plaintext inside _enter_plain
+  _set_line=$(grep -n '_set_tier plaintext' "$_src" | head -1 | cut -d: -f1)
+  # Line number of the dnsmasq_unlock that follows _set_tier plaintext
+  _unlock_line=$(awk "NR > $_set_line && /dnsmasq_unlock/{print NR; exit}" "$_src")
+  [ -n "$_set_line" ] && [ -n "$_unlock_line" ]
+  [ "$_set_line" -lt "$_unlock_line" ]
+}
+
+@test "structural: _exit_plain commits tier INSIDE the lock (before dnsmasq_unlock)" {
+  # Regression guard: the tier-restore in _exit_plain must be inside the fd-8
+  # lock, so apply's plaintext-gate reads a consistent state.
+  _src="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
+  # _exit_plain starts at the line with '_exit_plain()'; find _set_tier inside it
+  _func_line=$(grep -n '^_exit_plain()' "$_src" | head -1 | cut -d: -f1)
+  _set_line=$(awk "NR > $_func_line && /_set_tier/{print NR; exit}" "$_src")
+  _unlock_line=$(awk "NR > $_set_line && /dnsmasq_unlock/{print NR; exit}" "$_src")
+  [ -n "$_set_line" ] && [ -n "$_unlock_line" ]
+  [ "$_set_line" -lt "$_unlock_line" ]
+}

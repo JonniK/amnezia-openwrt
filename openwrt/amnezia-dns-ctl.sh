@@ -18,8 +18,8 @@ cmd_apply() {
   if ! _has_bin; then
     amz_log "dns: stubby/https-dns-proxy missing -> plain provider DNS"
     dns_dnsmasq_restore; dns_dnsmasq_add_plain
-    uci set amnezia.config.dns_active_tier=plaintext; uci commit amnezia
-    dns_dnsmasq_reload || true; dnsmasq_unlock; return 0
+    if dns_dnsmasq_reload; then uci set amnezia.config.dns_active_tier=plaintext; uci commit amnezia; fi
+    dnsmasq_unlock; return 0
   fi
   if ! dns_profile "$_prov"; then amz_log "dns: bad profile $_prov"; dnsmasq_unlock; return 1; fi
   dns_render_stubby; dns_render_doh
@@ -103,18 +103,27 @@ _now() { [ -n "${AMNEZIA_NOW:-}" ] && { echo "$AMNEZIA_NOW"; return; }; date +%s
 _set_tier() { uci set "amnezia.config.dns_active_tier=$1"; uci commit amnezia; }
 
 _enter_plain() {
-  dnsmasq_lock; dns_dnsmasq_add_plain
-  if dns_dnsmasq_reload; then _r=0; else _r=1; fi
+  dnsmasq_lock
+  dns_dnsmasq_add_plain
+  if dns_dnsmasq_reload; then
+    _set_tier plaintext                             # tier committed INSIDE the lock, atomic with server add
+    # M4: persist entry timestamp so dwell survives procd respawn.
+    uci set "amnezia.config.dns_plain_ts=$(_now)"; uci commit amnezia
+    dnsmasq_unlock
+    return 0
+  fi
   dnsmasq_unlock
-  [ "$_r" = 0 ] || { amz_log "dns: plaintext reload failed; not marking plaintext tier"; return 1; }
-  _set_tier plaintext
-  # M4: persist entry timestamp so dwell survives procd respawn.
-  uci set "amnezia.config.dns_plain_ts=$(_now)"; uci commit amnezia
+  amz_log "dns: plaintext reload failed; not marking plaintext tier"
+  return 1
 }
-_exit_plain() {
-  dnsmasq_lock; dns_dnsmasq_del_plain; dns_dnsmasq_reload || true; dnsmasq_unlock
+_exit_plain() {                                     # $1 = tier to restore (dot|doh)
+  dnsmasq_lock
+  dns_dnsmasq_del_plain
+  dns_dnsmasq_reload || true
+  _set_tier "$1"                                    # tier restore atomic with plaintext removal
   # M4: clear stale timestamp when leaving plaintext tier.
   uci -q delete amnezia.config.dns_plain_ts 2>/dev/null || true; uci commit amnezia
+  dnsmasq_unlock
 }
 
 cmd_watchdog() {
@@ -130,14 +139,14 @@ cmd_watchdog() {
     if _probe_listener "127.0.0.1#$DOT_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
-        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then _exit_plain; _tier="dot"; _set_tier dot; fi
+        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then _exit_plain dot; _tier="dot"; fi
       else
         [ "$_tier" = dot ] || { _tier="dot"; _set_tier dot; }
       fi
     elif _probe_listener "127.0.0.1#$DOH_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
-        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then _exit_plain; _tier="doh"; _set_tier doh; fi
+        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then _exit_plain doh; _tier="doh"; fi
       else
         [ "$_tier" = doh ] || { _tier="doh"; _set_tier doh; }
       fi
