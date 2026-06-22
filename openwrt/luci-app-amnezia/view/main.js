@@ -776,6 +776,7 @@ function paintAutolearnTable(entries, self) {
 					self ? E('button', {
 						'class': 'btn btn-sm cbi-button-negative',
 						'style': 'padding:2px 8px;font-size:11px;',
+						'title': _('Removes this domain and its subdomains from auto-routing (suffix-aware), and suppresses it across subscribed sources too.'),
 						'click': ui.createHandlerFn(self, 'handleAutolearnVeto', entry.domain)
 					}, _('Remove')) : ''),
 				E('td', { 'style': 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },

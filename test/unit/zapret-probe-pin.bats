@@ -49,7 +49,9 @@ SCRIPT="$HARNESS_DIR/../openwrt/zapret-probe.sh"
   [ "$status" -ne 0 ]
 }
 @test "SSRF guard: public IP 93.184.216.34 is NOT rejected" {
-  run sh "$SCRIPT" example.com 93.184.216.34
-  # Must not be an error verdict from the guard (it may fail curl but not with our guard reason)
-  run grep -q 'pinned ip not public' "$STUB_LOG"; [ "$status" -ne 0 ]
+  # The guard must NOT emit 'pinned ip not public' on a public address.
+  # Previously this grepped STUB_LOG (the message is on stdout, not STUB_LOG),
+  # making the assertion near-vacuous.  Check $output directly.
+  run sh -c "sh '$SCRIPT' example.com 93.184.216.34 2>&1 | grep -q 'pinned ip not public'"
+  [ "$status" -ne 0 ]
 }

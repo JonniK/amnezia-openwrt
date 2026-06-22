@@ -13,7 +13,7 @@ mkdir -p "$AL_DIR/force.d" "$AL_DIR/autolearn"
 
 _je() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t' | tr -d '\000-\037'; }
 _reload() { "$AMNEZIA_FORCE_LOAD" >/dev/null 2>&1 || true; }
-_lock() { exec 9>"$AL_LOCK" 2>/dev/null || return 0; if command -v flock >/dev/null 2>&1; then flock -x 9 2>/dev/null || true; fi; }
+_lock() { exec 9>"$AL_LOCK" 2>/dev/null || return 0; if command -v flock >/dev/null 2>&1; then flock -w 25 9 2>/dev/null || true; fi; }  # 25s < rpcd ~30s exec timeout; on timeout we proceed rather than hang
 
 cmd="${1:-status}"
 case "$cmd" in
