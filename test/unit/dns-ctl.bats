@@ -99,6 +99,32 @@ setup() {
   grep -q "ip rule del" "$STUB_LOG"
 }
 
+@test "set-provider: switching providers clears the previous provider's ip rule (M1)" {
+  # Start with quad9; switch to adguard. The M1 fix must call dns_iprule_clear
+  # for 9.9.9.9 (quad9's DoT IP) BEFORE cmd_apply runs stubby restart.
+  # (The test stub does not track uci-set state, so cmd_apply re-reads quad9
+  # and issues its own del+add for 9.9.9.9 — meaning rule del to 9.9.9.9 must
+  # appear BEFORE stubby restart in the log.)
+  export UCI_GET_amnezia_config_dns_provider=quad9
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' set-provider adguard"
+  [ "$status" -eq 0 ]
+  # M1: dns_iprule_clear for previous provider fires before cmd_apply (stubby restart)
+  _del_line=$(grep -n "rule del to 9.9.9.9 lookup 100 pref 30900" "$STUB_LOG" | head -1 | cut -d: -f1)
+  _stubby_line=$(grep -n "stubby restart" "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$_del_line" ] && [ -n "$_stubby_line" ]
+  [ "$_del_line" -lt "$_stubby_line" ]
+}
+
+@test "dns_profile custom: CIDR dot_resolver IP is rejected (M2)" {
+  export UCI_GET_amnezia_config_dot_resolver='8.8.8.8/0@853#dns.google'
+  export UCI_GET_amnezia_config_doh_resolver='https://dns.google/dns-query'
+  export UCI_GET_amnezia_config_doh_bootstrap='8.8.4.4'
+  LIB="$HARNESS_DIR/../openwrt/lib/amnezia-dns-lib.sh"
+  COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
+  run sh -c ". '$COMMON'; . '$LIB'; dns_profile custom"
+  [ "$status" -ne 0 ]
+}
+
 @test "init: applies + launches watchdog only when enabled; hotplug keys on firewall reload" {
   INIT="$HARNESS_DIR/../openwrt/amnezia-dns.init"
   HP="$HARNESS_DIR/../openwrt/99-amnezia-dns.hotplug"

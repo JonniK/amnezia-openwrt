@@ -74,6 +74,11 @@ cmd_enable() {
 cmd_set_provider() {
   _new=$1; dns_profile "$_new" || { echo "bad provider $_new" >&2; return 2; }
   _prev=$(uci -q get amnezia.config.dns_provider || echo quad9)
+  # M1: clear the previous provider's pinned ip rule before switching so no
+  # stale rule for the old DoT IP lingers after the provider change.
+  if [ "$(uci -q get amnezia.config.dot_enabled)" = 1 ]; then
+    if dns_profile "$_prev" 2>/dev/null; then dns_iprule_clear "$DNS_DOT_IP"; fi
+  fi
   uci set "amnezia.config.dns_provider_prev=$_prev"
   uci set "amnezia.config.dns_provider=$_new"; uci commit amnezia
   [ "$(uci -q get amnezia.config.dot_enabled)" = 1 ] || return 0

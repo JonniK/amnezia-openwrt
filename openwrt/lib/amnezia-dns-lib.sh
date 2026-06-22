@@ -30,6 +30,8 @@ dns_profile() {
       DNS_DOT_IP=${_dot%@*}
       DNS_DOT_HOST=${_dot##*#}
       DNS_DOH_HOST=$(printf '%s' "$_doh" | sed -e 's#^https://##' -e 's#/.*##')
+      # M2: reject non-bare-IPv4 DoT IP (CIDR, garbage, or empty).
+      printf '%s' "$DNS_DOT_IP" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || return 1
       # reject IP-literal host: must contain at least one non-digit, non-dot label char
       printf '%s' "$DNS_DOH_HOST" | grep -q '[A-Za-z]' || return 1
       [ -n "$DNS_DOT_IP" ] && [ -n "$DNS_DOH_HOST" ] && [ -n "$DNS_DOH_BOOTSTRAP" ] || return 1
