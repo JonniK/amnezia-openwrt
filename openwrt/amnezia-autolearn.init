@@ -38,14 +38,18 @@ enable() {
 }
 
 disable() {
-  # Unconditional + idempotent (uci -q delete is a no-op if absent). disable is
-  # a deliberate, infrequent action, so an unconditional dnsmasq restart here is
-  # fine (the boot-storm concern is the enable/start path, guarded above).
-  uci -q delete dhcp.@dnsmasq[0].logqueries 2>/dev/null
-  uci -q delete dhcp.@dnsmasq[0].logfacility 2>/dev/null
-  uci -q delete dhcp.@dnsmasq[0].log-async 2>/dev/null
-  uci commit dhcp
-  "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
+  # Guard: only remove the dnsmasq logging options if logfacility is the value
+  # autolearn set (AL_LOG). If the user has a different logfacility (or none at
+  # all that we didn't set), leave all three options untouched to avoid clobbering
+  # their config. Always remove the cron line and the log file.
+  _cur_logfac=$(uci -q get dhcp.@dnsmasq[0].logfacility 2>/dev/null)
+  if [ "$_cur_logfac" = "$AL_LOG" ]; then
+    uci -q delete dhcp.@dnsmasq[0].logqueries 2>/dev/null
+    uci -q delete dhcp.@dnsmasq[0].logfacility 2>/dev/null
+    uci -q delete dhcp.@dnsmasq[0].log-async 2>/dev/null
+    uci commit dhcp
+    "$AMNEZIA_DNSMASQ_INIT" restart >/dev/null 2>&1 || true
+  fi
   if [ -f "$AL_CRON" ] && grep -q 'amnezia-autolearn' "$AL_CRON"; then
     _t=$(mktemp 2>/dev/null || echo "$AL_CRON.$$"); grep -v 'amnezia-autolearn' "$AL_CRON" > "$_t"; mv "$_t" "$AL_CRON"
     /etc/init.d/cron reload >/dev/null 2>&1 || true

@@ -11,6 +11,22 @@ case "$_verb" in
   add_list) exit 0 ;;
 esac
 
+# UCI_DNSMASQ_<opt> override: handles dhcp.@dnsmasq[0].<opt> keys whose brackets
+# make them illegal as env var names (tr cannot normalize [ ] @). MUST come BEFORE
+# the UCI_GET_* block so the bad-substitution eval is never reached for these keys.
+# Tests set e.g. UCI_DNSMASQ_logfacility="/tmp/dnsmasq-queries.log" to inject values.
+if [ "$1" = get ]; then
+  case "$2" in
+    dhcp.@dnsmasq"["0"]".*)
+      _opt="${2##*.}"
+      _envk="UCI_DNSMASQ_$(printf '%s' "$_opt" | tr '-' '_')"
+      eval _envv="\${$_envk+set}"
+      if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+      exit 1
+      ;;
+  esac
+fi
+
 # UCI_GET_* dynamic resolution: maps "uci -q get a.b.c" -> env var UCI_GET_a_b_c.
 # Checked BEFORE hardcoded arms so tests can override any key.
 if [ "$1" = get ]; then

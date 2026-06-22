@@ -21,3 +21,35 @@ SCRIPT="$HARNESS_DIR/../openwrt/zapret-probe.sh"
   echo "$output" | grep -q '"verdict": *"error"'
   [ "$status" -ne 0 ]
 }
+@test "SSRF guard: loopback 127.0.0.1 rejected with error verdict" {
+  run sh "$SCRIPT" foo.example 127.0.0.1
+  echo "$output" | grep -q '"verdict":"error"'
+  echo "$output" | grep -q 'pinned ip not public'
+  [ "$status" -ne 0 ]
+}
+@test "SSRF guard: private 192.168.1.1 rejected with error verdict" {
+  run sh "$SCRIPT" foo.example 192.168.1.1
+  echo "$output" | grep -q '"verdict":"error"'
+  echo "$output" | grep -q 'pinned ip not public'
+  [ "$status" -ne 0 ]
+}
+@test "SSRF guard: link-local 169.254.1.1 rejected" {
+  run sh "$SCRIPT" foo.example 169.254.1.1
+  echo "$output" | grep -q '"verdict":"error"'
+  [ "$status" -ne 0 ]
+}
+@test "SSRF guard: 10.x private rejected" {
+  run sh "$SCRIPT" foo.example 10.0.0.1
+  echo "$output" | grep -q '"verdict":"error"'
+  [ "$status" -ne 0 ]
+}
+@test "SSRF guard: multicast 224.0.0.1 rejected" {
+  run sh "$SCRIPT" foo.example 224.0.0.1
+  echo "$output" | grep -q '"verdict":"error"'
+  [ "$status" -ne 0 ]
+}
+@test "SSRF guard: public IP 93.184.216.34 is NOT rejected" {
+  run sh "$SCRIPT" example.com 93.184.216.34
+  # Must not be an error verdict from the guard (it may fail curl but not with our guard reason)
+  run grep -q 'pinned ip not public' "$STUB_LOG"; [ "$status" -ne 0 ]
+}

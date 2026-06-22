@@ -60,6 +60,21 @@ if [ -n "$pinned_ip" ]; then
     *) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;;
   esac
   case "$pinned_ip" in *[!0-9.]*) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;; esac
+  # SSRF guard: reject non-public (reserved/loopback/private/multicast) ranges.
+  # Mirrors the al_ip_is_public() logic in amnezia-autolearn-lib.sh.
+  _o1="${pinned_ip%%.*}"; _rest="${pinned_ip#*.}"; _o2="${_rest%%.*}"
+  _reject=0
+  case "$_o1" in
+    0|10|127) _reject=1 ;;
+    100) case "$_o2" in 6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7]) _reject=1 ;; esac ;;
+    169) [ "$_o2" = 254 ] && _reject=1 ;;
+    172) case "$_o2" in 1[6-9]|2[0-9]|3[01]) _reject=1 ;; esac ;;
+    192) [ "$_o2" = 168 ] && _reject=1 ;;
+    22[4-9]|23[0-9]|24[0-9]|25[0-5]) _reject=1 ;;  # 224-255 multicast/reserved
+  esac
+  if [ "$_reject" = 1 ]; then
+    echo '{"verdict":"error","reason":"pinned ip not public"}'; exit 2
+  fi
   RESOLVE_OPTS="--resolve $domain:443:$pinned_ip --resolve $domain:80:$pinned_ip"
   REDIR_OPTS="-s --max-redirs 0"
 fi
