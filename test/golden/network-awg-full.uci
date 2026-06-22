@@ -1,0 +1,27 @@
+set network.awg_full=interface
+set network.awg_full.proto=amneziawg
+set network.awg_full.private_key=GGG_priv_full
+set network.awg_full.addresses=10.10.0.2/24
+set network.awg_full.mtu=1376
+set network.awg_full.awg_jc=7
+set network.awg_full.awg_jmin=50
+set network.awg_full.awg_jmax=1000
+set network.awg_full.awg_s1=0
+set network.awg_full.awg_s2=0
+set network.awg_full.awg_h1=1
+set network.awg_full.awg_h2=2
+set network.awg_full.awg_h3=3
+set network.awg_full.awg_h4=4
+set network.awg_full.awg_i1='<r 2><b 0xDEADBEEF>'
+set network.awg_full.awg_i2='<c>'
+set network.awg_full.awg_i3='<t>'
+add network amneziawg_awg_full
+set network.@amneziawg_awg_full[-1]=amneziawg_awg_full
+set network.@amneziawg_awg_full[-1].name=awg_full_client
+set network.@amneziawg_awg_full[-1].public_key=HHH_pub_full
+set network.@amneziawg_awg_full[-1].preshared_key=III_psk_full
+set network.@amneziawg_awg_full[-1].endpoint_host=vpn-full.example.com
+set network.@amneziawg_awg_full[-1].endpoint_port=51820
+set network.@amneziawg_awg_full[-1].persistent_keepalive=25
+set network.@amneziawg_awg_full[-1].allowed_ips=0.0.0.0/0
+set network.@amneziawg_awg_full[-1].route_allowed_ips=0

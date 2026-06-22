@@ -1,0 +1,13 @@
+#!/bin/sh /etc/rc.common
+# Loads the RU CIDR list into the amnezia_ru4 nft set at boot (after the
+# firewall service has started) and wires a hotplug trigger so the set is
+# repopulated on every fw4/firewall reload.
+START=96
+STOP=9
+
+boot() {
+  # Repopulate amnezia_ru4 from persist (or fetch fresh) once the set exists.
+  /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+}
+
+start() { boot; }

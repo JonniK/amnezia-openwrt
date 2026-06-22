@@ -1,0 +1,6 @@
+firewall.amnezia_block_quic=rule
+firewall.amnezia_block_quic.name=amnezia-block-quic
+firewall.amnezia_block_quic.src=lan
+firewall.amnezia_block_quic.proto=udp
+firewall.amnezia_block_quic.dest_port=443
+firewall.amnezia_block_quic.target=REJECT

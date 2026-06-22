@@ -84,17 +84,38 @@ tar xzf payload.tar.gz -C payload --strip-components=1 || fail "extract failed"
 # --- Stage files where install-amnezia-pbr.sh expects them ---
 echo "install: staging payload to /tmp/"
 SRC=payload/openwrt
-for _f in pbr.d/ru-direct.sh pbr.d/99-lan-vpn-full.sh pbr.d/99-lan-vpn-vpn-only.sh \
-          install-dnsmasq-full.sh configure-dnsmasq-ru-nftset.sh \
-          awg-toggle.sh pbr-status.sh pbr-reload.sh install-luci-toggle.sh \
+
+# Flat files: staged directly under /tmp/ (install-amnezia-pbr.sh with SCRIPT_DIR=/tmp
+# resolves these via resolve_dep or the legacy find_helper mechanism).
+for _f in install-dnsmasq-full.sh configure-dnsmasq-amnezia.sh \
+          awg-toggle.sh install-luci-toggle.sh \
           zapret-toggle.sh zapret-status.sh zapret-blockcheck.sh \
           zapret-apply.sh zapret-probe.sh zapret-verify.sh \
-          seed-must-tunnel.list install-zapret.sh install-luci-app-amnezia.sh \
-          install-amnezia-pbr.sh awg-ru-update.sh awg-status.sh; do
+          seed-must-tunnel.list seed-sticky-domains.list install-zapret.sh \
+          install-luci-app-amnezia.sh install-amnezia-pbr.sh \
+          awg-ru-update.sh \
+          amnezia-ru-cidr.sh amnezia-status.sh \
+          amnezia-failover amnezia-failover.init amnezia-failover-ctl.sh \
+          amnezia-ru-load.init 99-amnezia-ru-load.hotplug \
+          iproute2-amnezia-rt_tables.conf; do
 	[ -f "$SRC/$_f" ] && cp "$SRC/$_f" "/tmp/$(basename "$_f")" || \
 		err "WARN: $_f missing from payload; some functionality may degrade"
 done
 chmod +x /tmp/install-amnezia-pbr.sh
+
+# Shared libs: SCRIPT_DIR=/tmp, installer sources $SCRIPT_DIR/lib/amnezia-*.sh.
+mkdir -p /tmp/lib
+for _f in amnezia-common.sh amnezia-routing.sh; do
+	[ -f "$SRC/lib/$_f" ] && cp "$SRC/lib/$_f" "/tmp/lib/$_f" || \
+		err "WARN: lib/$_f missing from payload; some functionality may degrade"
+done
+
+# nftables classifier: installer looks at $SCRIPT_DIR/nftables.d/ (= /tmp/nftables.d/).
+mkdir -p /tmp/nftables.d
+[ -f "$SRC/nftables.d/30-amnezia-classify.nft" ] && \
+	cp "$SRC/nftables.d/30-amnezia-classify.nft" /tmp/nftables.d/30-amnezia-classify.nft || \
+	err "WARN: nftables.d/30-amnezia-classify.nft missing from payload; classifier install will degrade"
+
 # UCI scaffold (different naming because installer copies to /etc/config/amnezia)
 [ -f "$SRC/config/amnezia" ] && cp "$SRC/config/amnezia" /tmp/amnezia.config
 

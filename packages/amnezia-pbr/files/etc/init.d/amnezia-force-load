@@ -1,0 +1,14 @@
+#!/bin/sh /etc/rc.common
+# Loads the force-tunnel lists into the amnezia_force4 nft set at boot (after
+# the firewall service has started) and wires a hotplug trigger so the set is
+# repopulated on every fw4/firewall reload.
+# shellcheck disable=SC2034
+START=96
+STOP=9
+
+boot() {
+  # Repopulate amnezia_force4 from persisted lists once the set exists.
+  /usr/bin/amnezia-force-load 2>/dev/null || true
+}
+
+start() { boot; }

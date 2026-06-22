@@ -24,3 +24,51 @@ config amnezia 'config'
 	# preserved across re-runs only if user has not overridden routing_mode.
 	option installed_version 'main'
 	option installed_ts ''
+
+config globals 'globals'
+	option mode 'failover'
+	option sticky_target 'awg1'
+
+config tunnel 'awg1'
+	option enabled '1'
+	option label 'Primary'
+	option metric '1'
+	option weight '1'
+
+# Force-list sources for amnezia-force-update.
+# itdoginfo: two complementary lists — RKN-blocked (inside) and geoblock-RU services.
+config force_source 'itdoginfo_inside'
+	option enabled '1'
+	option kind 'domains'
+	# F1-verified 2026-06-17: HTTP 200, RKN-blocked domains (intent a).
+	# Repo: itdoginfo/allow-domains — Russia/inside-raw.lst
+	option url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Russia/inside-raw.lst'
+
+config force_source 'itdoginfo_services'
+	option enabled '1'
+	option kind 'domains'
+	# F1-verified 2026-06-17: HTTP 200, geoblock-RU services (intent b) —
+	# OpenAI/ChatGPT/Claude/Anthropic, Spotify-equiv, etc.
+	# Repo: itdoginfo/allow-domains — Categories/geoblock.lst
+	option url 'https://raw.githubusercontent.com/itdoginfo/allow-domains/main/Categories/geoblock.lst'
+
+config force_source 'refilter_domains'
+	option enabled '0'
+	option kind 'domains'
+	# F1-verified 2026-06-17: HTTP 200.
+	# Repo: 1andrevich/Re-filter-lists — domains_all.lst
+	option url 'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/domains_all.lst'
+
+config force_source 'refilter_ip'
+	option enabled '0'
+	option kind 'cidr'
+	# F1-verified 2026-06-17: HTTP 200.
+	# Repo: 1andrevich/Re-filter-lists — ipsum.lst (IP/CIDR)
+	option url 'https://raw.githubusercontent.com/1andrevich/Re-filter-lists/main/ipsum.lst'
+
+config force_source 'antifilter'
+	option enabled '0'
+	option kind 'domains'
+	# F1-verified 2026-06-17: HTTP 200.
+	# Source: antifilter.download/list/domains.lst
+	option url 'https://antifilter.download/list/domains.lst'

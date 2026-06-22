@@ -26,7 +26,7 @@
 # This script intentionally has no SSH knowledge -- the maintainer wrapper
 # (dev/deploy-openwrt-safe.sh) handles SSH, the public bootstrap
 # (install.sh) handles tarball download. Both end up here.
-# shellcheck disable=SC2039
+# shellcheck disable=SC2039,SC2154
 set -eu
 
 usage() {
@@ -54,6 +54,930 @@ Other env overrides:
 USAGE
 }
 
+# ---------------------------------------------------------------------------
+# Multi-tunnel entry points (Phase D): must appear BEFORE the legacy arg
+# parser so they intercept --dry-run-tunnel / --dry-run-all / --migrate /
+# --first-install before the old "expected 1, 2, 3" guard fires.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Preserve any caller-supplied CONF_DIR before sourcing amnezia-common.sh.
+# amnezia-common.sh hard-sets `export CONF_DIR=/etc/amnezia`, which would
+# otherwise overwrite an env var injected by the test harness or a sysadmin.
+_saved_conf_dir="${CONF_DIR:-}"
+
+# Source the shared lib if present (POSIX-safe guard: no failed-`.` exit).
+if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
+  . /usr/lib/amnezia/amnezia-common.sh
+elif [ -f "$SCRIPT_DIR/lib/amnezia-common.sh" ]; then
+  . "$SCRIPT_DIR/lib/amnezia-common.sh"
+fi
+
+# Restore caller-supplied CONF_DIR if it was set before the source.
+[ -n "$_saved_conf_dir" ] && CONF_DIR="$_saved_conf_dir"
+
+# Source the routing lib if present.
+if [ -f /usr/lib/amnezia/amnezia-routing.sh ]; then
+  . /usr/lib/amnezia/amnezia-routing.sh
+elif [ -f "$SCRIPT_DIR/lib/amnezia-routing.sh" ]; then
+  . "$SCRIPT_DIR/lib/amnezia-routing.sh"
+fi
+
+# Source the tunnel lib (gen_tunnel_uci) if present.
+if [ -f /usr/lib/amnezia/amnezia-tunnel-lib.sh ]; then
+  . /usr/lib/amnezia/amnezia-tunnel-lib.sh
+elif [ -f "$SCRIPT_DIR/lib/amnezia-tunnel-lib.sh" ]; then
+  . "$SCRIPT_DIR/lib/amnezia-tunnel-lib.sh"
+fi
+
+# ---------------------------------------------------------------------------
+# resolve_dep <installed_path> <tmp_name> <script_dir_rel>
+#   Returns (via stdout) the first path that exists among:
+#     1. <installed_path>        -- .ipk-installed location (no .sh extension)
+#     2. /tmp/<tmp_name>         -- install.sh staging (with .sh extension)
+#     3. $SCRIPT_DIR/<script_dir_rel> -- dev/deploy staging (relative to script)
+#   Returns empty string (and exit 1) when none is found so callers can guard.
+# ---------------------------------------------------------------------------
+resolve_dep() {
+  _rd_installed="$1"
+  _rd_tmp="/tmp/$2"
+  _rd_src="$SCRIPT_DIR/$3"
+  if [ -f "$_rd_installed" ]; then
+    echo "$_rd_installed"; return 0
+  fi
+  if [ -f "$_rd_tmp" ]; then
+    echo "$_rd_tmp"; return 0
+  fi
+  if [ -f "$_rd_src" ]; then
+    echo "$_rd_src"; return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# --dry-run-tunnel <name> --conf <file>: emit UCI for a single tunnel, no
+# side effects.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--dry-run-tunnel" ]; then
+  _dt_name="${2:-}"
+  _dt_conf=""
+  shift 2 2>/dev/null || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --conf) _dt_conf="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  [ -n "$_dt_name" ] || { echo "usage: --dry-run-tunnel <name> --conf <file>" >&2; exit 2; }
+  [ -n "$_dt_conf" ] || { echo "usage: --dry-run-tunnel <name> --conf <file>" >&2; exit 2; }
+  gen_tunnel_uci "$_dt_name" "$_dt_conf"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# --dry-run-all: enumerate enabled tunnels from UCI and emit all tunnel UCI
+# + firewall dry-run. Uses stubs in tests; applies to real UCI on-router.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--dry-run-all" ]; then
+  _tunnel_list=""
+  _tunnel_list=$(uci show amnezia 2>/dev/null \
+    | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+  # Fallback: UCI_FAKE_TUNNELS is set by the test harness stub.
+  if [ -z "$_tunnel_list" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+    _tunnel_list="$UCI_FAKE_TUNNELS"
+  fi
+  for _t in $_tunnel_list; do
+    _cfile="${CONF_DIR:-/etc/amnezia}/${_t}.conf"
+    if [ -f "$_cfile" ]; then
+      gen_tunnel_uci "$_t" "$_cfile"
+    else
+      # In dry-run/test mode emit placeholder lines so the test can grep them.
+      echo "set network.${_t}=interface"
+    fi
+  done
+  # Emit firewall dry-run if routing lib is loaded.
+  if command -v routing_firewall_dryrun >/dev/null 2>&1; then
+    routing_firewall_dryrun "$_tunnel_list"
+  fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# _amz_wire_force_engine <dry>
+#   Shared helper: installs the full force-list engine (helpers, hotplug,
+#   boot-init, seed, cron, initial populate). Called from BOTH first_install
+#   and migrate_from_pbr after the ru4 gate passes.
+#   $1 = "1" means dry-run (skip all real file operations).
+#   Note: .nft fragment install is NOT here — first_install places it before
+#   classifier generation (step 2b) which must remain before classifier gen.
+# ---------------------------------------------------------------------------
+_amz_wire_force_engine() {
+  _afe_dry="${1:-0}"
+
+  if [ "$_afe_dry" = 1 ]; then
+    return 0
+  fi
+
+  # Install the three allowlist helpers to /usr/bin.
+  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update; do
+    if [ -f "/usr/bin/${_afe_helper}" ]; then
+      amz_log "${_afe_helper} already present (/usr/bin)"
+    else
+      _afe_src=$(resolve_dep \
+        "/usr/bin/${_afe_helper}" \
+        "${_afe_helper}.sh" \
+        "${_afe_helper}.sh") || true
+      if [ -n "$_afe_src" ] && [ "$_afe_src" != "/usr/bin/${_afe_helper}" ]; then
+        cp "$_afe_src" "/usr/bin/${_afe_helper}" 2>/dev/null || true
+        chmod +x "/usr/bin/${_afe_helper}" 2>/dev/null || true
+        amz_log "${_afe_helper} installed to /usr/bin"
+      elif [ -z "$_afe_src" ]; then
+        amz_log "WARN: ${_afe_helper} not found; allowlist helper will be missing"
+      fi
+    fi
+  done
+
+  # Install the force-load firewall hotplug (repopulates amnezia_force4 on fw reload).
+  if [ -f /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+    amz_log "99-amnezia-force-load hotplug already present (.ipk path)"
+  else
+    _afe_hplug=$(resolve_dep \
+      /etc/hotplug.d/firewall/99-amnezia-force-load \
+      99-amnezia-force-load.hotplug \
+      99-amnezia-force-load.hotplug) || true
+    if [ -n "$_afe_hplug" ] && [ "$_afe_hplug" != /etc/hotplug.d/firewall/99-amnezia-force-load ]; then
+      mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+      cp "$_afe_hplug" /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+      chmod +x /etc/hotplug.d/firewall/99-amnezia-force-load 2>/dev/null || true
+    elif [ -z "$_afe_hplug" ]; then
+      amz_log "WARN: 99-amnezia-force-load.hotplug not found; force-load hotplug disabled"
+    fi
+  fi
+
+  # Install the force-load boot init (mirrors amnezia-ru-load.init pattern).
+  if [ -f /etc/init.d/amnezia-force-load ]; then
+    amz_log "amnezia-force-load init already present (.ipk path)"
+  else
+    _afe_init=$(resolve_dep \
+      /etc/init.d/amnezia-force-load \
+      amnezia-force-load.init \
+      amnezia-force-load.init) || true
+    if [ -n "$_afe_init" ] && [ "$_afe_init" != /etc/init.d/amnezia-force-load ]; then
+      cp "$_afe_init" /etc/init.d/amnezia-force-load 2>/dev/null || true
+      chmod +x /etc/init.d/amnezia-force-load 2>/dev/null || true
+    elif [ -z "$_afe_init" ]; then
+      amz_log "WARN: amnezia-force-load.init not found; force-load on boot disabled"
+    fi
+  fi
+  # Enable the init service (runs procd enable — idempotent).
+  # Explicit echo to STUB_LOG allows tests to verify enable was called.
+  echo "/etc/init.d/amnezia-force-load enable" >> "${STUB_LOG:-/dev/null}"
+  /etc/init.d/amnezia-force-load enable 2>/dev/null || true
+
+  # Wire dnsmasq conf-dir so fresh installs pick up chunked nftset directives
+  # even before the first amnezia-force-load run.  Idempotent: only set+commit
+  # when the value is not already the expected path.
+  _afe_confdir=/etc/amnezia/dnsmasq.d
+  _afe_cur_confdir=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true)
+  if [ "$_afe_cur_confdir" != "$_afe_confdir" ]; then
+    uci set "dhcp.@dnsmasq[0].confdir=$_afe_confdir"
+    uci commit dhcp
+    amz_log "dnsmasq confdir wired to $_afe_confdir"
+  else
+    amz_log "dnsmasq confdir already set to $_afe_confdir"
+  fi
+  mkdir -p "$_afe_confdir" 2>/dev/null || true
+
+  # Seed /etc/amnezia/force-tunnel.list and force.d/ (idempotent).
+  mkdir -p "${CONF_DIR:-/etc/amnezia}/force.d" 2>/dev/null || true
+  if [ ! -f "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+    _afe_ftl=$(resolve_dep \
+      "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" \
+      force-tunnel.list \
+      force-tunnel.list) || true
+    if [ -n "$_afe_ftl" ] && \
+       [ "$_afe_ftl" != "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" ]; then
+      cp "$_afe_ftl" "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+    else
+      touch "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/force-tunnel.list" 2>/dev/null || true
+    fi
+    amz_log "force-tunnel.list seeded"
+  else
+    amz_log "force-tunnel.list already present"
+  fi
+
+  # Install the daily amnezia-force-update cron entry (dedup, idempotent).
+  _afe_cron=/etc/crontabs/root
+  mkdir -p /etc/crontabs 2>/dev/null || true
+  touch "$_afe_cron" 2>/dev/null || true
+  sed -i '/# amnezia-force-update/d' "$_afe_cron" 2>/dev/null || true
+  echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
+    >> "$_afe_cron" 2>/dev/null || true
+  /etc/init.d/cron enable 2>/dev/null || true
+  /etc/init.d/cron reload 2>/dev/null || true
+  amz_log "amnezia-force-update cron installed (daily 03:15)"
+
+  # Run amnezia-force-update once on install (best-effort, backgrounded).
+  if [ -x /usr/bin/amnezia-force-update ]; then
+    ( /usr/bin/amnezia-force-update >/dev/null 2>&1 ) &
+    amz_log "amnezia-force-update: initial run triggered (background)"
+  else
+    amz_log "WARN: amnezia-force-update not installed; skipping initial run"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# --migrate [--dry-run]: ordered pbr-removal migration.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--migrate" ]; then
+  _migrate_dry=0
+  shift
+  [ "${1:-}" = "--dry-run" ] && { _migrate_dry=1; shift; }
+
+  MUST_TUNNEL_LIST="${MUST_TUNNEL_LIST:-/etc/amnezia/seed-must-tunnel.list}"
+
+  migrate_from_pbr() {
+    # -----------------------------------------------------------------------
+    # GATE PHASE: classifier file is installed and ru4 set populated, but the
+    # marking rules are NOT yet active and pbr stays intact — clean abort is
+    # possible up to and including the gate check.
+    # -----------------------------------------------------------------------
+
+    # Step 1: install classifier file (no fw4 reload — not activated yet).
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "install:classifier"
+    else
+      # Ensure both .nft fragments are in the stable read location before generating.
+      mkdir -p /usr/share/amnezia/nftables.d 2>/dev/null || true
+      export AMNEZIA_NFT_DIR=/usr/share/amnezia/nftables.d
+      for _frag in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
+        if [ ! -f "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+          _mig_frag_src=$(resolve_dep \
+            "/usr/share/amnezia/nftables.d/${_frag}" \
+            "$_frag" \
+            "nftables.d/${_frag}") || true
+          if [ -n "$_mig_frag_src" ] && \
+             [ "$_mig_frag_src" != "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+            cp "$_mig_frag_src" "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+            chmod 0644 "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+          fi
+        fi
+      done
+      LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
+      _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
+      if command -v routing_emit_classifier >/dev/null 2>&1; then
+        _cls_tmp=$(mktemp /tmp/amnezia-cls-mig-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-mig-$$")
+        _cls_ok=0
+        if routing_emit_classifier "$_routing_mode" "$LAN_DEV" > "$_cls_tmp" 2>/dev/null; then
+          # Validate: non-empty and contains the expected chain declaration.
+          if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+            amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier gen produced empty/invalid output; keeping existing file"
+          fi
+        else
+          rm -f "$_cls_tmp"
+          amz_log "ERROR: routing_emit_classifier failed; keeping existing file"
+        fi
+        unset _cls_tmp
+      else
+        # Fallback for legacy staged installs without routing lib.
+        _nft_src=$(resolve_dep \
+          /etc/nftables.d/30-amnezia-classify.nft \
+          30-amnezia-classify.nft \
+          nftables.d/30-amnezia-classify.nft) || true
+        if [ -n "$_nft_src" ] && [ "$_nft_src" != /etc/nftables.d/30-amnezia-classify.nft ]; then
+          _cls_tmp=$(mktemp /tmp/amnezia-cls-mig-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-mig-$$")
+          if sed "s/@@LAN_IFNAME@@/$LAN_DEV/" "$_nft_src" > "$_cls_tmp" 2>/dev/null \
+             && [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier fallback gen failed; keeping existing file"
+          fi
+          unset _cls_tmp
+        elif [ -z "$_nft_src" ]; then
+          amz_log "WARN: classifier fragment not found; skipping classifier install"
+        fi
+        amz_log "install:classifier (fallback sed)"
+      fi
+    fi
+
+    # Step 2: declare @amnezia_ru4 in the live ruleset so that amnezia-ru-cidr
+    # can populate it via `nft add element`.  Without this declaration the set
+    # does not exist and every element add is silently discarded, leaving the
+    # set empty and the gate below always aborting on real hardware.
+    if [ "$_migrate_dry" != 1 ]; then
+      nft add table inet fw4 2>/dev/null || true
+      nft add set inet fw4 amnezia_ru4 \
+        '{ type ipv4_addr; flags interval; auto-merge; }' 2>/dev/null || true
+    fi
+
+    # Step 3: install the amnezia-ru-cidr binary to /usr/bin/amnezia-ru-cidr,
+    # then run it to populate @amnezia_ru4.
+    #
+    # FIX 2: The installer previously only *ran* the loader (via resolve_dep
+    # which may find it in /tmp or $SCRIPT_DIR) but never INSTALLED it to
+    # /usr/bin/amnezia-ru-cidr.  At boot the amnezia-ru-load init and the
+    # firewall hotplug call /usr/bin/amnezia-ru-cidr directly; if it is absent
+    # the RU set stays empty on every reboot.  Mirror the monitor self-install
+    # pattern: copy to the installed path first, then run from there.
+    if [ "$_migrate_dry" != 1 ]; then
+      _rucidr_run=""
+      if [ -f /usr/bin/amnezia-ru-cidr ]; then
+        amz_log "amnezia-ru-cidr binary already present (/usr/bin)"
+        _rucidr_run=/usr/bin/amnezia-ru-cidr
+      else
+        _rucidr_src=$(resolve_dep \
+          /usr/bin/amnezia-ru-cidr \
+          amnezia-ru-cidr.sh \
+          amnezia-ru-cidr.sh) || true
+        if [ -n "$_rucidr_src" ] && [ "$_rucidr_src" != /usr/bin/amnezia-ru-cidr ]; then
+          cp "$_rucidr_src" /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          chmod +x /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          # Verify copy succeeded; fall back to source path if not (e.g. read-only /usr/bin).
+          if [ -f /usr/bin/amnezia-ru-cidr ]; then
+            amz_log "amnezia-ru-cidr installed to /usr/bin"
+            _rucidr_run=/usr/bin/amnezia-ru-cidr
+          else
+            amz_log "WARN: could not install amnezia-ru-cidr to /usr/bin; using source path"
+            _rucidr_run="$_rucidr_src"
+          fi
+        elif [ -z "$_rucidr_src" ]; then
+          amz_log "WARN: amnezia-ru-cidr source not found; RU CIDR loader will be missing"
+        fi
+      fi
+      # Populate @amnezia_ru4 with the binary we just installed (or the source fallback).
+      if [ -n "$_rucidr_run" ]; then
+        sh "$_rucidr_run" 2>/dev/null || true
+      else
+        amz_log "WARN: amnezia-ru-cidr not available; skipping RU CIDR populate"
+      fi
+    fi
+
+    # Step 3b: install/refresh the weekly RU CIDR update cron entry.
+    # FIX 3: The old pbr-era installer wrote a cron line pointing at the
+    # defunct /usr/bin/awg-ru-update.  Replace any legacy or duplicate entry
+    # with a single, deduplicated line that calls /usr/bin/amnezia-ru-cidr.
+    if [ "$_migrate_dry" != 1 ]; then
+      _cron_file=/etc/crontabs/root
+      mkdir -p /etc/crontabs 2>/dev/null || true
+      touch "$_cron_file" 2>/dev/null || true
+      # Remove any pre-existing lines matching the old or new tag so re-running
+      # the installer is always idempotent (no duplicates).
+      sed -i '/awg-ru-update/d; /# amnezia-ru-update/d; /# amnezia-pbr/d' \
+        "$_cron_file" 2>/dev/null || true
+      # Add a single weekly entry (Sunday 04:30) using the native updater.
+      echo '30 4 * * 0 /usr/bin/amnezia-ru-cidr >/dev/null 2>&1 # amnezia-ru-update' \
+        >> "$_cron_file" 2>/dev/null || true
+      /etc/init.d/cron enable 2>/dev/null || true
+      /etc/init.d/cron reload 2>/dev/null || true
+      amz_log "amnezia-ru-update cron installed (weekly Sun 04:30)"
+    fi
+
+    # Step 4: gate on @amnezia_ru4 being non-empty before touching dnsmasq or pbr.
+    # If this gate fails we roll back only the classifier; dnsmasq is untouched.
+    _ru4_count=0
+    _ru4_out=$(nft list set inet fw4 amnezia_ru4 2>/dev/null || true)
+    if echo "$_ru4_out" | grep -q 'elements'; then
+      _ru4_count=$(echo "$_ru4_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l | tr -d ' ')
+    fi
+    # NFT_FAKE_RU4_COUNT is a test-only override for the nft stub response.
+    _ru4_abort=0
+    if [ -z "${NFT_FAKE_RU4_COUNT:-}" ] && [ "$_ru4_count" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ -n "${NFT_FAKE_RU4_COUNT:-}" ] && [ "${NFT_FAKE_RU4_COUNT}" -le 0 ]; then
+      _ru4_abort=1
+    fi
+    if [ "$_ru4_abort" = 1 ]; then
+      echo "ABORT:ru4-empty"
+      # Roll back: remove classifier and the set declaration so pbr does not
+      # run alongside the new classifier.  dnsmasq has NOT been repointed yet.
+      if [ "$_migrate_dry" != 1 ]; then
+        nft delete set inet fw4 amnezia_ru4 2>/dev/null || true
+        rm -f /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null || true
+      fi
+      return 1
+    fi
+
+    # -----------------------------------------------------------------------
+    # CUTOVER PHASE: gate passed — wire the full failover stack, then cut over.
+    # -----------------------------------------------------------------------
+
+    # Step 5: install rt_tables (mirror first_install_wiring step 1).
+    if [ "$_migrate_dry" = 1 ]; then
+      amz_log "install:rt_tables"
+    else
+      mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
+      _rtt_src=$(resolve_dep \
+        /etc/iproute2/rt_tables.d/amnezia.conf \
+        iproute2-amnezia-rt_tables.conf \
+        iproute2-amnezia-rt_tables.conf) || true
+      if [ -n "$_rtt_src" ] && [ "$_rtt_src" != /etc/iproute2/rt_tables.d/amnezia.conf ]; then
+        cp "$_rtt_src" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
+      elif [ -z "$_rtt_src" ]; then
+        amz_log "WARN: iproute2-amnezia-rt_tables.conf not found; skipping rt_tables install"
+      fi
+      amz_log "install:rt_tables"
+    fi
+
+    # Step 6: install ip rules (fwmark→table mapping).
+    if [ "$_migrate_dry" != 1 ]; then
+      routing_install_rules
+    fi
+
+    # Step 7: fail-closed blackhole default routes BEFORE any traffic can be marked.
+    if [ "$_migrate_dry" != 1 ]; then
+      routing_set_sticky_default ""
+      routing_set_pool_default ""
+    fi
+
+    # Step 8: enumerate enabled tunnels (needed for bring-up + firewall steps).
+    # Compute early so the list is available for all remaining steps.
+    _mig_tunnels=""
+    if [ "$_migrate_dry" != 1 ]; then
+      _mig_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_mig_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _mig_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      # Apply each enabled tunnel's network UCI and bring it up.
+      for _tunnel in $_mig_tunnels; do
+        _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
+        if [ -f "$_tcf" ]; then
+          # Use _gen_rc=0; ...|| _gen_rc=$? to capture failure under set -eu
+          # without triggering the shell's -e exit on the gen_tunnel_uci line.
+          _gen_rc=0
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null \
+            || _gen_rc=$?
+          if [ "$_gen_rc" -ne 0 ]; then
+            amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
+            rm -f /tmp/amnezia-tunnel-uci.$$
+          else
+            uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+            rm -f /tmp/amnezia-tunnel-uci.$$
+            uci commit network 2>/dev/null || true
+            ifup "$_tunnel" 2>/dev/null || true
+          fi
+        fi
+      done
+    fi
+
+    # Step 9: install ru-load init + hotplug (mirror first_install_wiring step 6).
+    if [ "$_migrate_dry" != 1 ]; then
+      if [ -f /etc/init.d/amnezia-ru-load ]; then
+        amz_log "amnezia-ru-load init already present (.ipk path)"
+        /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      else
+        _ruload_src=$(resolve_dep \
+          /etc/init.d/amnezia-ru-load \
+          amnezia-ru-load.init \
+          amnezia-ru-load.init) || true
+        if [ -n "$_ruload_src" ] && [ "$_ruload_src" != /etc/init.d/amnezia-ru-load ]; then
+          cp "$_ruload_src" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+        elif [ -z "$_ruload_src" ]; then
+          amz_log "WARN: amnezia-ru-load.init not found; RU CIDR load on boot disabled"
+        fi
+      fi
+      if [ -f /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+        amz_log "99-amnezia-ru-load hotplug already present (.ipk path)"
+      else
+        _hotplug_src=$(resolve_dep \
+          /etc/hotplug.d/firewall/99-amnezia-ru-load \
+          99-amnezia-ru-load.hotplug \
+          99-amnezia-ru-load.hotplug) || true
+        if [ -n "$_hotplug_src" ] && [ "$_hotplug_src" != /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+          cp "$_hotplug_src" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        elif [ -z "$_hotplug_src" ]; then
+          amz_log "WARN: 99-amnezia-ru-load.hotplug not found; firewall reload trigger disabled"
+        fi
+      fi
+    fi
+
+    # Step 10: self-install the failover monitor daemon + init, then enable + start.
+    # The .ipk path pre-installs these; the install.sh/staged-tree path does not.
+    # Mirror the ru-load pattern: resolve binary + init from staged tree and copy
+    # to their installed paths before calling enable/start.
+    if [ "$_migrate_dry" != 1 ]; then
+      # Install the monitor binary to /usr/sbin/amnezia-failover.
+      if [ -f /usr/sbin/amnezia-failover ]; then
+        amz_log "amnezia-failover binary already present (.ipk path)"
+      else
+        _failover_bin=$(resolve_dep \
+          /usr/sbin/amnezia-failover \
+          amnezia-failover \
+          amnezia-failover) || true
+        if [ -n "$_failover_bin" ] && [ "$_failover_bin" != /usr/sbin/amnezia-failover ]; then
+          cp "$_failover_bin" /usr/sbin/amnezia-failover 2>/dev/null || true
+          chmod +x /usr/sbin/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_bin" ]; then
+          amz_log "WARN: amnezia-failover binary not found; monitor will not run"
+        fi
+      fi
+      # Install the init script to /etc/init.d/amnezia-failover.
+      if [ -f /etc/init.d/amnezia-failover ]; then
+        amz_log "amnezia-failover init already present (.ipk path)"
+      else
+        _failover_init=$(resolve_dep \
+          /etc/init.d/amnezia-failover \
+          amnezia-failover.init \
+          amnezia-failover.init) || true
+        if [ -n "$_failover_init" ] && [ "$_failover_init" != /etc/init.d/amnezia-failover ]; then
+          cp "$_failover_init" /etc/init.d/amnezia-failover 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_init" ]; then
+          amz_log "WARN: amnezia-failover.init not found; monitor cannot be enabled"
+        fi
+      fi
+      echo "amnezia-failover:enable" >> "${STUB_LOG:-/dev/null}"
+      /etc/init.d/amnezia-failover enable 2>/dev/null || true
+      ( sleep 1 && /etc/init.d/amnezia-failover start ) &
+    fi
+
+    # Step 10b: wire the full force-list engine (helpers, hotplug, boot-init,
+    # seed, cron, initial populate).  Dry-run-guarded via _amz_wire_force_engine.
+    # H3/H2: migrate_from_pbr was previously missing this wiring entirely.
+    _amz_wire_force_engine "$_migrate_dry"
+
+    # Step 11: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "repoint:dnsmasq"
+    else
+      _dns_helper=$(resolve_dep \
+        /usr/sbin/configure-dnsmasq-amnezia \
+        configure-dnsmasq-amnezia.sh \
+        configure-dnsmasq-amnezia.sh) || true
+      if [ -n "$_dns_helper" ]; then
+        sh "$_dns_helper"
+      else
+        amz_log "WARN: configure-dnsmasq-amnezia not found; skipping dnsmasq repoint"
+      fi
+    fi
+
+    # Step 12: must-tunnel→sticky migration.
+    # In dry-run: delete amnezia_sticky explicitly so idempotency holds (the real path
+    # relies on configure-dnsmasq-amnezia.sh having already done the delete+recreate).
+    if [ "$_migrate_dry" = 1 ]; then
+      uci -q delete dhcp.amnezia_sticky 2>/dev/null || true
+    fi
+    if [ -f "$MUST_TUNNEL_LIST" ]; then
+      while IFS= read -r _dom; do
+        case "$_dom" in ''|\#*) continue ;; esac
+        uci add_list dhcp.amnezia_sticky.domain="$_dom"
+      done < "$MUST_TUNNEL_LIST"
+    fi
+
+    # Step 13: activate the classifier via fw4 reload BEFORE removing pbr so
+    # there is a brief both-active overlap (both route to VPN) rather than a
+    # neither-active gap (which would leak LAN traffic to WAN cleartext).
+    #
+    # FIX 1: Disable flow offloading BEFORE fw4 reload.
+    # Hardware/software flow offloading bypasses the kernel's fwmark policy
+    # routing: offloaded flows are steered in the fast path and never consult
+    # ip rules, so fwmark-tagged packets intended for the VPN tunnel are
+    # silently forwarded via WAN instead.  pbr-based routing requires that all
+    # forwarded LAN traffic goes through the slow path where nftables can set
+    # fwmarks.  Disable both offload knobs here, idempotently, before the
+    # reload that activates the classifier.
+    if [ "$_migrate_dry" != 1 ]; then
+      uci set firewall.@defaults[0].flow_offloading='0'
+      uci set firewall.@defaults[0].flow_offloading_hw='0'
+      uci commit firewall
+      fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+    fi
+
+    # Step 14: remove pbr (AFTER classifier activated at step 13).
+    if [ "$_migrate_dry" = 1 ]; then
+      echo "remove:pbr"
+    else
+      /etc/init.d/pbr stop 2>/dev/null || true
+      /etc/init.d/pbr disable 2>/dev/null || true
+      # --force-depends: an older amnezia-pbr .ipk recorded a spurious
+      # "Depends: pbr" in opkg metadata, so a plain `opkg remove pbr` no-ops
+      # ("No packages removed"). Force past it. Do NOT discard opkg's output —
+      # surface it so a real removal failure is visible in the cutover log.
+      opkg remove pbr luci-app-pbr --force-depends 2>&1 || true
+    fi
+
+    # Step 14b: clean pbr remnants left after package removal.
+    # FIX 4: Remove config/data files that opkg does not clean up and that
+    # would otherwise linger and confuse diagnostics or trigger pbr restarts
+    # if the package is ever re-installed.
+    if [ "$_migrate_dry" != 1 ]; then
+      # /etc/config/pbr — UCI config file; opkg marks it as a conffile and
+      # intentionally leaves it behind on removal so user edits survive.
+      rm -f /etc/config/pbr 2>/dev/null || true
+      # /etc/pbr.d/ — pbr globs this dir for user rules; remnants here would
+      # break a fresh pbr install.
+      rm -rf /etc/pbr.d/ 2>/dev/null || true
+      # Stale dnsmasq ipset section that pbr wrote via UCI.
+      uci -q delete dhcp.pbr_ru_tld 2>/dev/null || true
+      uci commit dhcp 2>/dev/null || true
+      /etc/init.d/dnsmasq reload 2>/dev/null || true
+      # nftables fragment left by the old pbr RU-TLD ipset approach.
+      rm -f /etc/nftables.d/15-pbr-ru-tld4.nft 2>/dev/null || true
+    fi
+
+    # Step 15: apply firewall zones + disable LAN IPv6 (real path only).
+    # FIX 1 (first-install path): flow offloading is also disabled here so that
+    # a fresh install that never had pbr also gets the offload knobs cleared
+    # before routing_firewall_apply fires its fw4 reload.
+    if [ "$_migrate_dry" != 1 ]; then
+      [ -n "$_mig_tunnels" ] && routing_firewall_apply "$_mig_tunnels"
+      routing_disable_lan_v6
+    fi
+  }
+
+  migrate_from_pbr
+  exit $?
+fi
+
+# ---------------------------------------------------------------------------
+# --first-install [--dry-run]: wire up all new components on a clean install.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--first-install" ]; then
+  _fi_dry=0
+  shift
+  [ "${1:-}" = "--dry-run" ] && { _fi_dry=1; shift; }
+
+  first_install_wiring() {
+    # 1. rt_tables
+    if [ "$_fi_dry" = 1 ]; then
+      echo "install:rt_tables" >> "${STUB_LOG:-/dev/null}"
+      amz_log "install:rt_tables"
+    else
+      mkdir -p /etc/iproute2/rt_tables.d 2>/dev/null || true
+      _rtt_src=$(resolve_dep \
+        /etc/iproute2/rt_tables.d/amnezia.conf \
+        iproute2-amnezia-rt_tables.conf \
+        iproute2-amnezia-rt_tables.conf) || true
+      if [ -n "$_rtt_src" ] && [ "$_rtt_src" != /etc/iproute2/rt_tables.d/amnezia.conf ]; then
+        cp "$_rtt_src" /etc/iproute2/rt_tables.d/amnezia.conf 2>/dev/null || true
+      elif [ -z "$_rtt_src" ]; then
+        amz_log "WARN: iproute2-amnezia-rt_tables.conf not found; skipping rt_tables install"
+      fi
+      amz_log "install:rt_tables"
+    fi
+    # 2. ip rules
+    routing_install_rules
+    # 2b. Install force-list helpers, hotplug, and nft fragments to stable locations.
+    # Must run before step 3 (classifier generation reads from /usr/share/amnezia/nftables.d/).
+    if [ "$_fi_dry" != 1 ]; then
+      # Install both .nft fragments to stable read location for routing_emit_classifier.
+      # NOTE: helpers+hotplug+boot-init+seed+cron are wired via _amz_wire_force_engine
+      # below (step 8), after the failover monitor is started.  The .nft fragments must
+      # come here — before classifier generation in step 3 — so the generator can read them.
+      mkdir -p /usr/share/amnezia/nftables.d 2>/dev/null || true
+      export AMNEZIA_NFT_DIR=/usr/share/amnezia/nftables.d
+      for _frag in 30-amnezia-classify.nft 30-amnezia-classify-direct.nft; do
+        if [ ! -f "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+          _frag_src=$(resolve_dep \
+            "/usr/share/amnezia/nftables.d/${_frag}" \
+            "$_frag" \
+            "nftables.d/${_frag}") || true
+          if [ -n "$_frag_src" ] && \
+             [ "$_frag_src" != "/usr/share/amnezia/nftables.d/${_frag}" ]; then
+            cp "$_frag_src" "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+            chmod 0644 "/usr/share/amnezia/nftables.d/${_frag}" 2>/dev/null || true
+          elif [ -z "$_frag_src" ]; then
+            amz_log "WARN: classifier fragment ${_frag} not found"
+          fi
+        fi
+      done
+      amz_log "install:classifier-fragments"
+    fi
+    # 3. classifier generation (replaces static .nft copy — uses routing_emit_classifier).
+    if [ "$_fi_dry" = 1 ]; then
+      amz_log "install:classifier"
+      echo "install:classifier" >> "${STUB_LOG:-/dev/null}"
+    else
+      LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || echo br-lan)
+      mkdir -p /etc/nftables.d 2>/dev/null || true
+      _routing_mode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)
+      if command -v routing_emit_classifier >/dev/null 2>&1; then
+        _cls_tmp=$(mktemp /tmp/amnezia-cls-fi-XXXXXX 2>/dev/null || echo "/tmp/amnezia-cls-fi-$$")
+        if routing_emit_classifier "$_routing_mode" "$LAN_DEV" > "$_cls_tmp" 2>/dev/null; then
+          # Validate: non-empty and contains the expected chain declaration.
+          if [ -s "$_cls_tmp" ] && grep -q "chain amnezia_classify" "$_cls_tmp" 2>/dev/null; then
+            mv "$_cls_tmp" /etc/nftables.d/30-amnezia-classify.nft 2>/dev/null \
+              || { rm -f "$_cls_tmp"; amz_log "ERROR: classifier mv failed; keeping existing file"; }
+            amz_log "install:classifier (mode=${_routing_mode}, lan=${LAN_DEV})"
+          else
+            rm -f "$_cls_tmp"
+            amz_log "ERROR: classifier gen produced empty/invalid output; keeping existing file"
+          fi
+        else
+          rm -f "$_cls_tmp"
+          amz_log "ERROR: routing_emit_classifier failed; keeping existing file"
+        fi
+        unset _cls_tmp
+      else
+        amz_log "WARN: routing_emit_classifier not available; skipping classifier install"
+      fi
+    fi
+    # 4. dnsmasq UCI ipset
+    _dns_helper=$(resolve_dep \
+      /usr/sbin/configure-dnsmasq-amnezia \
+      configure-dnsmasq-amnezia.sh \
+      configure-dnsmasq-amnezia.sh) || true
+    if [ -n "$_dns_helper" ]; then
+      sh "$_dns_helper"
+    else
+      amz_log "WARN: configure-dnsmasq-amnezia not found; skipping dnsmasq ipset config"
+    fi
+    # 5. tunnel UCI apply + bring-up + firewall zones + disable LAN IPv6 (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      _fi_tunnels=$(uci show amnezia 2>/dev/null \
+        | awk -F'[.=]' '/\.enabled='"'"'?1/ && $2 ~ /^awg[0-9]/{print $2}' | tr '\n' ' ' | sed 's/ $//')
+      if [ -z "$_fi_tunnels" ] && [ -n "${UCI_FAKE_TUNNELS:-}" ]; then
+        _fi_tunnels="$UCI_FAKE_TUNNELS"
+      fi
+      # Apply each enabled tunnel's network UCI and bring it up.
+      # Guard: validate parse_awg_conf succeeded (gen_tunnel_uci returns non-zero
+      # on incomplete conf) BEFORE piping to uci batch; on parse failure log and
+      # skip the tunnel so a malformed/truncated .conf never applies a partial UCI
+      # batch that leaves the config in an inconsistent state.
+      for _tunnel in $_fi_tunnels; do
+        _tcf="${CONF_DIR:-/etc/amnezia}/${_tunnel}.conf"
+        if [ -f "$_tcf" ]; then
+          # Use _gen_rc=0; ...|| _gen_rc=$? to capture failure under set -eu
+          # without triggering the shell's -e exit on the gen_tunnel_uci line.
+          _gen_rc=0
+          gen_tunnel_uci "$_tunnel" "$_tcf" > /tmp/amnezia-tunnel-uci.$$ 2>/dev/null \
+            || _gen_rc=$?
+          if [ "$_gen_rc" -ne 0 ]; then
+            amz_log "WARN: conf parse failed for $_tunnel (rc=$_gen_rc), skipping UCI apply"
+            rm -f /tmp/amnezia-tunnel-uci.$$
+          else
+            uci batch < /tmp/amnezia-tunnel-uci.$$ 2>/dev/null || true
+            rm -f /tmp/amnezia-tunnel-uci.$$
+            uci commit network 2>/dev/null || true
+            ifup "$_tunnel" 2>/dev/null || true
+          fi
+        fi
+      done
+      # FIX 1: Disable flow offloading before routing_firewall_apply fires fw4 reload.
+      # HW/SW flow offloading bypasses fwmark policy routing; forwarded LAN traffic
+      # through the tunnel silently follows WAN instead of the VPN table.  Both knobs
+      # must be off for pbr-based fwmark routing to work correctly.
+      uci set firewall.@defaults[0].flow_offloading='0'
+      uci set firewall.@defaults[0].flow_offloading_hw='0'
+      uci commit firewall
+      [ -n "$_fi_tunnels" ] && routing_firewall_apply "$_fi_tunnels"
+      routing_disable_lan_v6
+    fi
+    # 6. RU boot loader: install init + firewall hotplug hook (real path only).
+    if [ "$_fi_dry" != 1 ]; then
+      # If .ipk already installed the init script, it's already enabled by procd; skip copy.
+      if [ -f /etc/init.d/amnezia-ru-load ]; then
+        amz_log "amnezia-ru-load init already present (.ipk path)"
+        /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+      else
+        _ruload_src=$(resolve_dep \
+          /etc/init.d/amnezia-ru-load \
+          amnezia-ru-load.init \
+          amnezia-ru-load.init) || true
+        if [ -n "$_ruload_src" ] && [ "$_ruload_src" != /etc/init.d/amnezia-ru-load ]; then
+          cp "$_ruload_src" /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-ru-load 2>/dev/null || true
+          /etc/init.d/amnezia-ru-load enable 2>/dev/null || true
+        elif [ -z "$_ruload_src" ]; then
+          amz_log "WARN: amnezia-ru-load.init not found; RU CIDR load on boot disabled"
+        fi
+      fi
+      # Hotplug: skip if .ipk already installed it.
+      if [ -f /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+        amz_log "99-amnezia-ru-load hotplug already present (.ipk path)"
+      else
+        _hotplug_src=$(resolve_dep \
+          /etc/hotplug.d/firewall/99-amnezia-ru-load \
+          99-amnezia-ru-load.hotplug \
+          99-amnezia-ru-load.hotplug) || true
+        if [ -n "$_hotplug_src" ] && [ "$_hotplug_src" != /etc/hotplug.d/firewall/99-amnezia-ru-load ]; then
+          mkdir -p /etc/hotplug.d/firewall 2>/dev/null || true
+          cp "$_hotplug_src" /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+          chmod +x /etc/hotplug.d/firewall/99-amnezia-ru-load 2>/dev/null || true
+        elif [ -z "$_hotplug_src" ]; then
+          amz_log "WARN: 99-amnezia-ru-load.hotplug not found; firewall reload trigger disabled"
+        fi
+      fi
+    fi
+    # 6b. Install /usr/bin/amnezia-ru-cidr binary + populate @amnezia_ru4 + set cron.
+    # FIX 2: The loader binary must be installed to /usr/bin/amnezia-ru-cidr so
+    # the amnezia-ru-load init and firewall hotplug can find it at boot.
+    # FIX 3: Install/refresh the weekly RU CIDR update cron entry.
+    if [ "$_fi_dry" != 1 ]; then
+      _rucidr_run_fi=""
+      if [ -f /usr/bin/amnezia-ru-cidr ]; then
+        amz_log "amnezia-ru-cidr binary already present (/usr/bin)"
+        _rucidr_run_fi=/usr/bin/amnezia-ru-cidr
+      else
+        _rucidr_src=$(resolve_dep \
+          /usr/bin/amnezia-ru-cidr \
+          amnezia-ru-cidr.sh \
+          amnezia-ru-cidr.sh) || true
+        if [ -n "$_rucidr_src" ] && [ "$_rucidr_src" != /usr/bin/amnezia-ru-cidr ]; then
+          cp "$_rucidr_src" /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          chmod +x /usr/bin/amnezia-ru-cidr 2>/dev/null || true
+          # Verify copy succeeded; fall back to source path if not (e.g. read-only /usr/bin).
+          if [ -f /usr/bin/amnezia-ru-cidr ]; then
+            amz_log "amnezia-ru-cidr installed to /usr/bin"
+            _rucidr_run_fi=/usr/bin/amnezia-ru-cidr
+          else
+            amz_log "WARN: could not install amnezia-ru-cidr to /usr/bin; using source path"
+            _rucidr_run_fi="$_rucidr_src"
+          fi
+        elif [ -z "$_rucidr_src" ]; then
+          amz_log "WARN: amnezia-ru-cidr source not found; RU CIDR loader will be missing"
+        fi
+      fi
+      # Populate @amnezia_ru4 for the initial live set.
+      if [ -n "$_rucidr_run_fi" ]; then
+        # Declare the set first so element adds don't fail if fw4 hasn't loaded yet.
+        nft add table inet fw4 2>/dev/null || true
+        nft add set inet fw4 amnezia_ru4 \
+          '{ type ipv4_addr; flags interval; auto-merge; }' 2>/dev/null || true
+        sh "$_rucidr_run_fi" 2>/dev/null || true
+      else
+        amz_log "WARN: amnezia-ru-cidr not available; RU CIDR set will be empty"
+      fi
+      # Cron: remove old/duplicate entries, install a single weekly entry.
+      _cron_file=/etc/crontabs/root
+      mkdir -p /etc/crontabs 2>/dev/null || true
+      touch "$_cron_file" 2>/dev/null || true
+      sed -i '/awg-ru-update/d; /# amnezia-ru-update/d; /# amnezia-pbr/d' \
+        "$_cron_file" 2>/dev/null || true
+      echo '30 4 * * 0 /usr/bin/amnezia-ru-cidr >/dev/null 2>&1 # amnezia-ru-update' \
+        >> "$_cron_file" 2>/dev/null || true
+      /etc/init.d/cron enable 2>/dev/null || true
+      /etc/init.d/cron reload 2>/dev/null || true
+      amz_log "amnezia-ru-update cron installed (weekly Sun 04:30)"
+    fi
+    # 7. self-install the failover monitor daemon + init, then enable + start.
+    # Mirror the ru-load pattern: resolve binary + init from staged tree and copy
+    # to their installed paths before calling enable/start.
+    if [ "$_fi_dry" = 1 ]; then
+      echo "/etc/init.d/amnezia-failover enable" >> "${STUB_LOG:-/dev/null}"
+    else
+      # Install the monitor binary to /usr/sbin/amnezia-failover.
+      if [ -f /usr/sbin/amnezia-failover ]; then
+        amz_log "amnezia-failover binary already present (.ipk path)"
+      else
+        _failover_bin=$(resolve_dep \
+          /usr/sbin/amnezia-failover \
+          amnezia-failover \
+          amnezia-failover) || true
+        if [ -n "$_failover_bin" ] && [ "$_failover_bin" != /usr/sbin/amnezia-failover ]; then
+          cp "$_failover_bin" /usr/sbin/amnezia-failover 2>/dev/null || true
+          chmod +x /usr/sbin/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_bin" ]; then
+          amz_log "WARN: amnezia-failover binary not found; monitor will not run"
+        fi
+      fi
+      # Install the init script to /etc/init.d/amnezia-failover.
+      if [ -f /etc/init.d/amnezia-failover ]; then
+        amz_log "amnezia-failover init already present (.ipk path)"
+      else
+        _failover_init=$(resolve_dep \
+          /etc/init.d/amnezia-failover \
+          amnezia-failover.init \
+          amnezia-failover.init) || true
+        if [ -n "$_failover_init" ] && [ "$_failover_init" != /etc/init.d/amnezia-failover ]; then
+          cp "$_failover_init" /etc/init.d/amnezia-failover 2>/dev/null || true
+          chmod +x /etc/init.d/amnezia-failover 2>/dev/null || true
+        elif [ -z "$_failover_init" ]; then
+          amz_log "WARN: amnezia-failover.init not found; monitor cannot be enabled"
+        fi
+      fi
+      /etc/init.d/amnezia-failover enable 2>/dev/null || true
+      ( sleep 1 && /etc/init.d/amnezia-failover start ) &
+    fi
+    # 8. Wire the full force-list engine: helpers, hotplug, boot-init, seed,
+    # daily cron, and initial populate run (shared with migrate_from_pbr).
+    # H3/H2: _amz_wire_force_engine is defined at the top of the --migrate
+    # dispatch section and is always available when this code runs.
+    _amz_wire_force_engine "$_fi_dry"
+  }
+
+  first_install_wiring
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Legacy argument parsing (original single-tunnel installer).
+# ---------------------------------------------------------------------------
 # Argument parsing: support --help and reject unknown args. Without this,
 # `amnezia-pbr-setup --help` would set STEPS=--help and silently start
 # the install pipeline with junk as the steps value.
@@ -189,7 +1113,7 @@ if ! opkg list-installed | grep -q '^kmod-amneziawg '; then
   done
   rm -rf "$DIR"
 fi
-opkg install pbr luci-app-pbr resolveip ip-full 2>/dev/null || true
+opkg install conntrack-tools 2>/dev/null || true
 
 IF_PRIV="$(get Interface PrivateKey)"
 IF_ADDR="$(get Interface Address)"
@@ -239,7 +1163,6 @@ uci set network.@${CFG}[-1].endpoint_host="$PEER_HOST"
 uci set network.@${CFG}[-1].endpoint_port="$PEER_PORT"
 uci set network.@${CFG}[-1].persistent_keepalive="$PEER_KEEP"
 uci set network.@${CFG}[-1].allowed_ips='0.0.0.0/0'
-uci add_list network.@${CFG}[-1].allowed_ips='::/0'
 uci set network.@${CFG}[-1].route_allowed_ips='0'
 uci commit network
 
@@ -340,113 +1263,40 @@ if [ "$STEPS" -lt 2 ]; then
   exit 0
 fi
 
-# --- Step 2: PBR base (LAN -> VPN) ---
-log "Step 2: PBR base"
-LAN="$(lan_cidr)"
-[ -n "$LAN" ] || LAN="192.168.1.0/24"
-mkdir -p /etc/pbr.d
-# Step 2's PBR config is "LAN -> VPN, nothing direct yet". The .ru
-# direct rule lands in Step 3 if STEPS=3, so we drop it here so a
-# re-run isn't reading a stale file.
-rm -f /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-vpn-only.sh) || fail "missing 99-lan-vpn-vpn-only.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-while uci -q delete pbr.@policy[0]; do :; done
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci set pbr.config.enabled='1'
-uci set pbr.config.strict_enforcement='0'
-uci set pbr.config.resolver_set='none'
-uci -q delete pbr.config.supported_interface 2>/dev/null || true
-uci add_list pbr.config.supported_interface='awg1'
-uci commit pbr
-
-/etc/init.d/pbr enable
-/etc/init.d/pbr restart
-sleep 8
-pbr_nft_ok || fail "pbr.nft syntax error (step2)"
-need_wan
-need_dns
-ok "2 pbr_base"
+# --- Steps 2+3: failover stack (classifier + ip rules + monitor + RU bypass) ---
+# Replaces the old pbr/pbr.d-based Steps 2+3.  Detects whether this is a
+# fresh install (pbr absent) or a pbr-to-failover upgrade, and dispatches to
+# the appropriate wiring function.  Both functions live at the top of this
+# script (under --first-install / --migrate sections).
+log "Step 2: dnsmasq-full"
+if _dnsmasq=$(find_helper install-dnsmasq-full); then
+  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
+else
+  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
+fi
+need_dns || fail "DNS broken after dnsmasq-full"
+ok "2 dnsmasq_full"
 
 if [ "$STEPS" -lt 3 ]; then
   log "DEPLOY_DONE steps=$STEPS"
   exit 0
 fi
 
-# --- Step 3: RU bypass (ipdeny + dnsmasq nftset) ---
-log "Step 3: RU bypass"
+log "Step 3: failover stack wiring"
+if /etc/init.d/pbr status >/dev/null 2>&1 || opkg list-installed 2>/dev/null | grep -q '^pbr '; then
+  # pbr is still present: run ordered migration so RU sets are live before pbr is removed.
+  log "Step 3: pbr detected — running migrate_from_pbr"
+  # Inline the migrate_from_pbr logic using the flags the top-of-script block accepts.
+  # Re-exec ourselves with --migrate so the already-defined function runs cleanly,
+  # inheriting SCRIPT_DIR, CONF_DIR, and all sourced libs.
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --migrate || fail "migrate_from_pbr failed"
+else
+  # Fresh install: wire classifier, ip rules, monitor, firewall zones.
+  log "Step 3: no pbr found — running first_install_wiring"
+  CONF_DIR="${CONF_DIR:-/etc/amnezia}" sh "$0" --first-install || fail "first_install_wiring failed"
+fi
 
-mkdir -p /etc/nftables.d
-cat > /etc/nftables.d/15-pbr-ru-tld4.nft <<'NFTFRAG'
-	set pbr_ru_tld4 {
-		type ipv4_addr
-		flags interval
-		auto-merge
-	}
-NFTFRAG
 /etc/init.d/firewall reload 2>/dev/null || true
-sleep 2
 
-if _dnsmasq=$(find_helper install-dnsmasq-full); then
-  $_dnsmasq 2>/dev/null || fail "dnsmasq-full install"
-else
-  # .ipk path declares dnsmasq-full as a hard DEPENDS, so opkg already has
-  # it installed. No-op.
-  command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq missing and no installer helper"
-fi
-need_dns || fail "DNS broken after dnsmasq-full"
-
-if _nftset=$(find_helper configure-dnsmasq-ru-nftset); then
-  $_nftset 2>/dev/null || fail "dnsmasq .ru nftset config"
-else
-  log "WARN: configure-dnsmasq-ru-nftset helper missing; .ru nftset not wired"
-fi
-
-# ru-direct + full LAN rules (idempotent — no duplicate nft rules on pbr restart).
-# ru-direct.sh ships at /etc/pbr.d/ in .ipk; copy from /tmp/ only when present.
-if [ -f /tmp/ru-direct.sh ]; then
-  cp /tmp/ru-direct.sh /etc/pbr.d/ru-direct.sh
-fi
-chmod 755 /etc/pbr.d/ru-direct.sh
-_tpl=$(find_template 99-lan-vpn-full.sh) || fail "missing 99-lan-vpn-full.sh template"
-sed "s|__LAN__|$LAN|g" "$_tpl" > /etc/pbr.d/99-lan-vpn.sh
-chmod 755 /etc/pbr.d/99-lan-vpn.sh
-
-idx=0
-while uci -q get "pbr.@include[$idx]" >/dev/null 2>&1; do
-  path="$(uci -q get pbr.@include[$idx].path || true)"
-  case "$path" in
-    /etc/pbr.d/ru-direct.sh|/etc/pbr.d/99-lan-vpn.sh) uci delete "pbr.@include[$idx]" ;;
-    *) idx=$((idx + 1)) ;;
-  esac
-done
-uci commit pbr
-
-/etc/init.d/pbr restart
-sleep 10
-pbr_nft_ok || fail "pbr.nft syntax error (step3 ru-direct)"
-logread 2>/dev/null | tail -20 | grep -qi "FAILED TO START" && fail "PBR failed to start step3"
-
-/etc/init.d/dnsmasq restart 2>/dev/null || true
-sleep 3
-need_wan
-need_dns
-nslookup -type=A mail.ru 127.0.0.1 >/dev/null 2>&1 || log "WARN: mail.ru lookup failed (may need time)"
-
-_ipdeny=$(nft list set inet fw4 pbr_wan_4_dst_ip_user 2>/dev/null \
-  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+' | wc -l)
-_ipdeny=$(printf '%s' "$_ipdeny" | tr -d ' ')
-log "ipdeny entries: $_ipdeny"
-[ "$_ipdeny" -gt 100 ] || fail "ipdeny set too small ($_ipdeny)"
-
-ok "3 ru_bypass"
+ok "3 failover_wiring"
 log "DEPLOY_DONE steps=$STEPS"

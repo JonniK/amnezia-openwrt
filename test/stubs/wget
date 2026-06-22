@@ -1,0 +1,51 @@
+#!/bin/sh
+# Fetch stub: honors FETCH_FAIL=1 (network error) and FETCH_GARBAGE=1
+# (returns an HTML/404 body that fails content validation).
+# Uses AMZ_FETCH override target if set (for test fixture injection).
+# Logs the invocation to $STUB_LOG like all other stubs.
+
+# Extract the URL and the -O target from arguments.
+_url=""; _outfile=""
+_prev=""
+for _a in "$@"; do
+  case "$_a" in
+    -O) _prev=O ;;
+    -qO) _prev=O ;;
+    -sLo) _prev=O ;;
+    *)
+      if [ "$_prev" = O ]; then
+        _outfile="$_a"; _prev=""
+      else
+        case "$_a" in
+          http*|ftp*|file*) _url="$_a" ;;
+          -*) _prev="" ;;
+        esac
+      fi
+      ;;
+  esac
+done
+
+echo "wget $*" >> "${STUB_LOG:-/dev/null}"
+
+if [ "${FETCH_FAIL:-0}" = 1 ]; then
+  exit 1
+fi
+
+# FETCH_GARBAGE=1: write an HTML body that should fail domain/cidr validation.
+if [ "${FETCH_GARBAGE:-0}" = 1 ] && [ -n "$_outfile" ]; then
+  printf '<!DOCTYPE html>\n<html><body>404: Not Found</body></html>\n' > "$_outfile"
+  exit 0
+fi
+
+# If AMZ_FETCH points to a fixture file, copy it to the output target.
+if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ] && [ -n "$_outfile" ]; then
+  cp "$AMZ_FETCH" "$_outfile"
+  exit 0
+fi
+
+# Default: write a small fixture list so callers get a non-empty result.
+if [ -n "$_outfile" ]; then
+  printf 'example.com\ntest.example\n' > "$_outfile"
+fi
+
+exit 0

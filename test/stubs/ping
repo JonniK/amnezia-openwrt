@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "ping $*" >> "${STUB_LOG:-/dev/null}"
+# Model real ping: PING_FAKE_OK=1 means reachable (exit 0); 0 means unreachable (exit 1).
+exit "$([ "${PING_FAKE_OK:-0}" = 1 ] && echo 0 || echo 1)"

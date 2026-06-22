@@ -1,0 +1,19 @@
+# amnezia multi-tunnel classifier — included into inet fw4 by fw4.
+set amnezia_ru4      { type ipv4_addr; flags interval; auto-merge; }
+set amnezia_ru_tld4  { type ipv4_addr; flags interval; auto-merge; }
+set amnezia_sticky4  { type ipv4_addr; flags interval; auto-merge; }
+set amnezia_force4   { type ipv4_addr; flags interval; auto-merge; }
+
+chain amnezia_classify {
+	type filter hook prerouting priority mangle; policy accept;
+	# Only classify LAN-sourced forwarded traffic.
+	# @@LAN_IFNAME@@ is replaced by the installer (see Task D1/M-a substitution step).
+	iifname != "@@LAN_IFNAME@@" return
+	# RU-direct: leave unmarked -> main table -> wan (zapret operates here).
+	ip daddr @amnezia_ru_tld4 return
+	ip daddr @amnezia_ru4 return
+	# Sticky (Claude/Anthropic) -> dedicated stable tunnel.
+	ip daddr @amnezia_sticky4 meta mark set 0x0a0000 return
+	# Everything else -> pool.
+	meta mark set 0x0b0000
+}

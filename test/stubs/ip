@@ -1,0 +1,24 @@
+#!/bin/sh
+echo "ip $*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  "rule show"*)
+    # Emit real kernel form: %#x strips leading zeros from the mark.
+    # 0x0a0000 -> 0xa0000, 0x0b0000 -> 0xb0000.  Mask 0x0ff0000 -> 0xff0000.
+    [ "${IP_FAKE_RULE_EXISTS:-0}" = 1 ] && printf 'fwmark 0xa0000/0xff0000 lookup 100\nfwmark 0xb0000/0xff0000 lookup 101\n' ;;
+  "nexthop help")
+    [ "${IP_NEXTHOP_OK:-0}" = 1 ] && exit 0 || exit 1 ;;
+  "-j route show table vpn_pool"|"-j route show table 101")
+    printf '%s\n' "${IP_FAKE_ROUTE:-[]}" ;;
+  "-4 addr show dev awg1")
+    # Return a fake per-tunnel source address so probe_setup can key ip rules by src.
+    printf '2: awg1: <POINTOPOINT,UP>\n    inet 10.100.1.2/24 scope global awg1\n' ;;
+  "-4 addr show dev awg2")
+    printf '3: awg2: <POINTOPOINT,UP>\n    inet 10.100.2.2/24 scope global awg2\n' ;;
+  "-4 addr show dev awg3")
+    printf '4: awg3: <POINTOPOINT,UP>\n    inet 10.100.3.2/24 scope global awg3\n' ;;
+  "-4 addr show dev awg4")
+    printf '5: awg4: <POINTOPOINT,UP>\n    inet 10.100.4.2/24 scope global awg4\n' ;;
+  "-4 addr show dev awg5")
+    printf '6: awg5: <POINTOPOINT,UP>\n    inet 10.100.5.2/24 scope global awg5\n' ;;
+esac
+exit 0

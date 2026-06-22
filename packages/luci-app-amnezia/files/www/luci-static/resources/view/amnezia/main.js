@@ -9,17 +9,18 @@
 // (i.e. the user navigated to another page). On return, render() registers
 // a fresh poller. Steady state during navigation: 0 active pollers.
 var pollFn = null;
+// True once refresh() has seen the view's DOM anchor at least once. LuCI's
+// poll.add() fires one synchronous step() *before* render() returns (and thus
+// before LuCI inserts the rendered DOM), so the very first poll runs with the
+// anchor absent. We must NOT treat that as "navigated away" -- otherwise the
+// poller kills itself on initial load and refresh-only fields (the force-update
+// stamp) are never painted. Only self-unregister once the anchor has appeared.
+var domSeen = false;
 
 // In-flight flag for apply/revert. While true, the 5s poll's paintApply()
 // must not touch the apply/revert buttons -- otherwise a poll landing
 // mid-uci-commit re-enables the button and a second click stacks restarts.
 var applyInFlight = false;
-
-// Debounce: pbr's async interface trigger (fired by ifup/ifdown awg1) can
-// briefly leave /var/run/pbr.nft mid-rewrite, so one transient unhealthy
-// poll right after a tunnel toggle is normal. Require 2 consecutive bad
-// polls before flipping the UI to red.
-var pbrBadCount = 0;
 
 // Block re-entrant probes: the seed-list rows and the standalone Probe
 // button both call handleProbe; without this, clicking two rows quickly
@@ -30,6 +31,13 @@ var probeInFlight = false;
 // (sequential N probes), so a double-click without the guard would queue a
 // second run that overwrites the in-progress result mid-render.
 var verifyInFlight = false;
+
+// Guards for the new tunnel-management + allowlist operations.
+var addTunnelInFlight = false;
+var removeTunnelInFlight = false;
+var routingModeInFlight = false;
+var forceUpdateInFlight = false;
+var saveManualInFlight = false;
 
 // Signature of the most recently rendered candidate list. paintApply() skips
 // rebuilding the <select> when the signature is unchanged -- otherwise an
@@ -78,25 +86,12 @@ function uiConfirm(message) {
 	});
 }
 
-function parseStatus(text) {
-	text = text || '';
-	var up = /"up"\s*:\s*true/.test(text);
-	var uptimeMatch = text.match(/"uptime"\s*:\s*(\d+)/);
-	var uptime = uptimeMatch ? parseInt(uptimeMatch[1], 10) : null;
-	return { up: up, uptime: uptime, raw: text };
-}
-
 function parseRuStamp(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
 
 function parseZapret(text) {
-	if (!text) return null;
-	try { return JSON.parse(text); } catch (e) { return null; }
-}
-
-function parsePbr(text) {
 	if (!text) return null;
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
@@ -196,62 +191,6 @@ function fmtAge(ts) {
 	if (age < 3600) return Math.floor(age / 60) + 'm ago';
 	if (age < 86400) return Math.floor(age / 3600) + 'h ago';
 	return Math.floor(age / 86400) + 'd ago';
-}
-
-function paintTunnel(s) {
-	var dot = document.getElementById('awg-dot');
-	var label = document.getElementById('awg-state-label');
-	var uptimeEl = document.getElementById('awg-uptime');
-	var btn = document.getElementById('awg-toggle-btn');
-	var raw = document.getElementById('awg-status-raw');
-
-	if (dot) dot.style.background = s.up ? '#3c763d' : '#a94442';
-	if (label) label.textContent = s.up ? 'UP' : 'DOWN';
-	if (uptimeEl) uptimeEl.textContent = s.up && s.uptime !== null ? '(uptime: ' + fmtUptime(s.uptime) + ')' : '';
-	if (btn && !btn.dataset.busy) {
-		btn.textContent = s.up ? _('Turn OFF') : _('Turn ON');
-		btn.className = 'btn ' + (s.up ? 'cbi-button-negative' : 'cbi-button-positive');
-		btn.disabled = false;
-	}
-	if (raw) raw.textContent = s.raw;
-}
-
-function paintPbr(s) {
-	var dot = document.getElementById('pbr-dot');
-	var label = document.getElementById('pbr-label');
-	var detail = document.getElementById('pbr-detail');
-	var btn = document.getElementById('pbr-reload-btn');
-
-	if (!s) {
-		if (dot) dot.style.background = '#888';
-		if (label) label.textContent = _('pbr: unknown');
-		if (detail) detail.textContent = '';
-		if (btn) btn.className = 'btn cbi-button-action';
-		return;
-	}
-
-	if (s.healthy) { pbrBadCount = 0; } else { pbrBadCount++; }
-	var displayBad = pbrBadCount >= 2;
-
-	var colour = !displayBad ? '#3c763d'
-		: (s.running ? '#f0ad4e' : '#a94442');
-	if (dot) dot.style.background = colour;
-
-	var bits = [];
-	bits.push(s.running ? _('running') : _('stopped'));
-	bits.push(s.nft_ok ? _('nft ok') : _('nft BAD'));
-	bits.push(_('ipdeny ') + s.ipdeny_count);
-	if (s.recent_failure) bits.push(_('recent FAILED TO START'));
-	if (label) label.textContent = bits.join(' / ');
-
-	if (detail) detail.textContent = s.nft_error || '';
-
-	// Reload button: action style by default, negative once we've actually
-	// confirmed multiple bad polls (debounced) so a 5s transient during
-	// awg-toggle's ifup/ifdown doesn't flash the button red.
-	if (btn) {
-		btn.className = 'btn ' + (displayBad ? 'cbi-button-negative' : 'cbi-button-action');
-	}
 }
 
 function paintZapret(s, errMsg) {
@@ -497,6 +436,91 @@ function paintBlockcheckLog(text) {
 	pre.scrollTop = pre.scrollHeight;
 }
 
+function parseFailoverState(text) {
+	if (!text) return null;
+	try { return JSON.parse(text); } catch (e) { return null; }
+}
+
+// self is the view instance; pass it so toggle/remove buttons can call handlers.
+// self may be null when called without toggle support (e.g. in tests).
+function renderTunnelTable(state, self) {
+	if (!state || !state.tunnels || !state.tunnels.length) {
+		return E('div', { 'style': 'color:#888;font-style:italic;' },
+			_('No tunnel state available. Start the amnezia-failover service.'));
+	}
+	var table = E('table', {
+		'style': 'border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed;'
+	});
+	var head = E('tr', {}, [
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:11%;' }, _('Tunnel')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:9%;' }, _('State')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('Role')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Metric')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Weight')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:14%;' }, _('Handshake')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Exit IP')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Toggle')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Remove'))
+	]);
+	table.appendChild(head);
+	for (var i = 0; i < state.tunnels.length; i++) {
+		var t = state.tunnels[i];
+		var upColor = t.up ? '#3c763d' : '#a94442';
+		var upText = t.up ? _('UP') : _('DOWN');
+		var role = t.carrying ? _('active') : (t.enabled ? _('standby') : _('disabled'));
+		var roleColor = t.carrying ? '#3c763d' : (t.enabled ? '#666' : '#888');
+		// Visually distinguish DOWN tunnels with a dim background.
+		var rowBg = t.up ? '' : 'background:#fdf2f2;';
+		var toggleBtn = self
+			? E('button', {
+				'id': 'awg-toggle-' + t.name,
+				'class': 'btn btn-sm ' + (t.enabled ? 'cbi-button-negative' : 'cbi-button-positive'),
+				'style': 'padding:2px 8px;font-size:11px;',
+				'click': ui.createHandlerFn(self, 'handleTunnelToggle', t.name)
+			  }, t.enabled ? _('Disable') : _('Enable'))
+			: E('span', {}, '');
+		var removeBtn = self
+			? E('button', {
+				'id': 'awg-remove-' + t.name,
+				'class': 'btn btn-sm cbi-button-negative',
+				'style': 'padding:2px 8px;font-size:11px;',
+				'click': ui.createHandlerFn(self, 'handleTunnelRemove', t.name, t.exit_ip || '')
+			  }, _('Remove'))
+			: E('span', {}, '');
+		var row = E('tr', {}, [
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;font-weight:bold;' },
+				t.label ? (t.name + ' (' + t.label + ')') : t.name),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + upColor + ';font-weight:bold;' },
+				upText),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;color:' + roleColor + ';' },
+				role),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+				t.metric !== undefined ? t.metric : ''),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:right;color:#555;' },
+				t.weight !== undefined ? t.weight : ''),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;color:#666;font-family:monospace;font-size:11px;' },
+				(function(age) {
+					// age is seconds-since-handshake from the daemon (-1 = never).
+					// Do NOT convert via Date.now() — the value is already an age, not an epoch.
+					if (age === undefined || age === null) return _('never');
+					if (age < 0) return _('never');
+					if (age < 60) return age + 's ago';
+					if (age < 3600) return Math.floor(age / 60) + 'm ago';
+					if (age < 86400) return Math.floor(age / 3600) + 'h ago';
+					return Math.floor(age / 86400) + 'd ago';
+				})(t.handshake_age)),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
+				t.exit_ip || ''),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },
+				toggleBtn),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },
+				removeBtn)
+		]);
+		table.appendChild(row);
+	}
+	return table;
+}
+
 function paintRuStamp(stamp) {
 	var when = document.getElementById('awg-ru-when');
 	var count = document.getElementById('awg-ru-count');
@@ -520,23 +544,166 @@ function paintRuStamp(stamp) {
 	}
 }
 
-return view.extend({
-	handlePbrReload: function(ev) {
-		var btn = document.getElementById('pbr-reload-btn');
-		if (btn) { btn.disabled = true; btn.textContent = _('Reloading...'); }
-		return fs.exec('/usr/bin/pbr-reload').then(L.bind(function(res) {
-			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
-				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
-				(res.code === 0) ? 'info' : 'warning');
-			if (btn) { btn.disabled = false; btn.textContent = _('Reload PBR'); }
-			return this.refresh();
-		}, this)).catch(function(err) {
-			ui.addNotification(null, E('p', {}, _('PBR reload failed: ') + err), 'danger');
-			var b = document.getElementById('pbr-reload-btn');
-			if (b) { b.disabled = false; b.textContent = _('Reload PBR'); }
-		});
-	},
+// Update the prominent "Active tunnel" banner on each poll.
+function paintFailoverSummary(state) {
+	var dot = document.getElementById('failover-active-dot');
+	var label = document.getElementById('failover-active-label');
+	var modeEl = document.getElementById('failover-mode-label');
 
+	if (!state) {
+		if (dot) dot.style.background = '#888';
+		if (label) label.textContent = _('no data');
+		if (modeEl) modeEl.textContent = '';
+		return;
+	}
+
+	var allDown = !!state.all_down;
+	if (dot) dot.style.background = allDown ? '#a94442' : '#3c763d';
+	if (label) label.textContent = allDown ? _('ALL DOWN') : (state.active_pool || _('unknown'));
+	if (modeEl) modeEl.textContent = 'mode: ' + (state.mode || '?');
+}
+
+// ── vpn:// decoder ──────────────────────────────────────────────────────────
+// Decodes an Amnezia vpn:// share link and returns the embedded WireGuard
+// .conf text (Promise<string|null>).  Returns null on any failure so the
+// caller can fall back to manual paste.
+//
+// Schema (design §Feature 1 – vpn:// decoding):
+//   vpn:// + base64url( <4-byte BE uncompressed-length> + <zlib/RFC1950> )
+// Decompressed JSON: { containers: [{ containerCode: 9|"clAmneziaWg",
+//   last_config: "<JSON string: {config: '<wg conf>'}>" }] }
+//
+// NOTE: Validated against a self-consistent round-trip fixture in
+// test/js/decode-vpn.test.mjs.  Real Amnezia-app link validation is deferred
+// to the VM/manual stage (Phase G).
+function decodeVpnLink(text) {
+	if (!text || typeof text !== 'string') return Promise.resolve(null);
+	var t = text.trim();
+	if (t.indexOf('vpn://') !== 0) return Promise.resolve(null);
+
+	return Promise.resolve().then(function() {
+		// 1. Strip scheme and base64url-decode to Uint8Array.
+		var b64 = t.slice(6)
+			.replace(/-/g, '+')
+			.replace(/_/g, '/');
+		// Re-add base64 padding.
+		var pad = (4 - b64.length % 4) % 4;
+		for (var p = 0; p < pad; p++) b64 += '=';
+
+		var binStr = atob(b64);
+		var raw = new Uint8Array(binStr.length);
+		for (var i = 0; i < binStr.length; i++) raw[i] = binStr.charCodeAt(i);
+
+		if (raw.length < 4) return null;
+
+		// 2. Drop the 4-byte big-endian qCompress length prefix.
+		var compressed = raw.slice(4);
+
+		// 3. Inflate via DecompressionStream('deflate') = zlib/RFC1950.
+		//    Pump both sides concurrently so errors surface on the reader.
+		var ds = new DecompressionStream('deflate');
+		var writer = ds.writable.getWriter();
+		var reader = ds.readable.getReader();
+
+		var writeP = writer.write(compressed).then(function() {
+			return writer.close();
+		}).catch(function() { /* errors surface via reader side */ });
+
+		var chunks = [];
+		var totalLen = 0;
+		var readErr = null;
+
+		function readAll() {
+			return reader.read().then(function(chunk) {
+				if (chunk.done) return;
+				chunks.push(chunk.value);
+				totalLen += chunk.value.length;
+				return readAll();
+			}).catch(function(e) { readErr = e; });
+		}
+
+		return readAll().then(function() {
+			return writeP.catch(function() {});
+		}).then(function() {
+			if (readErr) return null;
+
+			// 4. Assemble chunks and UTF-8 decode.
+			var decompressed = new Uint8Array(totalLen);
+			var off = 0;
+			for (var j = 0; j < chunks.length; j++) {
+				decompressed.set(chunks[j], off);
+				off += chunks[j].length;
+			}
+			var jsonStr = new TextDecoder().decode(decompressed);
+
+			// 5. Parse outer document and find AmneziaWG container.
+			var doc;
+			try { doc = JSON.parse(jsonStr); } catch (e) { return null; }
+
+			var containers = doc && doc.containers;
+			if (!Array.isArray(containers)) return null;
+
+			var awgContainer = null;
+			for (var k = 0; k < containers.length; k++) {
+				var c = containers[k];
+				if (c && (c.containerCode === 9 || c.containerCode === 'clAmneziaWg' ||
+				          c.containerName === 'AmneziaWG')) {
+					awgContainer = c;
+					break;
+				}
+			}
+			if (!awgContainer || !awgContainer.last_config) return null;
+
+			// 6. last_config is itself a JSON string — parse it again.
+			var inner;
+			try {
+				inner = (typeof awgContainer.last_config === 'string')
+					? JSON.parse(awgContainer.last_config)
+					: awgContainer.last_config;
+			} catch (e) { return null; }
+
+			var conf = inner && inner.config;
+			if (typeof conf !== 'string' || !conf.trim()) return null;
+			return conf.trim();
+		});
+	}).catch(function() { return null; });
+}
+
+// ── Force-update stamp painter ───────────────────────────────────────────────
+// Mirrors paintRuStamp but reads force-update.json which has per-source entries.
+function paintForceStamp(stamp) {
+	var whenEl  = document.getElementById('force-when');
+	var countEl = document.getElementById('force-count');
+	var statusEl = document.getElementById('force-status');
+
+	if (!stamp) {
+		if (whenEl)  whenEl.textContent  = _('never updated');
+		if (countEl) countEl.textContent = '';
+		if (statusEl) { statusEl.textContent = ''; statusEl.style.color = ''; }
+		return;
+	}
+
+	if (whenEl) whenEl.textContent = fmtAge(stamp.ts);
+
+	// Aggregate per-source counts and detect any failures.
+	var totalCount = 0;
+	var anyFailed = false;
+	var sources = stamp.sources || {};
+	var names = Object.keys(sources);
+	for (var i = 0; i < names.length; i++) {
+		var s = sources[names[i]];
+		if (s && s.count) totalCount += (s.count || 0);
+		if (s && s.status === 'failed') anyFailed = true;
+	}
+
+	if (countEl) countEl.textContent = totalCount ? (totalCount + ' entries') : '';
+	if (statusEl) {
+		statusEl.textContent = anyFailed ? _('some sources failed') : _('ok');
+		statusEl.style.color = anyFailed ? '#a94442' : '#3c763d';
+	}
+}
+
+return view.extend({
 	handleRefresh: function(ev) {
 		var btn = document.getElementById('manual-refresh-btn');
 		if (btn) { btn.disabled = true; }
@@ -547,18 +714,256 @@ return view.extend({
 		});
 	},
 
-	handleToggle: function(ev) {
-		var btn = document.getElementById('awg-toggle-btn');
+	handleTunnelToggle: function(ev, tunnelName) {
+		var btnId = 'awg-toggle-' + tunnelName;
+		var btn = document.getElementById(btnId);
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Working...'); }
-		return fs.exec('/usr/bin/awg-toggle').then(L.bind(function(res) {
+		return fs.exec('/usr/bin/amnezia-failover-ctl', ['toggle', tunnelName]).then(L.bind(function(res) {
 			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
-				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')), 'info');
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'warning');
 			if (btn) delete btn.dataset.busy;
 			return this.refresh();
 		}, this)).catch(function(err) {
 			ui.addNotification(null, E('p', {}, _('Toggle failed: ') + err), 'danger');
-			var b = document.getElementById('awg-toggle-btn');
+			var b = document.getElementById(btnId);
 			if (b) { delete b.dataset.busy; b.disabled = false; }
+		});
+	},
+
+	// ── handleTunnelRemove ───────────────────────────────────────────────────
+	// Remove button per tunnel row.  Guards: sticky-target, last-member.
+	// Confirm shows tunnel name + exit-IP so the user knows what they're removing.
+	handleTunnelRemove: function(ev, tunnelName, exitIp) {
+		if (removeTunnelInFlight) {
+			ui.addNotification(null, E('p', {}, _('A remove is already in progress')), 'info');
+			return Promise.resolve();
+		}
+		var msg = _('Remove tunnel ') + tunnelName;
+		if (exitIp) msg += _(' (endpoint: ') + exitIp + ')';
+		msg += _('?\n\nThis stops the monitor, tears down the interface, and removes all UCI state. The monitor will restart with the remaining tunnels.');
+		removeTunnelInFlight = true;
+		var btnId = 'awg-remove-' + tunnelName;
+		var btn = document.getElementById(btnId);
+		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Removing...'); }
+		return uiConfirm(msg).then(L.bind(function(ok) {
+			if (!ok) {
+				removeTunnelInFlight = false;
+				if (btn) { delete btn.dataset.busy; btn.disabled = false; btn.textContent = _('Remove'); }
+				return null;
+			}
+			return fs.exec('/usr/bin/amnezia-tunnel-ctl', ['remove', tunnelName]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				removeTunnelInFlight = false;
+				if (btn) { delete btn.dataset.busy; btn.disabled = false; btn.textContent = _('Remove'); }
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Remove failed: ') + err), 'danger');
+				removeTunnelInFlight = false;
+				var b = document.getElementById(btnId);
+				if (b) { delete b.dataset.busy; b.disabled = false; b.textContent = _('Remove'); }
+			});
+		}, this));
+	},
+
+	// ── handleAddTunnel ──────────────────────────────────────────────────────
+	// Submits a new .conf or vpn:// link.  vpn:// is decoded client-side first;
+	// on success the user sees the decoded preview and confirms before exec.
+	handleAddTunnel: function(ev) {
+		if (addTunnelInFlight) {
+			ui.addNotification(null, E('p', {}, _('An add is already in progress')), 'info');
+			return Promise.resolve();
+		}
+		var taEl = document.getElementById('add-tunnel-conf');
+		var labelEl = document.getElementById('add-tunnel-label');
+		var raw = (taEl && taEl.value || '').trim();
+		if (!raw) {
+			ui.addNotification(null, E('p', {}, _('Paste a .conf or vpn:// link first')), 'warning');
+			return Promise.resolve();
+		}
+		var label = (labelEl && labelEl.value || '').trim();
+
+		// Find the free slot.
+		return fs.exec('/usr/bin/amnezia-tunnel-ctl', ['list-free']).then(L.bind(function(res) {
+			if (!res || res.code === 3) {
+				ui.addNotification(null, E('p', {}, _('All tunnel slots are full (max 5). Remove one first.')), 'warning');
+				return null;
+			}
+			var slotName = ((res && res.stdout) || '').trim();
+			if (!slotName) {
+				ui.addNotification(null, E('p', {}, _('Could not determine free tunnel slot')), 'warning');
+				return null;
+			}
+
+			// If the input looks like a vpn:// link, decode it first.
+			if (raw.indexOf('vpn://') === 0) {
+				return decodeVpnLink(raw).then(L.bind(function(decoded) {
+					if (!decoded) {
+						ui.addNotification(null, E('p', {}, _("Couldn't decode this vpn:// link — paste the .conf text directly instead")), 'warning');
+						return null;
+					}
+					// Show the decoded preview and ask the user to confirm.
+					var previewMsg = _('Decoded vpn:// for slot ') + slotName + _(':\n\n') + decoded + _('\n\nProceed?');
+					addTunnelInFlight = true;
+					return uiConfirm(previewMsg).then(L.bind(function(ok) {
+						if (!ok) { addTunnelInFlight = false; return null; }
+						return this._doAddTunnel(slotName, decoded, label);
+					}, this));
+				}, this));
+			}
+
+			// Plain .conf — confirm and submit.
+			var confirmMsg = _('Add tunnel ') + slotName + _(' with the pasted .conf?');
+			if (label) confirmMsg += _('\nLabel: ') + label;
+			addTunnelInFlight = true;
+			return uiConfirm(confirmMsg).then(L.bind(function(ok) {
+				if (!ok) { addTunnelInFlight = false; return null; }
+				return this._doAddTunnel(slotName, raw, label);
+			}, this));
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Add tunnel failed: ') + err), 'danger');
+			addTunnelInFlight = false;
+		});
+	},
+
+	_doAddTunnel: function(slotName, confBody, label) {
+		var btn = document.getElementById('add-tunnel-btn');
+		if (btn) { btn.disabled = true; btn.textContent = _('Adding...'); }
+		var args = ['add', slotName, confBody];
+		if (label) { args.push('--label'); args.push(label); }
+		return fs.exec('/usr/bin/amnezia-tunnel-ctl', args).then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'danger');
+			addTunnelInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Add tunnel'); }
+			// Clear form on success.
+			if (res.code === 0) {
+				var ta = document.getElementById('add-tunnel-conf');
+				var li = document.getElementById('add-tunnel-label');
+				if (ta) ta.value = '';
+				if (li) li.value = '';
+			}
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Add tunnel exec failed: ') + err), 'danger');
+			addTunnelInFlight = false;
+			var b = document.getElementById('add-tunnel-btn');
+			if (b) { b.disabled = false; b.textContent = _('Add tunnel'); }
+		});
+	},
+
+	// ── handleRoutingMode ────────────────────────────────────────────────────
+	// Routing-mode radio: tunnel-default vs direct-default.
+	// Guarded by uiConfirm (changes routing for the whole LAN).
+	handleRoutingMode: function(ev) {
+		if (routingModeInFlight) return Promise.resolve();
+		var sel = document.getElementById('routing-mode-select');
+		if (!sel) return Promise.resolve();
+		var newMode = sel.value;
+		var msg = newMode === 'direct-default'
+			? _('Switch to DIRECT-DEFAULT (allowlist) mode?\n\nOnly addresses in the force-tunnel list will use the tunnel. Everything else goes direct via WAN + zapret. Change takes effect immediately for new connections.')
+			: _('Switch to TUNNEL-DEFAULT mode?\n\nAll foreign traffic routes through the tunnel; RU addresses go direct. Change takes effect immediately for new connections.');
+		routingModeInFlight = true;
+		return uiConfirm(msg).then(L.bind(function(ok) {
+			if (!ok) { routingModeInFlight = false; return null; }
+			if (sel) sel.disabled = true;
+			return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-routing-mode', newMode]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				routingModeInFlight = false;
+				if (sel) sel.disabled = false;
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('set-routing-mode failed: ') + err), 'danger');
+				routingModeInFlight = false;
+				var s = document.getElementById('routing-mode-select');
+				if (s) s.disabled = false;
+			});
+		}, this));
+	},
+
+	// ── handleSourceToggle ───────────────────────────────────────────────────
+	// Checkbox toggle for a force_source enabled state.
+	handleSourceToggle: function(ev, sourceName) {
+		var cb = document.getElementById('force-src-' + sourceName);
+		if (!cb) return Promise.resolve();
+		var enabled = cb.checked ? '1' : '0';
+		cb.disabled = true;
+		return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-source', sourceName, enabled]).then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'warning');
+			if (cb) cb.disabled = false;
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('set-source failed: ') + err), 'danger');
+			if (cb) { cb.disabled = false; cb.checked = !cb.checked; }
+		});
+	},
+
+	// ── handleForceUpdate ────────────────────────────────────────────────────
+	// "Update now" button — runs amnezia-force-update synchronously.
+	handleForceUpdate: function(ev) {
+		if (forceUpdateInFlight) {
+			ui.addNotification(null, E('p', {}, _('An update is already running')), 'info');
+			return Promise.resolve();
+		}
+		forceUpdateInFlight = true;
+		var btn = document.getElementById('force-update-btn');
+		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Updating...'); }
+		return fs.exec('/usr/bin/amnezia-force-update').then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'warning');
+			forceUpdateInFlight = false;
+			if (btn) { delete btn.dataset.busy; btn.disabled = false; btn.textContent = _('Update now'); }
+			return this.refresh();
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Force update failed: ') + err), 'danger');
+			forceUpdateInFlight = false;
+			var b = document.getElementById('force-update-btn');
+			if (b) { delete b.dataset.busy; b.disabled = false; b.textContent = _('Update now'); }
+		});
+	},
+
+	// ── handleSaveManual ─────────────────────────────────────────────────────
+	// Saves the manual force-tunnel list via amnezia-force-load save-manual.
+	// Content goes as an argv element (no fs.write — the proven channel).
+	handleSaveManual: function(ev) {
+		if (saveManualInFlight) {
+			ui.addNotification(null, E('p', {}, _('A save is already in progress')), 'info');
+			return Promise.resolve();
+		}
+		var ta = document.getElementById('manual-list-ta');
+		var content = (ta && ta.value) || '';
+		// Validate: each non-blank, non-comment line must be a domain or IPv4/CIDR.
+		var lines = content.split('\n');
+		for (var i = 0; i < lines.length; i++) {
+			var line = lines[i].replace(/#.*$/, '').trim();
+			if (!line) continue;
+			// Accept IPv4/CIDR or domain name; reject anything else.
+			if (!/^[0-9.\/]+$/.test(line) && !/^[A-Za-z0-9.\-_]+$/.test(line)) {
+				ui.addNotification(null, E('p', {}, _('Invalid entry (line ') + (i + 1) + '): ' + line), 'warning');
+				return Promise.resolve();
+			}
+		}
+		saveManualInFlight = true;
+		var btn = document.getElementById('manual-save-btn');
+		if (btn) { btn.disabled = true; btn.textContent = _('Saving...'); }
+		return fs.exec('/usr/bin/amnezia-force-load', ['save-manual', content]).then(L.bind(function(res) {
+			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+				res.code === 0 ? 'info' : 'warning');
+			saveManualInFlight = false;
+			if (btn) { btn.disabled = false; btn.textContent = _('Save & apply'); }
+		}, this)).catch(function(err) {
+			ui.addNotification(null, E('p', {}, _('Save manual list failed: ') + err), 'danger');
+			saveManualInFlight = false;
+			var b = document.getElementById('manual-save-btn');
+			if (b) { b.disabled = false; b.textContent = _('Save & apply'); }
 		});
 	},
 
@@ -883,7 +1288,7 @@ return view.extend({
 	handleRuUpdate: function(ev) {
 		var btn = document.getElementById('awg-ru-btn');
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Updating...'); }
-		return fs.exec('/usr/bin/awg-ru-update').then(L.bind(function(res) {
+		return fs.exec('/usr/bin/amnezia-ru-cidr').then(L.bind(function(res) {
 			ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
 				(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
 				(res.code === 0) ? 'info' : 'warning');
@@ -897,21 +1302,22 @@ return view.extend({
 	},
 
 	refresh: function() {
-		// Self-unregister when the view's DOM is gone (user navigated away).
-		if (!document.getElementById('awg-dot')) {
-			if (pollFn) { poll.remove(pollFn); pollFn = null; }
+		// Anchor absent: either the rendered DOM is not inserted yet (first
+		// synchronous poll step fired by poll.add() before render() returns) or
+		// the user navigated away. Self-unregister only in the latter case --
+		// i.e. once the anchor has been seen at least once -- so the poller does
+		// not kill itself on initial load (which would leave refresh-only fields
+		// such as the force-update stamp stuck on "never updated").
+		if (!document.getElementById('failover-tunnel-table')) {
+			if (domSeen && pollFn) { poll.remove(pollFn); pollFn = null; }
 			return Promise.resolve();
 		}
-		var p1 = fs.exec('/usr/bin/awg-status').then(function(res) {
-			paintTunnel(parseStatus(res.stdout || res.stderr || ''));
-		}).catch(function(err) {
-			var raw = document.getElementById('awg-status-raw');
-			if (raw) raw.textContent = 'status read failed: ' + err;
-		});
-		var p2 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
+		domSeen = true;
+		var self = this;
+		var p1 = L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), '').then(function(text) {
 			paintRuStamp(parseRuStamp(text));
 		});
-		var p3 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
+		var p2 = L.resolveDefault(fs.exec('/usr/bin/zapret-status'), null).then(function(res) {
 			if (!res) { paintZapret(null, _('cannot run zapret-status')); return; }
 			var parsed = parseZapret(res.stdout || '');
 			if (parsed) {
@@ -924,7 +1330,7 @@ return view.extend({
 				paintZapret(null, _('unparseable status output'));
 			}
 		});
-		var p4 = L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), '').then(L.bind(function(text) {
+		var p3 = L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), '').then(L.bind(function(text) {
 			var bc = parseBlockcheck(text);
 			paintBlockcheck(bc);
 			// Fetch log when there's anything to show. Skipped on never_run to
@@ -935,7 +1341,7 @@ return view.extend({
 				}).catch(function() { /* silent: status panel already shows state */ });
 			}
 		}, this));
-		var p5 = Promise.all([
+		var p4 = Promise.all([
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' })
 		]).then(function(res) {
@@ -943,93 +1349,341 @@ return view.extend({
 			var cand = parseCandidates((res[1] && res[1].stdout) || '');
 			paintApply(st, cand);
 		});
-		var p6 = L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }).then(function(res) {
-			paintPbr(parsePbr((res && res.stdout) || ''));
+		var p5 = L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), '').then(function(text) {
+			var st = parseFailoverState(text);
+			paintFailoverSummary(st);
+			var tableEl = document.getElementById('failover-tunnel-table');
+			if (tableEl) {
+				tableEl.innerHTML = '';
+				tableEl.appendChild(renderTunnelTable(st, self));
+			}
+			// C1: repaint routing-mode select from live state. Guard: skip when
+			// the select is focused (user may be mid-interaction).
+			var routingSel = document.getElementById('routing-mode-select');
+			if (routingSel && document.activeElement !== routingSel && st && st.routing_mode) {
+				routingSel.value = st.routing_mode;
+			}
+			// H1: repaint source checkboxes from live state. Guard: skip each box
+			// when it currently has focus (user may be mid-click).
+			if (st && st.sources) {
+				var sourceNames = ['itdoginfo_inside', 'itdoginfo_services', 'refilter_domains', 'refilter_ip', 'antifilter'];
+				for (var si = 0; si < sourceNames.length; si++) {
+					var sn = sourceNames[si];
+					if (Object.prototype.hasOwnProperty.call(st.sources, sn)) {
+						var cb = document.getElementById('force-src-' + sn);
+						if (cb && document.activeElement !== cb) {
+							cb.checked = !!st.sources[sn];
+						}
+					}
+				}
+			}
+		});
+		var p6 = L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '').then(function(text) {
+			paintForceStamp(parseRuStamp(text));
 		});
 		return Promise.all([p1, p2, p3, p4, p5, p6]);
 	},
 
 	load: function() {
 		return Promise.all([
-			L.resolveDefault(fs.exec('/usr/bin/awg-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/ru-update.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-status'), { stdout: '' }),
 			L.resolveDefault(fs.read('/etc/amnezia/blockcheck.json'), ''),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-blockcheck', ['log']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['state']), { stdout: '' }),
 			L.resolveDefault(fs.exec('/usr/bin/zapret-apply', ['parse']), { stdout: '' }),
-			L.resolveDefault(fs.exec('/usr/bin/pbr-status'), { stdout: '' }),
-			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), '')
+			L.resolveDefault(fs.read('/etc/amnezia/seed-must-tunnel.list'), ''),
+			L.resolveDefault(fs.read('/var/run/amnezia-failover.json'), ''),
+			L.resolveDefault(fs.read('/etc/amnezia/force-tunnel.list'), ''),
+			// force-update.json is read at load so the stamp paints on the very
+			// first render (not only on the first poll tick). refresh()'s p6 keeps
+			// it live afterwards.
+			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '')
 		]);
 	},
 
 	render: function(data) {
-		var initial = parseStatus((data && data[0] && data[0].stdout) || '');
-		var stamp = parseRuStamp(data && data[1]);
-		var zap = parseZapret((data && data[2] && data[2].stdout) || '');
-		var bc = parseBlockcheck(data && data[3]);
-		var bcLog = (data && data[4] && data[4].stdout) || '';
-		var applySt = parseApplyState((data && data[5] && data[5].stdout) || '');
-		var applyCands = parseCandidates((data && data[6] && data[6].stdout) || '');
-		var pbr = parsePbr((data && data[7] && data[7].stdout) || '');
-		var seedList = parseSeedList((data && data[8]) || '');
+		// load() returns 10 entries:
+		// [0] ru-update.json, [1] zapret-status, [2] blockcheck.json,
+		// [3] blockcheck log, [4] zapret-apply state, [5] zapret-apply parse,
+		// [6] seed-must-tunnel.list, [7] amnezia-failover.json,
+		// [8] force-tunnel.list, [9] force-update.json
+		var stamp = parseRuStamp(data && data[0]);
+		var zap = parseZapret((data && data[1] && data[1].stdout) || '');
+		var bc = parseBlockcheck(data && data[2]);
+		var bcLog = (data && data[3] && data[3].stdout) || '';
+		var applySt = parseApplyState((data && data[4] && data[4].stdout) || '');
+		var applyCands = parseCandidates((data && data[5] && data[5].stdout) || '');
+		var seedList = parseSeedList((data && data[6]) || '');
+		var failoverState = parseFailoverState((data && data[7]) || '');
+		var forceTunnelList = (data && data[8]) || '';
+		// force-update stamp baked into the initial render (mirrors paintForceStamp)
+		// so "Last update" shows on page load, not only after the first poll tick.
+		var forceStamp = parseRuStamp(data && data[9]);
+		var forceWhen = forceStamp ? fmtAge(forceStamp.ts) : _('never updated');
+		var forceTotal = 0, forceFailed = false;
+		if (forceStamp && forceStamp.sources) {
+			var _fsn = Object.keys(forceStamp.sources);
+			for (var _fi = 0; _fi < _fsn.length; _fi++) {
+				var _fs = forceStamp.sources[_fsn[_fi]];
+				if (_fs && _fs.count) forceTotal += (_fs.count || 0);
+				if (_fs && _fs.status === 'failed') forceFailed = true;
+			}
+		}
 		// Seed the rebuild-guard so the first poll doesn't tear down our select.
 		candidatesSig = candidatesSignature(applyCands);
 
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
 			E('div', { 'class': 'cbi-map-descr' },
-				_('Toggle the AmneziaWG tunnel and policy-based routing together. Status refreshes every 5 seconds.')),
+				_('Multi-tunnel AmneziaWG failover stack. RU traffic goes direct; foreign traffic routes through active tunnel(s). Status refreshes every 5 seconds.')),
 
 			E('div', { 'class': 'cbi-section' }, [
-				E('h3', {}, _('Tunnel')),
+				E('h3', {}, _('Failover tunnels')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Per-tunnel status driven by /var/run/amnezia-failover.json. Mode and sticky target are applied via amnezia-failover-ctl.')),
 				E('div', { 'class': 'cbi-section-node' }, [
 					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('State')),
+						E('label', { 'class': 'cbi-value-title' }, _('Active tunnel')),
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('span', {
-								'id': 'awg-dot',
+								'id': 'failover-active-dot',
 								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:' +
-									(initial.up ? '#3c763d' : '#a94442') + ';margin-right:8px;vertical-align:middle;'
+									(failoverState && !failoverState.all_down ? '#3c763d' : '#a94442') +
+									';margin-right:8px;vertical-align:middle;'
 							}),
-							E('strong', { 'id': 'awg-state-label' }, initial.up ? 'UP' : 'DOWN'),
-							E('span', { 'id': 'awg-uptime', 'style': 'margin-left:8px;color:#666;' },
-								initial.up && initial.uptime !== null ? '(uptime: ' + fmtUptime(initial.uptime) + ')' : '')
+							E('strong', { 'id': 'failover-active-label' },
+								failoverState
+									? (failoverState.all_down
+										? _('ALL DOWN')
+										: (failoverState.active_pool || _('unknown')))
+									: _('no data')),
+							E('span', { 'id': 'failover-mode-label', 'style': 'margin-left:12px;color:#666;font-size:11px;' },
+								failoverState ? ('mode: ' + (failoverState.mode || '?')) : '')
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Mode')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('select', {
+								'id': 'failover-mode-select',
+								'class': 'cbi-input-select',
+								'style': 'width:160px;margin-right:8px;',
+								'change': ui.createHandlerFn(this, function(ev) {
+									var sel = document.getElementById('failover-mode-select');
+									if (!sel) return Promise.resolve();
+									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-mode', sel.value]).then(L.bind(function(res) {
+										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+											res.code === 0 ? 'info' : 'warning');
+									}, this)).catch(function(err) {
+										ui.addNotification(null, E('p', {}, _('set-mode failed: ') + err), 'danger');
+									});
+								})
+							}, [
+								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
+								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
+							])
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Sticky target')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'failover-sticky-input',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:120px;margin-right:8px;',
+								'value': (failoverState && failoverState.active_sticky) || '',
+								'placeholder': 'awg1'
+							}),
+							E('button', {
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(this, function(ev) {
+									var inp = document.getElementById('failover-sticky-input');
+									var val = inp ? inp.value.trim() : '';
+									if (!val) {
+										ui.addNotification(null, E('p', {}, _('Enter a tunnel name (e.g. awg1)')), 'warning');
+										return Promise.resolve();
+									}
+									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-sticky', val]).then(function(res) {
+										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+											res.code === 0 ? 'info' : 'warning');
+									}).catch(function(err) {
+										ui.addNotification(null, E('p', {}, _('set-sticky failed: ') + err), 'danger');
+									});
+								})
+							}, _('Set sticky'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Tunnels')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'id': 'failover-tunnel-table' }, renderTunnelTable(failoverState, this))
+						])
+					])
+				])
+			]),
+
+			// ── Add tunnel section ────────────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Add tunnel')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Paste an AmneziaWG .conf file or an Amnezia vpn:// share link. vpn:// links are decoded in the browser — only the resulting .conf is sent to the router.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('.conf / vpn:// link')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('textarea', {
+								'id': 'add-tunnel-conf',
+								'class': 'cbi-input-text',
+								'style': 'width:100%;height:160px;font-family:monospace;font-size:11px;box-sizing:border-box;',
+								'placeholder': '[Interface]\nPrivateKey = ...\nAddress = 10.8.0.x/32\n...\n[Peer]\nPublicKey = ...\nEndpoint = host:port\n\nOR paste a vpn:// link here'
+							})
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Label (optional)')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'add-tunnel-label',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:200px;margin-right:8px;',
+								'placeholder': _('e.g. Backup VPN')
+							}),
+							E('button', {
+								'id': 'add-tunnel-btn',
+								'class': 'btn cbi-button-positive',
+								'click': ui.createHandlerFn(this, 'handleAddTunnel')
+							}, _('Add tunnel'))
+						])
+					])
+				])
+			]),
+
+			// ── Routing mode section ──────────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Routing mode')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Tunnel-default: all foreign traffic routes through the tunnel (RU addresses go direct). Direct-default (allowlist): only addresses in the force-tunnel list use the tunnel; everything else goes via WAN + zapret.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Active mode')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('select', {
+								'id': 'routing-mode-select',
+								'class': 'cbi-input-select',
+								'style': 'width:280px;margin-right:8px;',
+								'change': ui.createHandlerFn(this, 'handleRoutingMode')
+							}, [
+								E('option', {
+									'value': 'tunnel-default',
+									'selected': (!failoverState || (failoverState.routing_mode || 'tunnel-default') === 'tunnel-default') ? '' : null
+								}, _('Tunnel-default (foreign → tunnel)')),
+								E('option', {
+									'value': 'direct-default',
+									'selected': (failoverState && failoverState.routing_mode === 'direct-default') ? '' : null
+								}, _('Direct-default (allowlist → tunnel)'))
+							])
+						])
+					])
+				])
+			]),
+
+			// ── Allowlist sources section ─────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Allowlist sources (force-tunnel list)')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Curated domain/IP lists that feed the force-tunnel set. Checked sources are fetched on update. In direct-default mode, only listed addresses use the tunnel.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Sources')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							(function(self, fst) {
+								// H1: drive checked state from live failover state sources map.
+								// Fall back to defaultOn only when the daemon hasn't emitted sources yet.
+								var liveSources = (fst && fst.sources) || null;
+								var sourceDefs = [
+									{ name: 'itdoginfo_inside',   label: 'itdoginfo (RKN-blocked, inside)',   defaultOn: true },
+									{ name: 'itdoginfo_services', label: 'itdoginfo (geoblock-RU services)',   defaultOn: true },
+									{ name: 'refilter_domains',   label: 'Re-filter (domains, broader)',        defaultOn: false },
+									{ name: 'refilter_ip',        label: 'Re-filter (IP/CIDR)',                 defaultOn: false },
+									{ name: 'antifilter',         label: 'antifilter.download (supplementary)', defaultOn: false }
+								];
+								var box = E('div', {});
+								for (var si = 0; si < sourceDefs.length; si++) {
+									(function(sd) {
+										// Use live UCI-backed state when available; fall back to defaultOn.
+										var isChecked = liveSources && Object.prototype.hasOwnProperty.call(liveSources, sd.name)
+											? !!liveSources[sd.name]
+											: sd.defaultOn;
+										box.appendChild(E('label', { 'style': 'display:block;margin-bottom:4px;' }, [
+											E('input', {
+												'id': 'force-src-' + sd.name,
+												'type': 'checkbox',
+												'style': 'margin-right:6px;',
+												'checked': isChecked ? '' : null,
+												'change': ui.createHandlerFn(self, 'handleSourceToggle', sd.name)
+											}),
+											E('span', {}, _(sd.label))
+										]));
+									})(sourceDefs[si]);
+								}
+								return box;
+							})(this, failoverState)
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Last update')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('strong', { 'id': 'force-when' }, forceWhen),
+							E('span', { 'id': 'force-count', 'style': 'margin-left:12px;color:#666;' },
+								forceTotal ? (forceTotal + ' entries') : ''),
+							E('span', { 'id': 'force-status',
+								'style': 'margin-left:8px;color:' + (forceStamp ? (forceFailed ? '#a94442' : '#3c763d') : '') + ';' },
+								forceStamp ? (forceFailed ? _('some sources failed') : _('ok')) : '')
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Action')),
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('button', {
-								'id': 'awg-toggle-btn',
-								'class': 'btn ' + (initial.up ? 'cbi-button-negative' : 'cbi-button-positive'),
-								'click': ui.createHandlerFn(this, 'handleToggle')
-							}, initial.up ? _('Turn OFF') : _('Turn ON'))
+								'id': 'force-update-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(this, 'handleForceUpdate')
+							}, _('Update now'))
+						])
+					])
+				])
+			]),
+
+			// ── Manual entries section ────────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Manual force-tunnel entries')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Domains and IPs/CIDRs that always go through the tunnel, regardless of routing mode. Auto-update never touches this list. One entry per line; # comments allowed.')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Entries')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('textarea', {
+								'id': 'manual-list-ta',
+								'class': 'cbi-input-text',
+								'style': 'width:100%;height:120px;font-family:monospace;font-size:11px;box-sizing:border-box;',
+								'placeholder': '# one domain or IP/CIDR per line\nchatgpt.com\nspotify.com\n203.0.113.0/24'
+							}, forceTunnelList)
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('PBR')),
+						E('label', { 'class': 'cbi-value-title' }, _('Action')),
 						E('div', { 'class': 'cbi-value-field' }, [
-							E('span', {
-								'id': 'pbr-dot',
-								'style': 'display:inline-block;width:12px;height:12px;border-radius:50%;background:' +
-									(pbr && pbr.healthy ? '#3c763d' : (pbr && pbr.running ? '#f0ad4e' : '#a94442')) +
-									';margin-right:8px;vertical-align:middle;'
-							}),
-							E('span', { 'id': 'pbr-label' }, pbr
-								? ((pbr.running ? _('running') : _('stopped')) + ' / ' +
-								   (pbr.nft_ok ? _('nft ok') : _('nft BAD')) + ' / ' +
-								   _('ipdeny ') + pbr.ipdeny_count +
-								   (pbr.recent_failure ? (' / ' + _('recent FAILED TO START')) : ''))
-								: _('pbr: unknown')),
 							E('button', {
-								'id': 'pbr-reload-btn',
-								'style': 'margin-left:12px;',
-								'class': 'btn ' + (pbr && pbr.healthy ? 'cbi-button-action' : 'cbi-button-negative'),
-								'click': ui.createHandlerFn(this, 'handlePbrReload')
-							}, _('Reload PBR')),
-							E('div', { 'id': 'pbr-detail', 'style': 'margin-top:4px;color:#a94442;font-size:11px;' },
-								(pbr && pbr.nft_error) ? pbr.nft_error : '')
+								'id': 'manual-save-btn',
+								'class': 'btn cbi-button-positive',
+								'click': ui.createHandlerFn(this, 'handleSaveManual')
+							}, _('Save & apply'))
 						])
 					])
 				])
@@ -1334,7 +1988,7 @@ return view.extend({
 
 			E('div', { 'class': 'cbi-section' }, [
 				E('div', { 'style': 'display:flex;align-items:center;justify-content:space-between;' }, [
-					E('h3', { 'style': 'margin:0;' }, _('Live status')),
+					E('h3', { 'style': 'margin:0;' }, _('Refresh')),
 					E('button', {
 						'id': 'manual-refresh-btn',
 						'class': 'btn cbi-button-action',
@@ -1342,12 +1996,6 @@ return view.extend({
 						'title': _('Force an immediate poll instead of waiting for the 5s tick'),
 						'click': ui.createHandlerFn(this, 'handleRefresh')
 					}, _('Refresh status'))
-				]),
-				E('div', { 'class': 'cbi-section-node' }, [
-					E('pre', {
-						'id': 'awg-status-raw',
-						'style': 'background:#f5f5f5;padding:8px;margin:0;max-height:240px;overflow-y:auto;overflow-x:hidden;font-size:12px;white-space:pre-wrap;word-break:break-all;box-sizing:border-box;width:100%;'
-					}, initial.raw)
 				])
 			])
 		]);

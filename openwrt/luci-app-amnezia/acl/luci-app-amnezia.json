@@ -1,26 +1,30 @@
 {
 	"luci-app-amnezia": {
-		"description": "AmneziaWG tunnel toggle, RU IP list refresh, and live status",
+		"description": "AmneziaWG multi-tunnel failover controls, RU IP list refresh, zapret DPI bypass, and tunnel/allowlist management",
 		"read": {
 			"file": {
-				"/etc/amnezia/ru-update.json":      [ "read" ],
-				"/etc/amnezia/blockcheck.json":     [ "read" ],
-				"/etc/amnezia/seed-must-tunnel.list":[ "read" ]
+				"/etc/amnezia/ru-update.json":          [ "read" ],
+				"/etc/amnezia/blockcheck.json":         [ "read" ],
+				"/etc/amnezia/seed-must-tunnel.list":   [ "read" ],
+				"/var/run/amnezia-failover.json":        [ "read" ],
+				"/etc/amnezia/force-tunnel.list":       [ "read" ],
+				"/etc/amnezia/force-update.json":       [ "read" ]
 			}
 		},
 		"write": {
 			"file": {
-				"/usr/bin/awg-toggle":       [ "exec" ],
-				"/usr/bin/awg-status":       [ "exec" ],
-				"/usr/bin/awg-ru-update":    [ "exec" ],
-				"/usr/bin/zapret-toggle":    [ "exec" ],
-				"/usr/bin/zapret-status":    [ "exec" ],
-				"/usr/bin/zapret-blockcheck":[ "exec" ],
-				"/usr/bin/zapret-apply":     [ "exec" ],
-				"/usr/bin/zapret-probe":     [ "exec" ],
-				"/usr/bin/zapret-verify":    [ "exec" ],
-				"/usr/bin/pbr-status":       [ "exec" ],
-				"/usr/bin/pbr-reload":       [ "exec" ]
+				"/usr/bin/amnezia-ru-cidr":         [ "exec" ],
+				"/usr/bin/zapret-toggle":           [ "exec" ],
+				"/usr/bin/zapret-status":           [ "exec" ],
+				"/usr/bin/zapret-blockcheck":       [ "exec" ],
+				"/usr/bin/zapret-apply":            [ "exec" ],
+				"/usr/bin/zapret-probe":            [ "exec" ],
+				"/usr/bin/zapret-verify":           [ "exec" ],
+				"/usr/bin/amnezia-failover-ctl":    [ "exec" ],
+				"/usr/bin/amnezia-status":          [ "exec" ],
+				"/usr/bin/amnezia-tunnel-ctl":      [ "exec" ],
+				"/usr/bin/amnezia-force-load":      [ "exec" ],
+				"/usr/bin/amnezia-force-update":    [ "exec" ]
 			}
 		}
 	}

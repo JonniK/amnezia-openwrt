@@ -1,0 +1,13 @@
+# VM artifacts — never commit (large binaries / per-run mutable state / secrets)
+images/
+run/
+*.img
+*.img.gz
+*.qcow2
+*.fd
+*.log
+*.sock
+# tunnel configs are staged from ../../local/ at test time — never land here
+*.conf
+authorized_keys
+id_vmtest*

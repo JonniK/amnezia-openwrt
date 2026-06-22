@@ -1,0 +1,91 @@
+#!/bin/sh
+echo "uci $*" >> "${STUB_LOG:-/dev/null}"
+# Normalize: strip leading -q flag so verb is always $1 after normalization.
+_verb="$1"
+if [ "$_verb" = "-q" ]; then shift; _verb="$1"; fi
+# delete always returns 1: real UCI returns 1 when the section/option does not
+# exist (the while-loop teardown idiom relies on this to terminate).
+case "$_verb" in
+  delete) exit 1 ;;
+  del_list) exit 0 ;;
+  add_list) exit 0 ;;
+esac
+case "$1 $2" in
+  "show network") echo "network.@interface[0]=interface" ;;
+  "get amnezia") exit 0 ;;
+  "get amnezia.globals.sticky_target") echo "awg1" ;;
+  "get amnezia.config.routing_mode") echo "tunnel-default" ;;
+  "get amnezia.itdoginfo_inside.enabled") echo "1" ;;
+  "get amnezia.itdoginfo_services.enabled") echo "1" ;;
+  "get amnezia.refilter_domains.enabled") echo "0" ;;
+  "get amnezia.refilter_ip.enabled") echo "0" ;;
+  "get amnezia.antifilter.enabled") echo "0" ;;
+  "show amnezia")
+    # UCI_FAKE_TUNNELS: space-separated list of tunnel names to report as enabled.
+    # TYPE lines are unquoted (amnezia.<name>=tunnel); option values are single-quoted
+    # to match real OpenWrt uci show output (amnezia.<name>.enabled='1').
+    if [ -n "$UCI_FAKE_TUNNELS" ]; then
+      for _t in $UCI_FAKE_TUNNELS; do
+        echo "amnezia.${_t}=tunnel"
+        echo "amnezia.${_t}.enabled='1'"
+      done
+    fi
+    # UCI_FAKE_SOURCES: space-separated list of "name:enabled" pairs, e.g. "itdoginfo_inside:1 antifilter:0".
+    # TYPE lines are unquoted; option values are single-quoted to match real OpenWrt uci show.
+    if [ -n "$UCI_FAKE_SOURCES" ]; then
+      for _s in $UCI_FAKE_SOURCES; do
+        _sname="${_s%%:*}"; _senabled="${_s##*:}"
+        echo "amnezia.${_sname}=force_source"
+        echo "amnezia.${_sname}.enabled='${_senabled}'"
+        echo "amnezia.${_sname}.url='https://example.com/${_sname}.txt'"
+        echo "amnezia.${_sname}.kind='domains'"
+      done
+    fi ;;
+  "get firewall.vpn.network")
+    # Return space-separated members on one line (how real uci get behaves for lists).
+    if [ -n "$UCI_FAKE_FWNET" ]; then
+      echo "$UCI_FAKE_FWNET"
+    else
+      exit 1
+    fi ;;
+  "show firewall")
+    # UCI_FAKE_FWNET: space-separated list of firewall.vpn.network members.
+    # Real OpenWrt 24.10 renders the list on ONE line with quoted space-separated values:
+    #   firewall.vpn.network='awg1' 'awg2'
+    if [ -n "$UCI_FAKE_FWNET" ]; then
+      _line=""
+      for _n in $UCI_FAKE_FWNET; do
+        if [ -z "$_line" ]; then
+          _line="'${_n}'"
+        else
+          _line="${_line} '${_n}'"
+        fi
+      done
+      echo "firewall.vpn.network=${_line}"
+    fi ;;
+  get*)
+    # Dynamic uci -q get for force_source attributes: serve from UCI_FAKE_SOURCES.
+    # Pattern: "get amnezia.<name>.<opt>" where <name> appears in UCI_FAKE_SOURCES.
+    _key="$2"
+    case "$_key" in
+      amnezia.*.*)
+        _pkg="${_key%%.*}"; _rest="${_key#*.}"
+        _sec="${_rest%%.*}"; _opt="${_rest#*.}"
+        if [ "$_pkg" = "amnezia" ] && [ -n "$UCI_FAKE_SOURCES" ]; then
+          for _s in $UCI_FAKE_SOURCES; do
+            _sname="${_s%%:*}"; _senabled="${_s##*:}"
+            if [ "$_sname" = "$_sec" ]; then
+              case "$_opt" in
+                enabled) echo "$_senabled"; exit 0 ;;
+                url)     echo "https://example.com/${_sname}.txt"; exit 0 ;;
+                kind)    echo "domains"; exit 0 ;;
+              esac
+            fi
+          done
+        fi
+        ;;
+    esac
+    exit 1
+    ;;
+esac
+exit 0

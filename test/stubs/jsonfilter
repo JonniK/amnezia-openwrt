@@ -1,0 +1,4 @@
+#!/bin/sh
+# Minimal stub: always report "true" for .up check.
+echo "true"
+exit 0

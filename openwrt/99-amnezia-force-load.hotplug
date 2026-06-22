@@ -1,0 +1,5 @@
+#!/bin/sh
+# Hotplug script: repopulate amnezia_force4 nft set after firewall reload.
+# Placed in /etc/hotplug.d/firewall/ by the installer.
+[ "$ACTION" = "reload" ] || exit 0
+[ -x /usr/bin/amnezia-force-load ] && /usr/bin/amnezia-force-load || true
