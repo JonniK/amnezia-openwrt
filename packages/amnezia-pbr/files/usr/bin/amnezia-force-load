@@ -13,6 +13,9 @@ else
   # shellcheck disable=SC1091
   . "$(dirname "$0")/lib/amnezia-common.sh"
 fi
+# shellcheck disable=SC1091
+if [ -f "$AMNEZIA_LIB/amnezia-dns-lib.sh" ]; then . "$AMNEZIA_LIB/amnezia-dns-lib.sh"
+elif [ -f "$(dirname "$0")/lib/amnezia-dns-lib.sh" ]; then . "$(dirname "$0")/lib/amnezia-dns-lib.sh"; fi
 
 FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
 FORCE_LOCK="${FORCE_LOCK:-/var/lock/amnezia-force.lock}"
@@ -164,6 +167,7 @@ fi
   # Only rebuild dnsmasq conf-dir nftset directives and restart dnsmasq when
   # the domain set has changed.
   if [ "$_new_hash" != "$_old_hash" ]; then
+    command -v dnsmasq_lock >/dev/null 2>&1 && dnsmasq_lock
     # --- Wire the conf-dir into dnsmasq UCI (idempotent) ---
     # OpenWrt dnsmasq.init picks up all files in confdir via --conf-dir=<dir>.
     # We use this to deliver byte-bounded chunked nftset= lines instead of the
@@ -210,6 +214,7 @@ fi
     # dnsmasq restart is SSH-safe (unlike fw4 reload); kept synchronous for
     # deterministic behaviour in tests and on-router.
     "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+    command -v dnsmasq_unlock >/dev/null 2>&1 && dnsmasq_unlock
   fi
   rm -f "$_tmp_domains"
 )

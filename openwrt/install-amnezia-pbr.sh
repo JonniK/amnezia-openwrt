@@ -234,6 +234,37 @@ _amz_wire_force_engine() {
   echo "/etc/init.d/amnezia-force-load enable" >> "${STUB_LOG:-/dev/null}"
   /etc/init.d/amnezia-force-load enable 2>/dev/null || true
 
+  # --- Encrypted-DNS packages + files (after the dry-run guard above) ---
+  for pkg in stubby https-dns-proxy; do
+    opkg list-installed 2>/dev/null | grep -q "^$pkg " || opkg install "$pkg" 2>/dev/null \
+      || amz_log "dns: opkg install $pkg failed (DoT falls back to plaintext until installed)"
+  done
+  # CLI + lib + init + hotplug via resolve_dep (on-router paths, not repo openwrt/ paths)
+  _dns_ctl=$(resolve_dep /usr/bin/amnezia-dns-ctl amnezia-dns-ctl.sh amnezia-dns-ctl.sh) || true
+  if [ -n "$_dns_ctl" ] && [ "$_dns_ctl" != /usr/bin/amnezia-dns-ctl ]; then
+    cp "$_dns_ctl" /usr/bin/amnezia-dns-ctl 2>/dev/null || true
+    chmod 0755 /usr/bin/amnezia-dns-ctl 2>/dev/null || true
+  fi
+  _dns_lib=$(resolve_dep /usr/lib/amnezia/amnezia-dns-lib.sh amnezia-dns-lib.sh lib/amnezia-dns-lib.sh) || true
+  if [ -n "$_dns_lib" ] && [ "$_dns_lib" != /usr/lib/amnezia/amnezia-dns-lib.sh ]; then
+    cp "$_dns_lib" /usr/lib/amnezia/amnezia-dns-lib.sh 2>/dev/null || true
+  fi
+  if [ ! -f /etc/init.d/amnezia-dns ]; then
+    _dns_init=$(resolve_dep /etc/init.d/amnezia-dns amnezia-dns.init amnezia-dns.init) || true
+    if [ -n "$_dns_init" ]; then
+      cp "$_dns_init" /etc/init.d/amnezia-dns 2>/dev/null || true
+      chmod 0755 /etc/init.d/amnezia-dns 2>/dev/null || true
+    fi
+  fi
+  if [ ! -f /etc/hotplug.d/firewall/99-amnezia-dns ]; then
+    _dns_hp=$(resolve_dep /etc/hotplug.d/firewall/99-amnezia-dns 99-amnezia-dns.hotplug 99-amnezia-dns.hotplug) || true
+    if [ -n "$_dns_hp" ]; then
+      cp "$_dns_hp" /etc/hotplug.d/firewall/99-amnezia-dns 2>/dev/null || true
+      chmod 0755 /etc/hotplug.d/firewall/99-amnezia-dns 2>/dev/null || true
+    fi
+  fi
+  /etc/init.d/amnezia-dns enable 2>/dev/null || true
+
   # Wire dnsmasq conf-dir so fresh installs pick up chunked nftset directives
   # even before the first amnezia-force-load run.  Idempotent: only set+commit
   # when the value is not already the expected path.
