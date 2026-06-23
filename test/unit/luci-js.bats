@@ -167,3 +167,10 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   R="$AMZ/amnezia/section/routing.js"; node --check "$R"
   for s in handleRoutingMode handleSourceToggle handleForceUpdate handleSaveManual handleRuUpdate applyFailoverState routing-mode-select; do grep -q "$s" "$R"; done
 }
+
+# ── Phase 3: zapret.js ──────────────────────────────────────────────────────
+
+@test "zapret.js owns probe/verify/blockcheck/apply + zapret in-flight state" {
+  Z="$AMZ/amnezia/section/zapret.js"; node --check "$Z"
+  for s in handleProbe handleVerify handleBlockcheckRun handleApply handleRevert applyInFlight candidatesSig paintApply; do grep -q "$s" "$Z"; done
+}
