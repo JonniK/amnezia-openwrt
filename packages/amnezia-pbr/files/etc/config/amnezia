@@ -24,6 +24,12 @@ config amnezia 'config'
 	# preserved across re-runs only if user has not overridden routing_mode.
 	option installed_version 'main'
 	option installed_ts ''
+	option dot_enabled '0'
+	option dns_provider 'quad9'
+	option dot_resolver ''
+	option doh_resolver ''
+	option doh_bootstrap ''
+	option dns_active_tier 'off'
 
 config globals 'globals'
 	option mode 'failover'

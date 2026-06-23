@@ -17,6 +17,8 @@ export STATE_FILE=/var/run/amnezia-failover.json
 export CONF_DIR=/etc/amnezia
 export RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
 export MAX_TUNNELS=5
+export RULE_PREF_DOT=30900            # DoT-IP ip rule; above pbr cleanup (30000), below sticky (31000)
+export DNSMASQ_LOCK=/var/lock/amnezia-dnsmasq.lock
 
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
 

@@ -4,6 +4,8 @@ load '../lib/harness.bash'
   cd "$HARNESS_DIR/.."
   run shellcheck -s sh \
     openwrt/lib/amnezia-common.sh \
+    openwrt/lib/amnezia-dns-lib.sh \
+    openwrt/amnezia-dns-ctl.sh \
     openwrt/amnezia-ru-cidr.sh \
     openwrt/amnezia-status.sh \
     openwrt/configure-dnsmasq-amnezia.sh

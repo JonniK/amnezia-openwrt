@@ -112,3 +112,10 @@ load '../lib/harness.bash'
   [ "$status" -eq 0 ]
   [ -f "$HARNESS_DIR/../packages/luci-app-amnezia/files/www/luci-static/resources/view/amnezia/decode-vpn.mjs" ]
 }
+@test "sync script copies the new DNS files into the packages tree" {
+  S="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-dns-ctl" "$S"
+  grep -q "amnezia-dns-lib.sh" "$S"
+  grep -q "amnezia-dns" "$S"            # init
+  grep -q "99-amnezia-dns" "$S"         # hotplug
+}

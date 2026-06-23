@@ -53,6 +53,16 @@ What you get on the router:
 - **Add/remove tunnels at runtime** from the LuCI panel (paste a `.conf`
   or an Amnezia `vpn://` share link — decoded in the browser before
   submission) or via `amnezia-tunnel-ctl add/remove`.
+- **Encrypted DNS (DoT/DoH)** — optional, default OFF. When enabled,
+  dnsmasq forwards all queries to two loopback resolvers: stubby (DoT,
+  port 5453, egresses through the sticky tunnel) and https-dns-proxy
+  (DoH, port 5454, egresses direct). A procd watchdog monitors both and
+  inserts a plaintext last-resort tier if both fail, removing it once
+  they recover. Toggle from LuCI or `amnezia-dns-ctl enable / disable`.
+  Five built-in providers: `quad9` (default), `adguard`, `dns0`,
+  `mullvad`, `google`. Requires `stubby` and `https-dns-proxy` packages
+  (installed automatically); degrades gracefully to plain provider DNS
+  if the packages are absent.
 - `zapret` (DPI desync, from
   [remittor/zapret-openwrt](https://github.com/remittor/zapret-openwrt))
   installed but disabled by default — you turn it on from LuCI after
@@ -73,6 +83,8 @@ What you get on the router:
     a strategy
   - **Blockcheck** runner with live log + apply/revert of recommended
     nfqws strategies
+  - **Encrypted DNS (DoT)** toggle with provider dropdown and active
+    tier indicator (dot / doh / plaintext fallback / off)
 
 ## Screenshots
 
@@ -165,6 +177,10 @@ anything — idempotent.
 | `/etc/amnezia/force-tunnel.list` | Manual allowlist entries (domains/IPs); never overwritten by auto-update |
 | `/etc/amnezia/force.d/` | Auto-update cache: one `.list` file per enabled source, written by `amnezia-force-update` |
 | `/etc/amnezia/force-update.json` | Stamp of last force-list update (per-source counts + status) |
+| `/usr/lib/amnezia/amnezia-dns-lib.sh` | Encrypted-DNS helpers: provider profiles, stubby/https-dns-proxy UCI render, dnsmasq server management, ip rule helpers |
+| `/usr/bin/amnezia-dns-ctl` | Encrypted-DNS state machine CLI (`enable`, `disable`, `apply`, `set-provider`, `status`, `watchdog`) |
+| `/etc/init.d/amnezia-dns` | procd init (START=97): runs `apply` on start, runs `watchdog` as a respawned procd service |
+| `/etc/hotplug.d/firewall/99-amnezia-dns` | Re-asserts the DoT ip rule on firewall `reload` events |
 
 ### Configuring multiple tunnels
 
@@ -308,6 +324,81 @@ amnezia-force-load            # merge + apply already-cached lists only
 Manual entries in `/etc/amnezia/force-tunnel.list` are always merged in and
 are never overwritten by `amnezia-force-update`.
 
+### Encrypted DNS (DoT)
+
+The encrypted-DNS stack is **default OFF** — existing DNS behaviour is
+unchanged until you enable it. When enabled, dnsmasq stops using the
+WAN-provided resolver and forwards queries exclusively through two
+loopback processes:
+
+- **stubby** (DoT, `127.0.0.1:5453`) — TLS-authenticated DNS, routes
+  via the sticky tunnel so resolver traffic shares the same exit IP as
+  pinned domains.
+- **https-dns-proxy** (DoH, `127.0.0.1:5454`) — HTTPS DNS, routes
+  direct to the provider's IP.
+
+A procd watchdog monitors both listeners every 20 seconds. If both fail
+for 3 consecutive checks it adds the WAN-assigned resolver as a
+plaintext last-resort *behind* the encrypted listeners under dnsmasq
+`strict-order` (so encrypted is always tried first). Once encrypted
+listeners recover for 2 checks and 120 seconds have elapsed, the
+plaintext tier is withdrawn.
+
+**Enable / disable:**
+
+```sh
+amnezia-dns-ctl enable          # install packages if missing, apply, verify, start watchdog
+amnezia-dns-ctl disable         # stop watchdog and daemons, restore plain dnsmasq, flush ip rule
+```
+
+Or toggle the checkbox in LuCI → Network → Amnezia → Encrypted DNS (DoT).
+
+**Change provider:**
+
+```sh
+amnezia-dns-ctl set-provider quad9      # quad9 (default)
+amnezia-dns-ctl set-provider adguard
+amnezia-dns-ctl set-provider dns0
+amnezia-dns-ctl set-provider mullvad
+amnezia-dns-ctl set-provider google
+```
+
+Or use the provider dropdown in LuCI. `set-provider` on an active stack
+reconfigures stubby and https-dns-proxy live and verifies the new
+resolver before committing; it rolls back to the previous provider if
+verification fails.
+
+**Check current state:**
+
+```sh
+amnezia-dns-ctl status
+# → {"enabled":true,"provider":"quad9","active_tier":"dot","encrypted":true,"healthy":true}
+```
+
+`active_tier` values: `dot` (stubby answering), `doh` (https-dns-proxy
+answering), `plaintext` (watchdog fallback active), `off` (disabled).
+
+**UCI options** (all under `amnezia.config`):
+
+| UCI field | Default | Description |
+|---|---|---|
+| `dot_enabled` | `0` | `1` = encrypted DNS active |
+| `dns_provider` | `quad9` | Built-in provider name (see list above) |
+| `dot_resolver` | — | Custom: `<IP>#<hostname>` for stubby (backend only) |
+| `doh_resolver` | — | Custom: full DoH URL for https-dns-proxy (backend only) |
+| `doh_bootstrap` | — | Custom: bootstrap IP for the DoH resolver (backend only) |
+| `dns_active_tier` | `off` | Runtime-managed; do not edit directly |
+
+Custom resolver is supported by setting the three `dot_resolver` /
+`doh_resolver` / `doh_bootstrap` fields directly via `uci` and then
+running `amnezia-dns-ctl set-provider custom` — there is no UI for
+custom in the LuCI dropdown.
+
+**Required packages** (installed automatically by the installer):
+`stubby`, `https-dns-proxy`. If either is absent, `amnezia-dns-ctl
+enable` prints an install hint and `amnezia-dns-ctl apply` degrades
+to plain provider DNS rather than leaving DNS broken.
+
 ### Supported hardware
 
 Tested on **aarch64 mediatek/filogic** (Xiaomi AX3000T, Banana Pi BPI-R4,
@@ -402,9 +493,14 @@ openwrt/
   iproute2-amnezia-rt_tables.conf   Named routing tables (vpn_sticky 100, vpn_pool 101)
   seed-sticky-domains.list          Domains pinned to sticky tunnel (claude.ai, anthropic.com)
   force-tunnel.list                 Seed file for manual allowlist entries (shipped empty)
-  lib/amnezia-common.sh             Shared constants + helpers (MAX_TUNNELS=5)
+  lib/amnezia-common.sh             Shared constants + helpers (MAX_TUNNELS=5, RULE_PREF_DOT=30900)
   lib/amnezia-routing.sh            iproute2 / nft / firewall helpers (routing_emit_classifier)
   lib/amnezia-tunnel-lib.sh         .conf parser + UCI generator used by amnezia-tunnel-ctl
+  lib/amnezia-dns-lib.sh            Encrypted-DNS helpers: provider profiles, stubby/DoH UCI render,
+                                      dnsmasq server list management, ip rule set/clear/flush
+  amnezia-dns-ctl.sh                Encrypted-DNS CLI (enable, disable, apply, set-provider, status, watchdog)
+  amnezia-dns.init                  procd init (START=97): apply on start, watchdog as respawned service
+  99-amnezia-dns.hotplug            Firewall hotplug: re-assert DoT ip rule after fw4 reload
   install-zapret.sh                 zapret package + wrappers + ncat-full
   install-luci-app-amnezia.sh       LuCI menu/acl/view + cron
   configure-dnsmasq-ru-nftset.sh    .ru TLD -> nftset directive (legacy, superseded by configure-dnsmasq-amnezia.sh)

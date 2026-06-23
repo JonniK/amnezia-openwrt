@@ -28,7 +28,9 @@ define Package/amnezia-pbr
     +conntrack-tools \
     +curl \
     +wget \
-    +ncat-full
+    +ncat-full \
+    +stubby \
+    +https-dns-proxy
 endef
 
 define Package/amnezia-pbr/description

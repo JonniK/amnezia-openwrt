@@ -31,3 +31,13 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
   "
 }
 @test "acl is valid json" { node -e "JSON.parse(require('fs').readFileSync('$F','utf8'))"; }
+
+@test "acl grants exec on amnezia-dns-ctl under write.file" {
+  run node -e '
+    const a = require("'"$HARNESS_DIR"'/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json");
+    const wf = a["luci-app-amnezia"].write.file;
+    if (!wf["/usr/bin/amnezia-dns-ctl"] || wf["/usr/bin/amnezia-dns-ctl"][0] !== "exec") throw new Error("missing");
+    console.log("ok");'
+  [ "$status" -eq 0 ]
+  [ "$output" = "ok" ]
+}

@@ -111,3 +111,22 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
 @test "main.js failover-tunnel-table anchor is preserved (poll self-unregister)" {
   grep -q "failover-tunnel-table" "$F"
 }
+
+@test "main.js wires the DoT toggle + provider dropdown + plaintext warning" {
+  JS="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
+  grep -q "amnezia-dns-ctl" "$JS"
+  grep -Eq "'enable'|\"enable\"" "$JS"
+  grep -q "set-provider" "$JS"
+  grep -q "active_tier" "$JS"
+  grep -q "plaintext" "$JS"
+}
+
+@test "renderDnsRow has a focus guard (M8: no poll-clobber on active DoT controls)" {
+  # Guard must be present: box.contains(document.activeElement) inside renderDnsRow.
+  grep -q "box.contains(document.activeElement)" "$F"
+}
+
+@test "DNS_PROVIDERS does not include 'custom' (M7: dead-end provider removed)" {
+  # 'custom' made dns_profile fail with no recovery path; removed from the dropdown.
+  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$F"
+}

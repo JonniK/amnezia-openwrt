@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.2.0-r4 — 2026-06-23
+
+### Encrypted DNS (DoT/DoH) toggle
+
+**New features**
+
+- Optional encrypted-DNS stack, default OFF. When enabled, dnsmasq
+  forwards queries through two loopback resolvers:
+  - **stubby** (DoT, `127.0.0.1:5453`) — TLS-authenticated DNS that
+    routes its own traffic through the sticky tunnel (ip rule pref
+    `30900` → table `100`).
+  - **https-dns-proxy** (DoH, `127.0.0.1:5454`) — HTTPS DNS that
+    egresses direct.
+  dnsmasq is configured with `noresolv` and `strict-order` so it uses
+  these listeners exclusively and tries them in the declared order.
+- **Procd watchdog** (`amnezia-dns-ctl watchdog`, run as a respawned
+  procd service under `amnezia-dns`): probes both listeners every 20s.
+  Enters a plaintext last-resort tier after 3 consecutive failures (N=3),
+  inserts the WAN-provided IPs *after* the encrypted listeners so
+  `strict-order` still tries encrypted first. Exits plaintext after 2
+  consecutive ok probes (M=2) and 120s dwell. Plaintext-entry timestamp
+  is persisted in UCI (`dns_plain_ts`) so dwell survives procd respawn.
+- **`amnezia-dns-ctl`** CLI: `enable`, `disable`, `apply`, `set-provider`,
+  `status`, `watchdog`. `enable` verifies encrypted DNS is answering
+  before returning; auto-reverts via `disable` if the post-enable
+  verification fails. `set-provider` hot-swaps the provider on a live
+  stack with rollback on verify failure.
+- **LuCI panel** (`Network → Amnezia → Encrypted DNS (DoT)`): checkbox
+  to enable/disable, provider dropdown, active-tier label, and a
+  plaintext-fallback warning banner.
+- **Five built-in providers**: `quad9` (default), `adguard`, `dns0`,
+  `mullvad`, `google`. Custom resolver via direct UCI only
+  (`dot_resolver`, `doh_resolver`, `doh_bootstrap`).
+- Installer (`amnezia-pbr-setup --first-install`) installs `stubby` and
+  `https-dns-proxy` via opkg and wires the init/hotplug files. Degrades
+  gracefully: if packages are absent, `apply` sets `dns_active_tier=plaintext`
+  and continues rather than breaking DNS.
+- Firewall hotplug (`99-amnezia-dns`) re-asserts the DoT ip rule after
+  every `fw4 reload` — the rule lives in the `ip rule` table, not
+  nftables, so it survives fw4 without a hotplug but is re-applied for
+  correctness on provider-IP change.
+
+**New UCI options** (under `amnezia.config`):
+
+```
+option dot_enabled      '0'       # 1 = encrypted DNS active (default OFF)
+option dns_provider     'quad9'   # quad9 | adguard | dns0 | mullvad | google
+option dot_resolver     ''        # custom only: <IP>#<hostname> for stubby
+option doh_resolver     ''        # custom only: DoH URL
+option doh_bootstrap    ''        # custom only: DoH bootstrap IP
+option dns_active_tier  'off'     # runtime: off | dot | doh | plaintext
+```
+
+**New package dependencies**: `stubby`, `https-dns-proxy`.
+
+---
+
 ## 0.2.0-r3 — 2026-06-15
 
 ### Multi-tunnel AmneziaWG failover (replaces pbr)
