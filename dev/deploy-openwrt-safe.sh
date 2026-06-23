@@ -74,9 +74,17 @@ start_remote_deploy() {
   # upload above won't preserve that, so push each file into the explicit
   # nested path the installer reads from. Kept separate to keep the main
   # loop terse.
-  ssh_run "mkdir -p /tmp/luci-app-amnezia/menu /tmp/luci-app-amnezia/acl /tmp/luci-app-amnezia/view"
+  ssh_run "mkdir -p /tmp/luci-app-amnezia/menu /tmp/luci-app-amnezia/acl /tmp/luci-app-amnezia/view /tmp/luci-app-amnezia/amnezia/section"
+  # Push menu, acl, and amnezia resource modules first; main.js LAST so
+  # on-device require() resolves modules before the entry point is loaded.
   for _f in openwrt/luci-app-amnezia/menu/luci-app-amnezia.json \
             openwrt/luci-app-amnezia/acl/luci-app-amnezia.json \
+            openwrt/luci-app-amnezia/amnezia/util.js \
+            openwrt/luci-app-amnezia/amnezia/section/failover.js \
+            openwrt/luci-app-amnezia/amnezia/section/routing.js \
+            openwrt/luci-app-amnezia/amnezia/section/zapret.js \
+            openwrt/luci-app-amnezia/amnezia/section/dns.js \
+            openwrt/luci-app-amnezia/amnezia/section/autolearn.js \
             openwrt/luci-app-amnezia/view/main.js; do
     _rel=${_f#openwrt/luci-app-amnezia/}
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"

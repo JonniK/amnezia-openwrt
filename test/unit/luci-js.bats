@@ -241,3 +241,15 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   done
   ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"
 }
+
+# ── Phase 8: delivery wiring — packages mirror carries the amnezia module tree ──
+
+@test "packages mirror carries the amnezia module tree (6 files)" {
+  PKG="$HARNESS_DIR/../packages/luci-app-amnezia/files/www/luci-static/resources/amnezia"
+  [ -f "$PKG/util.js" ]
+  [ -f "$PKG/section/failover.js" ]
+  [ -f "$PKG/section/routing.js" ]
+  [ -f "$PKG/section/zapret.js" ]
+  [ -f "$PKG/section/dns.js" ]
+  [ -f "$PKG/section/autolearn.js" ]
+}
