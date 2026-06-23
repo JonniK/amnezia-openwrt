@@ -9,6 +9,11 @@ case "$*" in
     [ "${IP_NEXTHOP_OK:-0}" = 1 ] && exit 0 || exit 1 ;;
   "-j route show table vpn_pool"|"-j route show table 101")
     printf '%s\n' "${IP_FAKE_ROUTE:-[]}" ;;
+  "route show table 100"|"route show table vpn_sticky"|"route show table 101"|"route show table vpn_pool")
+    # Mirror a real sticky/pool default route so amz_tunnel_dev() resolves the
+    # tunnel egress device. Gated: opt-in via AMZ_FAKE_TUNNEL_DEV so suites that
+    # expect an empty table are unaffected.
+    [ -n "${AMZ_FAKE_TUNNEL_DEV:-}" ] && printf 'default dev %s scope link \n' "$AMZ_FAKE_TUNNEL_DEV" ;;
   "-4 addr show dev awg1")
     # Return a fake per-tunnel source address so probe_setup can key ip rules by src.
     printf '2: awg1: <POINTOPOINT,UP>\n    inet 10.100.1.2/24 scope global awg1\n' ;;

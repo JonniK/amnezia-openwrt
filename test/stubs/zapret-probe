@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "zapret-probe $*" >> "${STUB_LOG:-/dev/null}"
+# Canned verdict per-domain via ZP_VERDICT_<domain-with-dots-as-underscores>,
+# default ZP_VERDICT_DEFAULT, fallback direct_ok.
+_dom="$1"; _key="ZP_VERDICT_$(printf '%s' "$_dom" | tr '.-' '__')"
+eval _v="\${$_key:-\${ZP_VERDICT_DEFAULT:-direct_ok}}"
+printf '{"domain":"%s","verdict":"%s","reason":"stub"}\n' "$_dom" "$_v"

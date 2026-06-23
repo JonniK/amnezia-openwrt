@@ -45,7 +45,7 @@ for src in \
 	zapret-apply.sh zapret-probe.sh zapret-verify.sh \
 	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh \
 	amnezia-tunnel-ctl.sh amnezia-force-load.sh amnezia-force-update.sh \
-	amnezia-dns-ctl.sh
+	amnezia-autolearn-ctl.sh amnezia-dns-ctl.sh
 do
 	cp "$SRC/$src" "$PBR_PKG/usr/bin/${src%.sh}"
 	chmod 0755 "$PBR_PKG/usr/bin/${src%.sh}"
@@ -58,23 +58,27 @@ cp "$SRC/install-dnsmasq-full.sh"          "$PBR_PKG/usr/sbin/install-dnsmasq-fu
 cp "$SRC/configure-dnsmasq-ru-nftset.sh"   "$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset"
 cp "$SRC/configure-dnsmasq-amnezia.sh"     "$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia"
 cp "$SRC/amnezia-failover"                 "$PBR_PKG/usr/sbin/amnezia-failover"
+cp "$SRC/amnezia-autolearn.sh"             "$PBR_PKG/usr/sbin/amnezia-autolearn"
 chmod 0755 \
 	"$PBR_PKG/usr/sbin/amnezia-pbr-setup" \
 	"$PBR_PKG/usr/sbin/install-zapret" \
 	"$PBR_PKG/usr/sbin/install-dnsmasq-full" \
 	"$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset" \
 	"$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia" \
-	"$PBR_PKG/usr/sbin/amnezia-failover"
+	"$PBR_PKG/usr/sbin/amnezia-failover" \
+	"$PBR_PKG/usr/sbin/amnezia-autolearn"
 
-# Shared library: amnezia-common.sh, amnezia-routing.sh, amnezia-tunnel-lib.sh, amnezia-dns-lib.sh
-cp "$SRC/lib/amnezia-common.sh"      "$PBR_PKG/usr/lib/amnezia/amnezia-common.sh"
-cp "$SRC/lib/amnezia-routing.sh"     "$PBR_PKG/usr/lib/amnezia/amnezia-routing.sh"
-cp "$SRC/lib/amnezia-tunnel-lib.sh"  "$PBR_PKG/usr/lib/amnezia/amnezia-tunnel-lib.sh"
-cp "$SRC/lib/amnezia-dns-lib.sh"     "$PBR_PKG/usr/lib/amnezia/amnezia-dns-lib.sh"
+# Shared library: amnezia-common.sh, amnezia-routing.sh, amnezia-tunnel-lib.sh, amnezia-autolearn-lib.sh, amnezia-dns-lib.sh
+cp "$SRC/lib/amnezia-common.sh"         "$PBR_PKG/usr/lib/amnezia/amnezia-common.sh"
+cp "$SRC/lib/amnezia-routing.sh"        "$PBR_PKG/usr/lib/amnezia/amnezia-routing.sh"
+cp "$SRC/lib/amnezia-tunnel-lib.sh"     "$PBR_PKG/usr/lib/amnezia/amnezia-tunnel-lib.sh"
+cp "$SRC/lib/amnezia-autolearn-lib.sh"  "$PBR_PKG/usr/lib/amnezia/amnezia-autolearn-lib.sh"
+cp "$SRC/lib/amnezia-dns-lib.sh"        "$PBR_PKG/usr/lib/amnezia/amnezia-dns-lib.sh"
 chmod 0644 \
 	"$PBR_PKG/usr/lib/amnezia/amnezia-common.sh" \
 	"$PBR_PKG/usr/lib/amnezia/amnezia-routing.sh" \
 	"$PBR_PKG/usr/lib/amnezia/amnezia-tunnel-lib.sh" \
+	"$PBR_PKG/usr/lib/amnezia/amnezia-autolearn-lib.sh" \
 	"$PBR_PKG/usr/lib/amnezia/amnezia-dns-lib.sh"
 
 # nftables classifiers:
@@ -100,14 +104,16 @@ cp "$SRC/iproute2-amnezia-rt_tables.conf" \
 chmod 0644 "$PBR_PKG/etc/iproute2/rt_tables.d/amnezia.conf"
 
 # procd init scripts
-cp "$SRC/amnezia-failover.init"    "$PBR_PKG/etc/init.d/amnezia-failover"
-cp "$SRC/amnezia-ru-load.init"     "$PBR_PKG/etc/init.d/amnezia-ru-load"
-cp "$SRC/amnezia-force-load.init"  "$PBR_PKG/etc/init.d/amnezia-force-load"
-cp "$SRC/amnezia-dns.init"         "$PBR_PKG/etc/init.d/amnezia-dns"
+cp "$SRC/amnezia-failover.init"     "$PBR_PKG/etc/init.d/amnezia-failover"
+cp "$SRC/amnezia-ru-load.init"      "$PBR_PKG/etc/init.d/amnezia-ru-load"
+cp "$SRC/amnezia-force-load.init"   "$PBR_PKG/etc/init.d/amnezia-force-load"
+cp "$SRC/amnezia-autolearn.init"    "$PBR_PKG/etc/init.d/amnezia-autolearn"
+cp "$SRC/amnezia-dns.init"          "$PBR_PKG/etc/init.d/amnezia-dns"
 chmod 0755 \
 	"$PBR_PKG/etc/init.d/amnezia-failover" \
 	"$PBR_PKG/etc/init.d/amnezia-ru-load" \
 	"$PBR_PKG/etc/init.d/amnezia-force-load" \
+	"$PBR_PKG/etc/init.d/amnezia-autolearn" \
 	"$PBR_PKG/etc/init.d/amnezia-dns"
 
 # firewall hotplug: repopulate nft sets on every fw4 reload

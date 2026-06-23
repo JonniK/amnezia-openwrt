@@ -320,6 +320,98 @@ _amz_wire_force_engine() {
 }
 
 # ---------------------------------------------------------------------------
+# _amz_wire_autolearn <dry>
+#   Install the auto-learning engine files: lib, pass (sbin), ctl (bin), init.
+#   Only enables the init service when autolearn_enabled=1 in UCI (default OFF).
+#   Called from BOTH first_install and migrate_from_pbr, like _amz_wire_force_engine.
+#   $1 = "1" means dry-run (skip all real file operations).
+# ---------------------------------------------------------------------------
+_amz_wire_autolearn() {
+  _aal_dry="${1:-0}"
+  [ "$_aal_dry" = 1 ] && return 0
+
+  # 1. Library → /usr/lib/amnezia/amnezia-autolearn-lib.sh
+  if [ ! -f /usr/lib/amnezia/amnezia-autolearn-lib.sh ]; then
+    _aal_lib=$(resolve_dep \
+      /usr/lib/amnezia/amnezia-autolearn-lib.sh \
+      amnezia-autolearn-lib.sh \
+      lib/amnezia-autolearn-lib.sh) || true
+    if [ -n "$_aal_lib" ] && [ "$_aal_lib" != /usr/lib/amnezia/amnezia-autolearn-lib.sh ]; then
+      mkdir -p /usr/lib/amnezia 2>/dev/null || true
+      cp "$_aal_lib" /usr/lib/amnezia/amnezia-autolearn-lib.sh 2>/dev/null || true
+      chmod 0644 /usr/lib/amnezia/amnezia-autolearn-lib.sh 2>/dev/null || true
+      amz_log "amnezia-autolearn-lib.sh installed"
+    else
+      amz_log "WARN: amnezia-autolearn-lib.sh not found; autolearn disabled"
+    fi
+  else
+    amz_log "amnezia-autolearn-lib.sh already present"
+  fi
+
+  # 2. Pass → /usr/sbin/amnezia-autolearn
+  if [ ! -f /usr/sbin/amnezia-autolearn ]; then
+    _aal_pass=$(resolve_dep \
+      /usr/sbin/amnezia-autolearn \
+      amnezia-autolearn.sh \
+      amnezia-autolearn.sh) || true
+    if [ -n "$_aal_pass" ] && [ "$_aal_pass" != /usr/sbin/amnezia-autolearn ]; then
+      cp "$_aal_pass" /usr/sbin/amnezia-autolearn 2>/dev/null || true
+      chmod +x /usr/sbin/amnezia-autolearn 2>/dev/null || true
+      amz_log "amnezia-autolearn installed to /usr/sbin"
+    else
+      amz_log "WARN: amnezia-autolearn.sh not found; autolearn pass missing"
+    fi
+  else
+    amz_log "amnezia-autolearn already present (/usr/sbin)"
+  fi
+
+  # 3. CTL → /usr/bin/amnezia-autolearn-ctl
+  if [ ! -f /usr/bin/amnezia-autolearn-ctl ]; then
+    _aal_ctl=$(resolve_dep \
+      /usr/bin/amnezia-autolearn-ctl \
+      amnezia-autolearn-ctl.sh \
+      amnezia-autolearn-ctl.sh) || true
+    if [ -n "$_aal_ctl" ] && [ "$_aal_ctl" != /usr/bin/amnezia-autolearn-ctl ]; then
+      cp "$_aal_ctl" /usr/bin/amnezia-autolearn-ctl 2>/dev/null || true
+      chmod +x /usr/bin/amnezia-autolearn-ctl 2>/dev/null || true
+      amz_log "amnezia-autolearn-ctl installed to /usr/bin"
+    else
+      amz_log "WARN: amnezia-autolearn-ctl.sh not found; ctl missing"
+    fi
+  else
+    amz_log "amnezia-autolearn-ctl already present (/usr/bin)"
+  fi
+
+  # 4. Init → /etc/init.d/amnezia-autolearn
+  if [ ! -f /etc/init.d/amnezia-autolearn ]; then
+    _aal_init=$(resolve_dep \
+      /etc/init.d/amnezia-autolearn \
+      amnezia-autolearn.init \
+      amnezia-autolearn.init) || true
+    if [ -n "$_aal_init" ] && [ "$_aal_init" != /etc/init.d/amnezia-autolearn ]; then
+      cp "$_aal_init" /etc/init.d/amnezia-autolearn 2>/dev/null || true
+      chmod +x /etc/init.d/amnezia-autolearn 2>/dev/null || true
+      amz_log "amnezia-autolearn.init installed"
+    else
+      amz_log "WARN: amnezia-autolearn.init not found; init missing"
+    fi
+  else
+    amz_log "amnezia-autolearn.init already present"
+  fi
+
+  # 5. Enable the init only when autolearn_enabled=1 (default OFF — normal
+  #    install does nothing visible here).
+  _aal_enabled=$(uci -q get amnezia.config.autolearn_enabled 2>/dev/null || echo 0)
+  if [ "$_aal_enabled" = 1 ]; then
+    echo "/etc/init.d/amnezia-autolearn enable" >> "${STUB_LOG:-/dev/null}"
+    /etc/init.d/amnezia-autolearn enable 2>/dev/null || true
+    amz_log "amnezia-autolearn init enabled (autolearn_enabled=1)"
+  else
+    amz_log "amnezia-autolearn: default OFF — init not enabled (set autolearn_enabled=1 to activate)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # --migrate [--dry-run]: ordered pbr-removal migration.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--migrate" ]; then
@@ -641,6 +733,7 @@ if [ "${1:-}" = "--migrate" ]; then
     # seed, cron, initial populate).  Dry-run-guarded via _amz_wire_force_engine.
     # H3/H2: migrate_from_pbr was previously missing this wiring entirely.
     _amz_wire_force_engine "$_migrate_dry"
+    _amz_wire_autolearn "$_migrate_dry"
 
     # Step 11: repoint dnsmasq to amnezia nftsets (only reached when ru4 gate passes).
     if [ "$_migrate_dry" = 1 ]; then
@@ -1000,6 +1093,7 @@ if [ "${1:-}" = "--first-install" ]; then
     # H3/H2: _amz_wire_force_engine is defined at the top of the --migrate
     # dispatch section and is always available when this code runs.
     _amz_wire_force_engine "$_fi_dry"
+    _amz_wire_autolearn "$_fi_dry"
   }
 
   first_install_wiring

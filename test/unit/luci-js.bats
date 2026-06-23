@@ -112,6 +112,19 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
   grep -q "failover-tunnel-table" "$F"
 }
 
+# ── Phase 8 additions (autolearn) ───────────────────────────────────────────
+
+@test "main.js wires the autolearn toggle and list" {
+  grep -q 'autolearn' "$F"
+  grep -q 'amnezia-autolearn-ctl' "$F"
+  grep -q 'set-enabled' "$F"
+}
+@test "acl grants exec on amnezia-autolearn-ctl" {
+  ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
+  grep -q 'amnezia-autolearn-ctl' "$ACL"
+}
+
+# ── DoT additions ────────────────────────────────────────────────────────────
 @test "main.js wires the DoT toggle + provider dropdown + plaintext warning" {
   JS="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
   grep -q "amnezia-dns-ctl" "$JS"

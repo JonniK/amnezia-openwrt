@@ -1,3 +1,13 @@
 #!/bin/sh
 echo "nslookup $*" >> "${STUB_LOG:-/dev/null}"
+# Test-controlled answer: NSLOOKUP_ADDR="1.2.3.4 5.6.7.8" (space-separated),
+# echoed in the real `Name:/Address:` block shape so the parser is exercised.
+_dom="${*##* }"
+echo "Server:    127.0.0.1"
+echo "Address:   127.0.0.1#53"
+echo ""
+for _a in ${NSLOOKUP_ADDR:-}; do
+  echo "Name:      $_dom"
+  echo "Address: $_a"
+done
 exit 0

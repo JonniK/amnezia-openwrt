@@ -22,6 +22,21 @@ export DNSMASQ_LOCK=/var/lock/amnezia-dnsmasq.lock
 
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
 
+# Active tunnel egress device for router-origin traffic that MUST be tunneled.
+# Router-origin packets are not seen by the prerouting/mangle classifier, so they
+# carry no fwmark and fall through to the main table -> WAN (direct). Callers that
+# need their own traffic tunneled (force-update fetches; the self-learning probe)
+# bind to this device (SO_BINDTODEVICE via `curl --interface`), which egresses the
+# tunnel regardless of destination IP. Derived from the sticky table's default
+# route, then the pool table, then the first awg* link. Empty = no tunnel up.
+# A blackhole default ("blackhole default ...") has no `dev` and is skipped.
+amz_tunnel_dev() {
+  _td=$(ip route show table "$TBL_STICKY" 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  [ -n "$_td" ] || _td=$(ip route show table "$TBL_POOL" 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  [ -n "$_td" ] || _td=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -m1 '^awg')
+  printf '%s' "$_td"
+}
+
 # Parse an AmneziaWG client .conf into AWG_<Key> vars. Endpoint split into host/port.
 parse_awg_conf() {
   _f=$1; [ -f "$_f" ] || { amz_log "conf missing: $_f"; return 1; }

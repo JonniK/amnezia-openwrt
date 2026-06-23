@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "kill $*" >> "${STUB_LOG:-/dev/null}"   # observable; never signals a real pid
+exit 0

@@ -66,9 +66,25 @@ mkdir -p "$FORCE_DIR/force.d"
         _fetch_ok=1
       fi
     else
-      if uclient-fetch -qO "$_tmp" "$_url" 2>/dev/null \
-          || wget -qO "$_tmp" "$_url" 2>/dev/null \
-          || curl -sLo "$_tmp" "$_url" 2>/dev/null; then
+      # Router-origin fetches are NOT marked by the prerouting classifier, so by
+      # default they egress WAN *directly* — exactly where RKN throttling stalls
+      # GitHub-raw / antifilter, the fetch hangs, and the synchronous rpcd call
+      # outlives the LuCI XHR timeout ("XHR request timed out"). Bind the fetch to
+      # the active tunnel device (SO_BINDTODEVICE) so it egresses the tunnel
+      # regardless of destination IP — immune to GitHub/Fastly CDN IP-rotation,
+      # with no routing/firewall state to install or tear down. Bounded timeouts
+      # turn a dead path into a fast, clean failure (cache kept) instead of a hang.
+      _tdev=$(amz_tunnel_dev)
+      if [ -n "$_tdev" ] && command -v curl >/dev/null 2>&1 \
+          && curl --interface "if!$_tdev" -fsSL --connect-timeout 10 --max-time 120 \
+                  -o "$_tmp" "$_url" 2>/dev/null; then
+        _fetch_ok=1
+      # Direct-egress fallbacks (bounded). Reached only when no tunnel is up or the
+      # tunneled fetch failed; for RKN-blocked sources these usually fail too, but
+      # they fail fast and the prior cache is preserved.
+      elif uclient-fetch -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
+          || wget -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
+          || curl -fsSL --connect-timeout 10 --max-time 120 -o "$_tmp" "$_url" 2>/dev/null; then
         _fetch_ok=1
       fi
     fi

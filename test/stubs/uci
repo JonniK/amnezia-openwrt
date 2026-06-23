@@ -11,11 +11,45 @@ case "$_verb" in
   del_list) exit 0 ;;
   add_list) exit 0 ;;
 esac
+
+# UCI_DNSMASQ_<opt> override: handles dhcp.@dnsmasq[0].<opt> keys via the
+# autolearn-test convention (export UCI_DNSMASQ_<opt>='value'). When the override
+# is unset, FALL THROUGH to the generic UCI_GET_* block below so the DoT-test
+# convention (UCI_GET_dhcp__dnsmasq_0__<opt>) can resolve the same key.
+if [ "$1" = get ]; then
+  case "$2" in
+    dhcp.@dnsmasq"["0"]".*)
+      _opt="${2##*.}"
+      _envk="UCI_DNSMASQ_$(printf '%s' "$_opt" | tr '-' '_')"
+      eval _envv="\${$_envk+set}"
+      if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+      ;;
+  esac
+fi
+
+# UCI_GET_* dynamic resolution: maps "uci -q get a.b.c" -> env var UCI_GET_a_b_c.
+# Normalized via tr -c '[:alnum:]' '_' so @[]-bracket keys yield valid var names
+# (e.g. dhcp.@dnsmasq[0].server -> UCI_GET_dhcp__dnsmasq_0__server). Checked BEFORE
+# the hardcoded arms so tests can override any key.
+if [ "$1" = get ]; then
+  _envk="UCI_GET_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
+  eval _envv="\${$_envk+set}"
+  if [ "${_envv:-}" = set ]; then eval printf '%s\\n' "\"\$$_envk\""; exit 0; fi
+fi
+
+# UCI_SHOW_network dynamic resolution: emits the env var content when set.
+# Checked BEFORE the hardcoded "show network" arm.
+if [ "$1" = show ] && [ "$2" = network ] && [ -n "${UCI_SHOW_network:-}" ]; then
+  printf '%s\n' "$UCI_SHOW_network"; exit 0
+fi
+
+# UCI_SHOW_<arg> generic dynamic resolution (DoT): emits env var content for any show key.
 if [ "$1" = show ] && [ -n "$2" ]; then
   _showk="UCI_SHOW_$(printf '%s' "$2" | tr -c '[:alnum:]' '_')"
   eval _showv="\${$_showk+set}"
   if [ "${_showv:-}" = set ]; then eval printf '%s\\n' "\"\$$_showk\""; exit 0; fi
 fi
+
 case "$1 $2" in
   "show network") echo "network.@interface[0]=interface" ;;
   "get amnezia") exit 0 ;;
