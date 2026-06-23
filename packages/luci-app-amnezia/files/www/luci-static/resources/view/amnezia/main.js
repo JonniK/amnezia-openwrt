@@ -3,12 +3,12 @@
 'require fs';
 'require ui';
 'require poll';
-'require amnezia.util';
-'require amnezia.section.failover';
-'require amnezia.section.routing';
-'require amnezia.section.zapret';
-'require amnezia.section.dns';
-'require amnezia.section.autolearn';
+'require amnezia.util as util';
+'require amnezia.section.failover as failover';
+'require amnezia.section.routing as routing';
+'require amnezia.section.zapret as zapret';
+'require amnezia.section.dns as dns';
+'require amnezia.section.autolearn as autolearn';
 
 // Module-level handle for the poll callback. LuCI has no teardown hook for
 // views, so the poller self-unregisters when its DOM anchor disappears

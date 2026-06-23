@@ -49,8 +49,32 @@ const panels = [];
 for (const k of ['failover','routing','zapret','dns','autolearn']) {
   if (d[k] && typeof d[k].render === 'function') { const node = d[k].render({}, DATA); panels.push([k,node]); } }
 function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[]).forEach(c=>walk(c,fn)); }
-module.exports = { d, main, panels, walk, DATA };
+
+// Lint: LuCI does NOT auto-bind a dotted/namespaced require. `'require a.b.c'` WITHOUT
+// ` as <alias>` leaves the local variable undefined → ReferenceError at runtime (blank
+// panel). The module-execution path cannot catch this (we bind deps by name here), so
+// assert it textually across every shipped JS file. (Convention proven on-device: every
+// dotted require — tools.firewall as fwtool, tools.widgets as widgets — carries ` as `.)
+function lintRequires(){
+  const files = ['view/main.js','amnezia/util.js','amnezia/section/failover.js','amnezia/section/routing.js','amnezia/section/zapret.js','amnezia/section/dns.js','amnezia/section/autolearn.js'];
+  const bad = [];
+  files.forEach(function(rel){
+    const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return;
+    fs.readFileSync(file,'utf8').split('\n').forEach(function(line, i){
+      const m = line.match(/^\s*['"]require\s+([^'"]+)['"]\s*;?\s*$/);
+      if(!m) return;
+      const spec = m[1].trim();
+      if(spec.indexOf('.')>=0 && !/\sas\s/.test(spec)) bad.push(rel+':'+(i+1)+'  '+spec);
+    });
+  });
+  return bad;
+}
+
+module.exports = { d, main, panels, walk, DATA, lintRequires };
 if (require.main === module) {
+  // Require-alias lint FIRST (cheapest, catches the blank-panel footgun).
+  const reqBad = lintRequires();
+  if (reqBad.length) { console.error('FAIL: dotted require without ` as <alias>` (LuCI will not bind it → ReferenceError):\n  '+reqBad.join('\n  ')); process.exit(1); }
   // Self-test mode: assert accordion invariants when all section modules exist.
   let details=[], badOpen=[];
   panels.forEach(([k,node])=>walk(node,n=>{ if(n.tag==='details'){ details.push(n);
