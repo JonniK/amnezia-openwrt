@@ -16,7 +16,7 @@
 #   3. C1 scale gate (G2): run amnezia-force-update with real itdoginfo source,
 #      measure uci commit dhcp + dnsmasq restart wall-clock AND DNS-unavailable window;
 #      verdict: SCALE-GATE PASS or FAIL (>10s wall-clock OR >3s DNS-down)
-#      + force domain resolves into amnezia_force4 via dnsmasq config ipset
+#      + force domain materializes into amnezia_force4 via dnsmasq conf-dir nftset
 #   4. Hotplug repop: fw4 reload → amnezia_force4 IP half still populated
 #   5. Cold-boot repop: restart amnezia-force-load init → amnezia_force4 IP repopulates
 #   6. Conntrack flush: establish flow, set-routing-mode, assert pool+sticky entries flushed
@@ -425,30 +425,30 @@ else
   assert_pass "T3-3" "SKIP — scale-gate not measured: no host egress to stage real-size itdoginfo fixture"
 fi
 
-# T3-4: a force domain resolves into amnezia_force4 via dnsmasq config ipset.
-# We add FORCE_DOMAIN to the dhcp.amnezia_force ipset config and restart,
-# then do an nslookup; the response should trigger amnezia_force4 population.
-log "asserting force domain (${FORCE_DOMAIN}) resolves into amnezia_force4 via config ipset"
-# Add the domain to the dhcp.amnezia_force ipset section.
-vm_run "
-  uci -q delete dhcp.amnezia_force.domain 2>/dev/null || true
-  uci add_list dhcp.amnezia_force.domain='${FORCE_DOMAIN}' 2>/dev/null || true
-  uci commit dhcp 2>/dev/null || true
-  /etc/init.d/dnsmasq restart 2>/dev/null || true
-  sleep 2
-" >/dev/null 2>&1 || true
+# T3-4: a force domain materializes into the dnsmasq conf-dir as an nftset
+# directive for amnezia_force4. The legacy `dhcp.amnezia_force` config-ipset
+# section was replaced by the chunked conf-dir mechanism (/etc/amnezia/dnsmasq.d/):
+# a config-ipset section renders ALL domains onto one nftset= line that overflows
+# dnsmasq's ~1024B config-line buffer at scale ("bad option" -> DNS outage), so
+# amnezia-force-load now writes byte-bounded nftset= lines into the conf-dir.
+# FORCE_DOMAIN was written to force-tunnel.list by save-manual (T2-2); force-load
+# splits it into the conf-dir, and dnsmasq populates amnezia_force4 on resolution.
+log "asserting force domain (${FORCE_DOMAIN}) materializes into dnsmasq conf-dir nftset for amnezia_force4"
+# Re-run force-load to merge force-tunnel.list (incl. FORCE_DOMAIN) into the conf-dir.
+vm_run "amnezia-force-load 2>/dev/null || true; sleep 1" >/dev/null 2>&1 || true
 
-# Resolve FORCE_DOMAIN — since it is not a real domain, we test the ipset wiring
-# by verifying dnsmasq's config file contains the nftset directive.
-# Real-domain resolution test is optional (requires internet from VM to DNS).
-_dnsmasq_conf=$(vm_run "cat /var/etc/dnsmasq.conf 2>/dev/null || true" 2>/dev/null || true)
-_uci_ipset=$(vm_run "uci show dhcp.amnezia_force 2>/dev/null || true" 2>/dev/null || true)
-if echo "$_uci_ipset" | grep -q "amnezia_force4"; then
-  assert_pass "T3-4" "dhcp.amnezia_force config ipset section points at amnezia_force4 (dnsmasq will populate the set on resolution)"
+# Primary check: the dnsmasq conf-dir (/etc/amnezia/dnsmasq.d/) contains an nftset
+# line for FORCE_DOMAIN (the chunked-conf-dir path; mirrors T4-2 in test-autolearn.sh).
+_dnsmasq_d_match=$(vm_run "grep -r '${FORCE_DOMAIN}' /etc/amnezia/dnsmasq.d/ 2>/dev/null | head -3 || true" 2>/dev/null || true)
+# Fallback: the assembled running dnsmasq config references the amnezia_force4 nftset.
+_dnsmasq_conf=$(vm_run "cat /var/etc/dnsmasq.conf* 2>/dev/null || true" 2>/dev/null || true)
+log "T3-4 conf-dir grep: '$(echo "$_dnsmasq_d_match" | head -3 | tr '\n' '|')'"
+if echo "$_dnsmasq_d_match" | grep -q "$FORCE_DOMAIN"; then
+  assert_pass "T3-4" "dnsmasq conf-dir /etc/amnezia/dnsmasq.d/ contains nftset directive for FORCE_DOMAIN -> amnezia_force4 (force-load wrote chunked conf)"
 elif echo "$_dnsmasq_conf" | grep -qE "nftset.*amnezia_force4|amnezia_force4"; then
-  assert_pass "T3-4" "dnsmasq running config references amnezia_force4 nftset (config ipset read on 24.10)"
+  assert_pass "T3-4" "dnsmasq running config references amnezia_force4 nftset"
 else
-  assert_fail "T3-4" "dhcp.amnezia_force config ipset not found or not referencing amnezia_force4 -- uci: $(echo "$_uci_ipset" | head -5)"
+  assert_fail "T3-4" "FORCE_DOMAIN '${FORCE_DOMAIN}' not found in /etc/amnezia/dnsmasq.d/ and no amnezia_force4 nftset in dnsmasq conf -- force-load did not write the chunked conf"
 fi
 
 log "Step 3 done. PASS=${ASSERT_PASS} FAIL=${ASSERT_FAIL}"
