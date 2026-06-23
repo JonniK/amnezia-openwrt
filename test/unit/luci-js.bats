@@ -1,75 +1,90 @@
 #!/usr/bin/env bats
 load '../lib/harness.bash'
 F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
-@test "main.js parses and references the failover state file + per-tunnel table" {
+AMZ="$HARNESS_DIR/../openwrt/luci-app-amnezia"
+# ALLJS: every shipped JS file (view + modules). Negative guards run over this union.
+alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
+@test "failover state file + per-tunnel table present across shipped JS" {
   node --check "$F"
+  # amnezia-failover.json is read in main.js load() and failover.js refresh()
   grep -q "amnezia-failover.json" "$F"
-  grep -q "renderTunnelTable" "$F"
-  grep -q "parseFailoverState" "$F"
+  # renderTunnelTable + parseFailoverState now live in failover.js
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "renderTunnelTable" "$FV"
+  grep -q "parseFailoverState" "$FV"
 }
 @test "main.js still reads seed-must-tunnel.list at the existing runtime path (~line 962)" {
   grep -q "seed-must-tunnel.list" "$F"
 }
 @test "panel calls amnezia-failover-ctl matching the helper installed name" {
   # The ctl helper is installed as amnezia-failover-ctl (see F3/ACL).
-  grep -q "amnezia-failover-ctl" "$F"
+  # Now lives in failover.js.
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "amnezia-failover-ctl" "$FV"
 }
-@test "pbr panel is gone: no pbr-status or pbr-reload exec calls" {
-  # Issue #9: pbr binaries no longer exist; the panel must be fully removed.
-  ! grep -q "pbr-status" "$F"
-  ! grep -q "pbr-reload" "$F"
-  ! grep -q "pbr-reload-btn" "$F"
-  ! grep -q "handlePbrReload" "$F"
+@test "no pbr panel anywhere (Issue #9)" {
+  for f in $(alljs); do ! grep -qE "pbr-status|pbr-reload|handlePbrReload" "$f"; done
 }
 @test "failover tunnel panel is present: renderTunnelTable and failover-tunnel-table id" {
-  grep -q "renderTunnelTable" "$F"
-  grep -q "failover-tunnel-table" "$F"
-  grep -q "Failover tunnels" "$F"
+  # These now live in failover.js; main.js has the anchor guard in refresh().
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "renderTunnelTable" "$FV"
+  grep -q "failover-tunnel-table" "$FV"
+  grep -q "Failover tunnels" "$FV"
 }
 @test "handshake_age is rendered directly as age-in-seconds (no Date.now subtract)" {
   # Issue MED: producer emits age-in-seconds; consumer must not double-convert via Date.now().
-  # Ensure the stale pattern is gone and the direct path is present.
-  ! grep -q "Date.now().*handshake_age\|handshake_age.*Date.now()" "$F"
-  grep -q "age < 0.*never\|age < 60.*ago" "$F"
+  # direct age path now lives in failover.js; main.js must not have the stale pattern.
+  ! grep -qE "Date\.Now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$F"
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -qE "age < 0.*never|age < 60.*ago" "$FV"
 }
 
 # ── Phase E additions ────────────────────────────────────────────────────────
 
-@test "main.js contains decodeVpnLink function" {
-  grep -q "function decodeVpnLink" "$F"
+@test "failover.js contains decodeVpnLink function" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "function decodeVpnLink" "$FV"
 }
 
-@test "main.js decodeVpnLink returns null for non-vpn:// prefix" {
-  grep -q "indexOf('vpn://') !== 0" "$F"
+@test "failover.js decodeVpnLink returns null for non-vpn:// prefix" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "indexOf('vpn://') !== 0" "$FV"
 }
 
-@test "main.js has handleAddTunnel handler" {
-  grep -q "handleAddTunnel" "$F"
+@test "failover.js has handleAddTunnel handler" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleAddTunnel" "$FV"
 }
 
-@test "main.js has handleTunnelRemove handler calling amnezia-tunnel-ctl remove" {
-  grep -q "handleTunnelRemove" "$F"
-  grep -q "amnezia-tunnel-ctl.*remove\|remove.*amnezia-tunnel-ctl" "$F"
+@test "failover.js has handleTunnelRemove handler calling amnezia-tunnel-ctl remove" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleTunnelRemove" "$FV"
+  grep -q "amnezia-tunnel-ctl.*remove\|remove.*amnezia-tunnel-ctl" "$FV"
 }
 
-@test "main.js has handleRoutingMode calling set-routing-mode" {
-  grep -q "handleRoutingMode" "$F"
-  grep -q "set-routing-mode" "$F"
+@test "routing module has handleRoutingMode calling set-routing-mode" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleRoutingMode" "$R"
+  grep -q "set-routing-mode" "$R"
 }
 
-@test "main.js has handleSourceToggle calling set-source" {
-  grep -q "handleSourceToggle" "$F"
-  grep -q "set-source" "$F"
+@test "routing module has handleSourceToggle calling set-source" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleSourceToggle" "$R"
+  grep -q "set-source" "$R"
 }
 
-@test "main.js has handleForceUpdate calling amnezia-force-update" {
-  grep -q "handleForceUpdate" "$F"
-  grep -q "amnezia-force-update" "$F"
+@test "routing module has handleForceUpdate calling amnezia-force-update" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleForceUpdate" "$R"
+  grep -q "amnezia-force-update" "$R"
 }
 
-@test "main.js has handleSaveManual calling amnezia-force-load save-manual" {
-  grep -q "handleSaveManual" "$F"
-  grep -q "save-manual" "$F"
+@test "routing module has handleSaveManual calling amnezia-force-load save-manual" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleSaveManual" "$R"
+  grep -q "save-manual" "$R"
 }
 
 @test "main.js reads force-tunnel.list and force-update.json in load()" {
@@ -77,35 +92,39 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
   grep -q "force-update.json" "$F"
 }
 
-@test "main.js has Remove button in renderTunnelTable (per-row remove column)" {
-  grep -q "awg-remove-" "$F"
-  grep -q "handleTunnelRemove" "$F"
+@test "failover.js has Remove button in renderTunnelTable (per-row remove column)" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "awg-remove-" "$FV"
+  grep -q "handleTunnelRemove" "$FV"
 }
 
-@test "main.js uses no fs.write() calls anywhere (argv-only channel)" {
-  # Match actual call sites (fs.write followed by opening paren), not comments.
-  ! grep -qE "fs\.write\s*\(" "$F"
+@test "no fs.write() in any module (argv-only channel)" {
+  for f in $(alljs); do ! grep -qE "fs\.write\s*\(" "$f"; done
 }
 
-@test "main.js add-tunnel section has textarea and Add tunnel button" {
-  grep -q "add-tunnel-conf" "$F"
-  grep -q "add-tunnel-btn" "$F"
+@test "failover.js add-tunnel section has textarea and Add tunnel button" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "add-tunnel-conf" "$FV"
+  grep -q "add-tunnel-btn" "$FV"
 }
 
-@test "main.js routing-mode select has tunnel-default and direct-default options" {
-  grep -q "routing-mode-select" "$F"
-  grep -q "tunnel-default" "$F"
-  grep -q "direct-default" "$F"
+@test "routing module has routing-mode select with tunnel-default and direct-default options" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "routing-mode-select" "$R"
+  grep -q "tunnel-default" "$R"
+  grep -q "direct-default" "$R"
 }
 
-@test "main.js manual-list section has textarea prefilled with forceTunnelList" {
-  grep -q "manual-list-ta" "$F"
-  grep -q "forceTunnelList" "$F"
+@test "routing module has manual-list textarea prefilled with forceTunnelList" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "manual-list-ta" "$R"
+  grep -q "forceTunnelList" "$R"
 }
 
-@test "main.js paintForceStamp reads force-update.json stamp" {
-  grep -q "paintForceStamp" "$F"
-  grep -q "force-when" "$F"
+@test "routing module has paintForceStamp that reads force-update.json stamp" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "paintForceStamp" "$R"
+  grep -q "force-when" "$R"
 }
 
 @test "main.js failover-tunnel-table anchor is preserved (poll self-unregister)" {
@@ -114,32 +133,123 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
 
 # ── Phase 8 additions (autolearn) ───────────────────────────────────────────
 
-@test "main.js wires the autolearn toggle and list" {
-  grep -q 'autolearn' "$F"
-  grep -q 'amnezia-autolearn-ctl' "$F"
-  grep -q 'set-enabled' "$F"
+@test "autolearn.js wires the autolearn toggle and list" {
+  A="$AMZ/amnezia/section/autolearn.js"
+  grep -q 'autolearn' "$A"
+  grep -q 'amnezia-autolearn-ctl' "$A"
+  grep -q 'set-enabled' "$A"
 }
 @test "acl grants exec on amnezia-autolearn-ctl" {
   ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
   grep -q 'amnezia-autolearn-ctl' "$ACL"
 }
 
-# ── DoT additions ────────────────────────────────────────────────────────────
-@test "main.js wires the DoT toggle + provider dropdown + plaintext warning" {
-  JS="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
-  grep -q "amnezia-dns-ctl" "$JS"
-  grep -Eq "'enable'|\"enable\"" "$JS"
-  grep -q "set-provider" "$JS"
-  grep -q "active_tier" "$JS"
-  grep -q "plaintext" "$JS"
+# ── Phase 4: dns.js ──────────────────────────────────────────────────────────
+
+@test "dns.js owns DoT toggle/provider + focus-guard, no 'custom' provider" {
+  D="$AMZ/amnezia/section/dns.js"; node --check "$D"
+  grep -q "DNS_PROVIDERS" "$D"                        # positive anchor
+  grep -q "box.contains(document.activeElement)" "$D" # focus-guard
+  grep -q "amnezia-dns-ctl" "$D"
+  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$D"  # negative, anchored
+}
+
+@test "dns.js wires the DoT toggle + provider dropdown + plaintext warning" {
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "amnezia-dns-ctl" "$D"
+  grep -Eq "'enable'|\"enable\"" "$D"
+  grep -q "set-provider" "$D"
+  grep -q "active_tier" "$D"
+  grep -q "plaintext" "$D"
 }
 
 @test "renderDnsRow has a focus guard (M8: no poll-clobber on active DoT controls)" {
   # Guard must be present: box.contains(document.activeElement) inside renderDnsRow.
-  grep -q "box.contains(document.activeElement)" "$F"
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "box.contains(document.activeElement)" "$D"
 }
 
 @test "DNS_PROVIDERS does not include 'custom' (M7: dead-end provider removed)" {
   # 'custom' made dns_profile fail with no recovery path; removed from the dropdown.
-  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$F"
+  D="$AMZ/amnezia/section/dns.js"
+  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$D"
+}
+
+# ── Phase 1: util.js + harness ───────────────────────────────────────────────
+
+@test "util.js exists and exports the cross-cutting helpers" {
+  U="$AMZ/amnezia/util.js"
+  node --check "$U"
+  for fn in fmtDur fmtAge verdictColor uiConfirm; do grep -q "$fn" "$U"; done
+}
+@test "render harness loads every module + executes render with no ReferenceError" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+}
+
+# ── Phase 2: routing.js ──────────────────────────────────────────────────────
+
+@test "routing.js owns routing/allowlist handlers + applyFailoverState" {
+  R="$AMZ/amnezia/section/routing.js"; node --check "$R"
+  for s in handleRoutingMode handleSourceToggle handleForceUpdate handleSaveManual handleRuUpdate applyFailoverState routing-mode-select; do grep -q "$s" "$R"; done
+}
+
+# ── Phase 3: zapret.js ──────────────────────────────────────────────────────
+
+@test "zapret.js owns probe/verify/blockcheck/apply + zapret in-flight state" {
+  Z="$AMZ/amnezia/section/zapret.js"; node --check "$Z"
+  for s in handleProbe handleVerify handleBlockcheckRun handleApply handleRevert applyInFlight candidatesSig paintApply; do grep -q "$s" "$Z"; done
+}
+
+# ── Phase 5: autolearn.js ─────────────────────────────────────────────────────
+
+@test "autolearn.js wires toggle/list + row handlers" {
+  A="$AMZ/amnezia/section/autolearn.js"; node --check "$A"
+  for s in amnezia-autolearn-ctl set-enabled handleAutolearnVeto handleAutolearnPromote handleAutolearnPurge; do grep -q "$s" "$A"; done
+}
+
+# ── Phase 6: failover.js ──────────────────────────────────────────────────────
+
+@test "failover.js owns tunnel table, add-tunnel, set-mode/set-sticky, sentinel; direct handshake_age" {
+  FV="$AMZ/amnezia/section/failover.js"; node --check "$FV"
+  for s in renderTunnelTable decodeVpnLink handleAddTunnel handleTunnelRemove failover-tunnel-table set-mode set-sticky; do grep -q "$s" "$FV"; done
+  grep -qE "age < 0.*never|age < 60.*ago" "$FV"                 # positive: direct age path present
+  ! grep -qE "Date\.now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$FV"
+}
+
+# ── Phase 7: accordion chrome + structural tests ──────────────────────────────
+
+@test "accordion: 5 family panels with correct default-open set (harness)" {
+  run node -e '
+    const h=require("./test/lib/luci-harness.js");
+    const fams={}; h.panels.forEach(([k,n])=>h.walk(n,x=>{ if(x.tag==="details" && (x.attrs.class||"").includes("amnezia-panel")){
+      fams[k]=Object.prototype.hasOwnProperty.call(x.attrs,"open") && x.attrs.open!=null; }}));
+    const want={failover:true,routing:true,dns:true,autolearn:true,zapret:false};
+    for(const k of Object.keys(want)){ if(fams[k]!==want[k]){ console.error("open mismatch "+k+": "+fams[k]); process.exit(1);} }
+    process.exit(0);'
+  [ "$status" -eq 0 ]
+}
+@test "accordion: action sub-panels nested and never open (harness self-test)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  grep -q "amnezia-accordion" "$AMZ/view/main.js"
+}
+@test "main.js require-graph resolves to existing files" {
+  for m in util section/failover section/routing section/zapret section/dns section/autolearn; do
+    grep -q "require amnezia.${m//\//.}" "$AMZ/view/main.js"
+    [ -f "$AMZ/amnezia/$m.js" ]
+  done
+  ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"
+}
+
+# ── Phase 8: delivery wiring — packages mirror carries the amnezia module tree ──
+
+@test "packages mirror carries the amnezia module tree (6 files)" {
+  PKG="$HARNESS_DIR/../packages/luci-app-amnezia/files/www/luci-static/resources/amnezia"
+  [ -f "$PKG/util.js" ]
+  [ -f "$PKG/section/failover.js" ]
+  [ -f "$PKG/section/routing.js" ]
+  [ -f "$PKG/section/zapret.js" ]
+  [ -f "$PKG/section/dns.js" ]
+  [ -f "$PKG/section/autolearn.js" ]
 }

@@ -16,10 +16,17 @@ RU_UPDATE_DST=/usr/bin/awg-ru-update
 CRON_FILE=/etc/crontabs/root
 CRON_MARK='# amnezia-ru-update'
 
-[ -f "$SRC/menu/luci-app-amnezia.json" ] || { echo "missing $SRC/menu/luci-app-amnezia.json"; exit 1; }
-[ -f "$SRC/acl/luci-app-amnezia.json" ]  || { echo "missing $SRC/acl/luci-app-amnezia.json"; exit 1; }
-[ -f "$SRC/view/main.js" ]               || { echo "missing $SRC/view/main.js"; exit 1; }
-[ -f "$RU_UPDATE_SRC" ]                  || { echo "missing $RU_UPDATE_SRC"; exit 1; }
+[ -f "$SRC/menu/luci-app-amnezia.json" ]       || { echo "missing $SRC/menu/luci-app-amnezia.json"; exit 1; }
+[ -f "$SRC/acl/luci-app-amnezia.json" ]        || { echo "missing $SRC/acl/luci-app-amnezia.json"; exit 1; }
+[ -f "$SRC/view/main.js" ]                     || { echo "missing $SRC/view/main.js"; exit 1; }
+[ -f "$RU_UPDATE_SRC" ]                        || { echo "missing $RU_UPDATE_SRC"; exit 1; }
+# Preflight: amnezia resource modules must be present.
+[ -f "$SRC/amnezia/util.js" ]                  || { echo "missing $SRC/amnezia/util.js"; exit 1; }
+[ -f "$SRC/amnezia/section/failover.js" ]      || { echo "missing $SRC/amnezia/section/failover.js"; exit 1; }
+[ -f "$SRC/amnezia/section/routing.js" ]       || { echo "missing $SRC/amnezia/section/routing.js"; exit 1; }
+[ -f "$SRC/amnezia/section/zapret.js" ]        || { echo "missing $SRC/amnezia/section/zapret.js"; exit 1; }
+[ -f "$SRC/amnezia/section/dns.js" ]           || { echo "missing $SRC/amnezia/section/dns.js"; exit 1; }
+[ -f "$SRC/amnezia/section/autolearn.js" ]     || { echo "missing $SRC/amnezia/section/autolearn.js"; exit 1; }
 
 # Required helper scripts must already exist (installed by install-luci-toggle.sh).
 [ -x /usr/bin/awg-toggle ] || { echo "missing /usr/bin/awg-toggle — run install-luci-toggle.sh first"; exit 1; }
@@ -32,8 +39,14 @@ mkdir -p /etc/amnezia
 
 # Place LuCI artifacts.
 mkdir -p "$VIEW_DIR"
+mkdir -p /www/luci-static/resources/amnezia/section
 cp "$SRC/menu/luci-app-amnezia.json" "$MENU_DST"
 cp "$SRC/acl/luci-app-amnezia.json"  "$ACL_DST"
+# Copy amnezia resource modules (util.js + section/*.js) before main.js so
+# on-device require() resolves modules before the entry point is loaded.
+cp -r "$SRC/amnezia/." /www/luci-static/resources/amnezia/
+find /www/luci-static/resources/amnezia -name '*.js' -exec chmod 0644 {} +
+# main.js is copied last (entry point; require()s the modules above).
 cp "$SRC/view/main.js"               "$VIEW_DST"
 chmod 0644 "$MENU_DST" "$ACL_DST" "$VIEW_DST"
 

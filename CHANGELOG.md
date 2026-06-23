@@ -1,5 +1,38 @@
 # Changelog
 
+## [unreleased]
+
+### Modular LuCI UI + accordion (no behavior change)
+
+`openwrt/luci-app-amnezia/view/main.js` (was ~2300 lines) is now a
+~129-line orchestration shell. Feature logic extracted into six modules
+under `openwrt/luci-app-amnezia/amnezia/`:
+
+- `util.js` — `fmtDur`, `fmtAge`, `verdictColor`, `uiConfirm`
+- `section/failover.js`, `section/routing.js`, `section/zapret.js`,
+  `section/dns.js`, `section/autolearn.js` — per-feature handlers +
+  `render()` + `refresh()`
+
+`main.js` `'require's each module, `Object.assign`s their handler maps
+onto the view, and delegates `refresh()` via `Promise.all`. Presentation:
+native `<details>` accordion — four status families open by default
+(Tunnels & Failover, Routing & Allowlist, Encrypted DNS, Auto-learning);
+the DPI bypass (zapret) family and all action sub-sections collapsed.
+
+On device modules land at `/www/luci-static/resources/amnezia/`. All four
+delivery surfaces updated: `dev/sync-to-packages.sh`,
+`openwrt/install-luci-app-amnezia.sh`, `install.sh`,
+`dev/deploy-openwrt-safe.sh`.
+
+**New test gate:** `test/lib/luci-harness.js` — stubs LuCI globals,
+walks the full require graph, executes every `render()` + `main.render()`,
+asserts no action panel carries `open`, and verifies all `refresh()`
+calls resolve under a failing-fs stub. Run by `test/unit/luci-js.bats`.
+
+ACL, UCI, and all backend sh scripts are unchanged.
+
+---
+
 ## 0.3.0 — 2026-06-22
 
 ### Auto-learning self-learning bypass

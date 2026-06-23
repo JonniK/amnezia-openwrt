@@ -121,9 +121,11 @@ mkdir -p /tmp/nftables.d
 
 # LuCI app tree (nested subdirs).
 mkdir -p /tmp/luci-app-amnezia/menu /tmp/luci-app-amnezia/acl /tmp/luci-app-amnezia/view
+mkdir -p /tmp/luci-app-amnezia/amnezia
 cp "$SRC/luci-app-amnezia/menu/luci-app-amnezia.json" /tmp/luci-app-amnezia/menu/
 cp "$SRC/luci-app-amnezia/acl/luci-app-amnezia.json"  /tmp/luci-app-amnezia/acl/
 cp "$SRC/luci-app-amnezia/view/main.js"               /tmp/luci-app-amnezia/view/
+cp -r "$SRC/luci-app-amnezia/amnezia/." /tmp/luci-app-amnezia/amnezia/
 
 # AWG config -> what install-amnezia-pbr.sh reads.
 cp "$AWG_CONF" /tmp/awg-setup.conf

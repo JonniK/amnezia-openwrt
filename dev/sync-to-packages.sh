@@ -35,7 +35,8 @@ mkdir -p \
 	"$PBR_PKG/etc/uci-defaults" \
 	"$LUCI_PKG/usr/share/luci/menu.d" \
 	"$LUCI_PKG/usr/share/rpcd/acl.d" \
-	"$LUCI_PKG/www/luci-static/resources/view/amnezia"
+	"$LUCI_PKG/www/luci-static/resources/view/amnezia" \
+	"$LUCI_PKG/www/luci-static/resources/amnezia/section"
 
 # -- amnezia-pbr -------------------------------------------------------------
 # Runtime CLI wrappers go to /usr/bin/ (no .sh -- OpenWrt convention).
@@ -161,6 +162,11 @@ cp "$SRC/luci-app-amnezia/menu/luci-app-amnezia.json" \
    "$LUCI_PKG/usr/share/luci/menu.d/luci-app-amnezia.json"
 cp "$SRC/luci-app-amnezia/acl/luci-app-amnezia.json" \
    "$LUCI_PKG/usr/share/rpcd/acl.d/luci-app-amnezia.json"
+# Copy amnezia resource modules (util.js + section/*.js) before main.js so
+# on-device require() resolves modules before the entry point is loaded.
+cp -r "$SRC/luci-app-amnezia/amnezia/." \
+   "$LUCI_PKG/www/luci-static/resources/amnezia/"
+find "$LUCI_PKG/www/luci-static/resources/amnezia" -type f -exec chmod 0644 {} +
 cp "$SRC/luci-app-amnezia/view/main.js" \
    "$LUCI_PKG/www/luci-static/resources/view/amnezia/main.js"
 cp "$SRC/luci-app-amnezia/view/decode-vpn.mjs" \

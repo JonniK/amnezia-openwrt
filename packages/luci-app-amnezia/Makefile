@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-amnezia
 PKG_VERSION:=0.2.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_MAINTAINER:=JonniK <esmirnov@socialprofiler.com>
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE
@@ -14,7 +14,7 @@ define Package/luci-app-amnezia
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=LuCI app for amnezia-pbr (AmneziaWG + PBR + zapret panel)
+  TITLE:=LuCI app for amnezia-pbr (AmneziaWG failover + tunnel mgmt + DoT + autolearn)
   URL:=https://github.com/JonniK/amnezia-openwrt
   PKGARCH:=all
   DEPENDS:= \
@@ -25,12 +25,15 @@ endef
 
 define Package/luci-app-amnezia/description
  LuCI panel for managing the amnezia-pbr installation:
-   - Tunnel toggle and status (uptime, peer endpoint, raw state JSON)
-   - PBR health + Reload button when nft compile fails
-   - Weekly RU CIDR refresh stamp
+   - Failover tunnel table: status, uptime, peer endpoint, set-mode/set-sticky
+   - Add / remove AmneziaWG tunnels (paste .conf or vpn:// link)
+   - Routing mode toggle (tunnel-default / direct-default) + allowlist sources
+   - Manual force-tunnel list editor + RU CIDR refresh stamp
    - Domain probe (direct_ok / direct_geoblocked / direct_dpi_blocked / direct_unreachable)
    - Verify list (run probe across N domains in one go)
    - Blockcheck runner with live log and apply/revert of nfqws strategies
+   - Encrypted DNS toggle (DoT/DoH via stubby + https-dns-proxy, opt-in)
+   - Auto-learning bypass: harvest visited domains, probe, auto-add to force list
  Reachable at Network -> Amnezia.
 endef
 
