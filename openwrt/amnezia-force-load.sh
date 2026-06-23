@@ -28,6 +28,10 @@ AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
 # is set; all files in that dir are picked up automatically.
 AMZ_DNSMASQ_CONFDIR="${AMZ_DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
 SET_FORCE4=amnezia_force4
+# Vetoed domains (autolearn). Applied as a guarded, suffix-aware GLOBAL
+# exclusion over the merged domain set so a veto is authoritative across all
+# sources. Overridable for tests.
+AMZ_DENY_LIST="${AMZ_DENY_LIST:-/etc/amnezia/autolearn/deny.list}"
 
 # Capture save-manual arguments before entering the subshell.
 _save_manual=0
@@ -135,6 +139,21 @@ fi
   if command -v sort >/dev/null 2>&1; then
     _s=$(sort -u "$_tmp_ips"); printf '%s\n' "$_s" > "$_tmp_ips"
     _s=$(sort -u "$_tmp_domains"); printf '%s\n' "$_s" > "$_tmp_domains"
+  fi
+
+  # Guarded suffix-aware deny filter. Only runs when the file is non-empty and
+  # readable, so a missing/empty/unreadable deny.list can NEVER blank force4.
+  if [ -s "$AMZ_DENY_LIST" ]; then
+    _tmp_dom_kept=$(mktemp "$FORCE_DIR/force.d/.amz-dom-kept.XXXXXX" 2>/dev/null \
+      || echo "$FORCE_DIR/force.d/amz-dom-kept.$$")
+    awk -v denyfile="$AMZ_DENY_LIST" '
+      BEGIN { while ((getline d < denyfile) > 0) { gsub(/[ \t\r]/,"",d); if (d!="") deny[d]=1 } }
+      { dom=$0; gsub(/[ \t\r]/,"",dom); if (dom=="") next
+        if (dom in deny) next
+        drop=0; s=dom
+        while ((i=index(s,"."))>0) { s=substr(s,i+1); if (s in deny) { drop=1; break } }
+        if (!drop) print $0 }
+    ' "$_tmp_domains" > "$_tmp_dom_kept" && mv "$_tmp_dom_kept" "$_tmp_domains"
   fi
 
   # --- H2: compute domain hash BEFORE any dhcp/dnsmasq work ---

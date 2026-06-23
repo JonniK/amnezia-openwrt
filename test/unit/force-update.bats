@@ -5,6 +5,9 @@ setup() {
   export FORCE_DIR="$BATS_TEST_TMPDIR/amnezia"; mkdir -p "$FORCE_DIR/force.d"
   export UCI_FAKE_SOURCES="itdoginfo_inside:1 itdoginfo_services:1 antifilter:0"
   export AMNEZIA_FORCE_LOAD="amnezia-force-load"   # PATH shim from P0 logs to $STUB_LOG
+  # A tunnel is up: amz_tunnel_dev() resolves awg1, so fetches egress the tunnel
+  # (router-origin traffic is otherwise direct/WAN and RKN-throttled).
+  export AMZ_FAKE_TUNNEL_DEV="awg1"
 }
 
 @test "update fetches only enabled sources" {
@@ -14,6 +17,23 @@ setup() {
   # uci calls for antifilter.enabled ARE logged (to determine it is disabled) — only
   # fetch attempts must be absent.
   run grep -q 'wget.*antifilter\|curl.*antifilter' "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "fetch is bound to the active tunnel device (router-origin must be tunneled)" {
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # The tunneled curl path binds to the tunnel egress device via --interface.
+  grep -q -- '--interface if!awg1' "$STUB_LOG" \
+    || { echo "fetch did not bind to tunnel device awg1"; cat "$STUB_LOG"; false; }
+}
+
+@test "no tunnel up: fetch falls back to direct egress (does not error)" {
+  # No tunnel device resolvable -> amz_tunnel_dev() empty -> direct fallback.
+  unset AMZ_FAKE_TUNNEL_DEV
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run grep -q -- '--interface' "$STUB_LOG"; [ "$status" -ne 0 ]   # no bind attempted
+  grep -q 'itdoginfo_inside' "$STUB_LOG"                          # but a fetch still happened
 }
 
 @test "a failed fetch keeps the previous cache and marks status failed" {

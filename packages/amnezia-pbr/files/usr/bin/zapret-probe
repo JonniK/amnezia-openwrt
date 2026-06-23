@@ -45,6 +45,40 @@ URL="https://$domain/"
 CT=5     # connect timeout (seconds)
 MAX=10   # total timeout
 
+# Optional 2nd arg: a pinned IPv4 to fix resolution (autolearn SSRF guard).
+# When present, curl resolves <domain> to exactly this IP and follows NO
+# redirects (a block manifests at the handshake / first response).
+pinned_ip=${2:-}
+RESOLVE_OPTS=""
+# REDIR_OPTS carries the redirect policy. The unpinned (existing UI) path MUST
+# stay byte-equivalent to the original `-sL` — keep BOTH -s and -L. The pinned
+# path keeps -s but forbids redirects.
+REDIR_OPTS="-sL"
+if [ -n "$pinned_ip" ]; then
+  case "$pinned_ip" in
+    *.*.*.*) : ;;
+    *) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;;
+  esac
+  case "$pinned_ip" in *[!0-9.]*) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;; esac
+  # SSRF guard: reject non-public (reserved/loopback/private/multicast) ranges.
+  # Mirrors the al_ip_is_public() logic in amnezia-autolearn-lib.sh.
+  _o1="${pinned_ip%%.*}"; _rest="${pinned_ip#*.}"; _o2="${_rest%%.*}"
+  _reject=0
+  case "$_o1" in
+    0|10|127) _reject=1 ;;
+    100) case "$_o2" in 6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7]) _reject=1 ;; esac ;;
+    169) [ "$_o2" = 254 ] && _reject=1 ;;
+    172) case "$_o2" in 1[6-9]|2[0-9]|3[01]) _reject=1 ;; esac ;;
+    192) [ "$_o2" = 168 ] && _reject=1 ;;
+    22[4-9]|23[0-9]|24[0-9]|25[0-5]) _reject=1 ;;  # 224-255 multicast/reserved
+  esac
+  if [ "$_reject" = 1 ]; then
+    echo '{"verdict":"error","reason":"pinned ip not public"}'; exit 2
+  fi
+  RESOLVE_OPTS="--resolve $domain:443:$pinned_ip --resolve $domain:80:$pinned_ip"
+  REDIR_OPTS="-s --max-redirs 0"
+fi
+
 json_escape() {
 	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr -d '\n\r\t'
 }
@@ -53,9 +87,9 @@ json_escape() {
 # We bind to the wan interface explicitly so PBR can't redirect us via AWG
 # even if local-origin routing rules ever change.
 HDR_FILE=/tmp/zapret-probe-hdr.$$
-out=$(curl --interface wan \
+out=$(curl --interface wan $RESOLVE_OPTS \
 	--connect-timeout "$CT" --max-time "$MAX" \
-	-sL -D "$HDR_FILE" -o /dev/null \
+	$REDIR_OPTS -D "$HDR_FILE" -o /dev/null \
 	-w '%{http_code}\t%{time_total}\t%{num_redirects}\n' \
 	"$URL" 2>&1)
 status=$(printf '%s' "$out" | awk -F'\t' '{print $1}')
@@ -101,9 +135,9 @@ fi
 body_signal=""
 case "$status" in
 	403|451|418|429|503)
-		body=$(curl --interface wan \
+		body=$(curl --interface wan $RESOLVE_OPTS \
 			--connect-timeout "$CT" --max-time "$MAX" \
-			-sL "$URL" 2>/dev/null | head -c 16384 | tr '[:upper:]' '[:lower:]')
+			$REDIR_OPTS "$URL" 2>/dev/null | head -c 16384 | tr '[:upper:]' '[:lower:]')
 		# Common phrases used by CDN / region-block / VPN-detect pages.
 		# CF "Access denied", OpenAI "Country/region not supported", "VPN".
 		# Tight phrases only -- a bare "vpn" substring would false-positive
