@@ -119,10 +119,11 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 
 # ── Phase 8 additions (autolearn) ───────────────────────────────────────────
 
-@test "main.js wires the autolearn toggle and list" {
-  grep -q 'autolearn' "$F"
-  grep -q 'amnezia-autolearn-ctl' "$F"
-  grep -q 'set-enabled' "$F"
+@test "autolearn.js wires the autolearn toggle and list" {
+  A="$AMZ/amnezia/section/autolearn.js"
+  grep -q 'autolearn' "$A"
+  grep -q 'amnezia-autolearn-ctl' "$A"
+  grep -q 'set-enabled' "$A"
 }
 @test "acl grants exec on amnezia-autolearn-ctl" {
   ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
@@ -184,4 +185,11 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "zapret.js owns probe/verify/blockcheck/apply + zapret in-flight state" {
   Z="$AMZ/amnezia/section/zapret.js"; node --check "$Z"
   for s in handleProbe handleVerify handleBlockcheckRun handleApply handleRevert applyInFlight candidatesSig paintApply; do grep -q "$s" "$Z"; done
+}
+
+# ── Phase 5: autolearn.js ─────────────────────────────────────────────────────
+
+@test "autolearn.js wires toggle/list + row handlers" {
+  A="$AMZ/amnezia/section/autolearn.js"; node --check "$A"
+  for s in amnezia-autolearn-ctl set-enabled handleAutolearnVeto handleAutolearnPromote handleAutolearnPurge; do grep -q "$s" "$A"; done
 }
