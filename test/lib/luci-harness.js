@@ -4,7 +4,16 @@
 const fs = require('fs'), path = require('path');
 const ROOT = path.resolve(__dirname, '../../openwrt/luci-app-amnezia');
 function E(tag, attrs, children){ if (attrs && (Array.isArray(attrs)||typeof attrs!=='object')){children=attrs;attrs={};}
-  return { tag, attrs: attrs||{}, children: [].concat(children||[]).filter(x=>x!=null) }; }
+  var node = { tag, attrs: attrs||{}, children: [].concat(children||[]).filter(x=>x!=null) };
+  node.appendChild = function(c){ if(c) this.children.push(c); return c; };
+  node.createTextNode = function(t){ return {tag:'#text',text:t}; };
+  node.__defineGetter__('innerHTML',function(){return '';});
+  node.__defineSetter__('innerHTML',function(){this.children=[];});
+  node.querySelectorAll = function(){ return []; };
+  node.contains = function(){ return false; };
+  node.scrollTop = 0;
+  node.__defineGetter__('scrollHeight',function(){return 0;});
+  return node; }
 const _ = s => s;
 const L = { bind:(fn,ctx)=>fn.bind(ctx), resolveDefault:(_p,d)=>Promise.resolve(d) };
 const ui = { createHandlerFn:()=>function(){return Promise.resolve();}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
@@ -27,6 +36,7 @@ d.dns       = load('amnezia/section/dns.js', d);
 d.autolearn = load('amnezia/section/autolearn.js', d);
 d.failover  = load('amnezia/section/failover.js', d);
 const main  = load('view/main.js', d);
+if (main && typeof main.render === 'function') { try { main.render(main, DATA); } catch(e){ console.error('main.render threw: '+e.message); process.exit(1);} }
 // Execute every render() that exists → throws on undefined-symbol refs.
 const panels = [];
 for (const k of ['failover','routing','zapret','dns','autolearn']) {

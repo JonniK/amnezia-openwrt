@@ -51,24 +51,28 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "amnezia-tunnel-ctl.*remove\|remove.*amnezia-tunnel-ctl" "$F"
 }
 
-@test "main.js has handleRoutingMode calling set-routing-mode" {
-  grep -q "handleRoutingMode" "$F"
-  grep -q "set-routing-mode" "$F"
+@test "routing module has handleRoutingMode calling set-routing-mode" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleRoutingMode" "$R"
+  grep -q "set-routing-mode" "$R"
 }
 
-@test "main.js has handleSourceToggle calling set-source" {
-  grep -q "handleSourceToggle" "$F"
-  grep -q "set-source" "$F"
+@test "routing module has handleSourceToggle calling set-source" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleSourceToggle" "$R"
+  grep -q "set-source" "$R"
 }
 
-@test "main.js has handleForceUpdate calling amnezia-force-update" {
-  grep -q "handleForceUpdate" "$F"
-  grep -q "amnezia-force-update" "$F"
+@test "routing module has handleForceUpdate calling amnezia-force-update" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleForceUpdate" "$R"
+  grep -q "amnezia-force-update" "$R"
 }
 
-@test "main.js has handleSaveManual calling amnezia-force-load save-manual" {
-  grep -q "handleSaveManual" "$F"
-  grep -q "save-manual" "$F"
+@test "routing module has handleSaveManual calling amnezia-force-load save-manual" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleSaveManual" "$R"
+  grep -q "save-manual" "$R"
 }
 
 @test "main.js reads force-tunnel.list and force-update.json in load()" {
@@ -90,20 +94,23 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "add-tunnel-btn" "$F"
 }
 
-@test "main.js routing-mode select has tunnel-default and direct-default options" {
-  grep -q "routing-mode-select" "$F"
-  grep -q "tunnel-default" "$F"
-  grep -q "direct-default" "$F"
+@test "routing module has routing-mode select with tunnel-default and direct-default options" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "routing-mode-select" "$R"
+  grep -q "tunnel-default" "$R"
+  grep -q "direct-default" "$R"
 }
 
-@test "main.js manual-list section has textarea prefilled with forceTunnelList" {
-  grep -q "manual-list-ta" "$F"
-  grep -q "forceTunnelList" "$F"
+@test "routing module has manual-list textarea prefilled with forceTunnelList" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "manual-list-ta" "$R"
+  grep -q "forceTunnelList" "$R"
 }
 
-@test "main.js paintForceStamp reads force-update.json stamp" {
-  grep -q "paintForceStamp" "$F"
-  grep -q "force-when" "$F"
+@test "routing module has paintForceStamp that reads force-update.json stamp" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "paintForceStamp" "$R"
+  grep -q "force-when" "$R"
 }
 
 @test "main.js failover-tunnel-table anchor is preserved (poll self-unregister)" {
@@ -152,4 +159,11 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "render harness loads every module + executes render with no ReferenceError" {
   run node "$HARNESS_DIR/../test/lib/luci-harness.js"
   [ "$status" -eq 0 ]
+}
+
+# ── Phase 2: routing.js ──────────────────────────────────────────────────────
+
+@test "routing.js owns routing/allowlist handlers + applyFailoverState" {
+  R="$AMZ/amnezia/section/routing.js"; node --check "$R"
+  for s in handleRoutingMode handleSourceToggle handleForceUpdate handleSaveManual handleRuUpdate applyFailoverState routing-mode-select; do grep -q "$s" "$R"; done
 }
