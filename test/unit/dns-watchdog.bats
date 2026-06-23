@@ -120,6 +120,22 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   [ "$_dnsmasq_count" -ge 2 ]
 }
 
+@test "exit-plain reload fail: tier stays plaintext, no dot commit (HIGH)" {
+  # Bug: _exit_plain did dns_dnsmasq_reload || true then _set_tier unconditionally.
+  # A reload failure left plaintext servers LIVE in dnsmasq but committed the tier
+  # as dot/doh — torn state: lying status + no watchdog retry.
+  # Fix: gate _set_tier on reload success; on failure return 1 and stay plaintext.
+  # Setup: tier=plaintext, dwell elapsed (ts=1000, now=99999), M=1 (exit fires),
+  # but AMNEZIA_DNSMASQ_FAIL=1 so the reload inside _exit_plain fails.
+  # Assert: dns_active_tier=dot is NOT committed (tier stays plaintext).
+  export UCI_GET_amnezia_config_dns_active_tier=plaintext
+  export UCI_GET_amnezia_config_dns_plain_ts=1000
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_DNS_WD_M=1 AMNEZIA_NOW=99999 AMNEZIA_VERIFY_DOT=pass AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNSMASQ_FAIL=1 sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # Tier must NOT be committed as dot — plaintext stays
+  run grep -q "set amnezia.config.dns_active_tier=dot" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
 @test "status emits JSON and never calls apply" {
   run sh -c "AMNEZIA_VERIFY_DOT=pass sh '$CTL' status"
   [ "$status" -eq 0 ]
