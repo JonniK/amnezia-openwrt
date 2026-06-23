@@ -253,3 +253,10 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   [ -f "$PKG/section/dns.js" ]
   [ -f "$PKG/section/autolearn.js" ]
 }
+
+@test "no dotted require without 'as' alias (LuCI binding footgun)" {
+  # LuCI does NOT auto-bind a namespaced require; `'require a.b.c'` needs ` as <alias>`
+  # or the variable is undefined at runtime → ReferenceError → blank panel.
+  run node -e 'const h=require("./test/lib/luci-harness.js"); const b=h.lintRequires(); if(b.length){console.error(b.join("\n"));process.exit(1)}'
+  [ "$status" -eq 0 ]
+}

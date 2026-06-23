@@ -2,8 +2,8 @@
 'require baseclass';
 'require fs';
 'require ui';
-'require amnezia.util';
-'require amnezia.section.routing';
+'require amnezia.util as util';
+'require amnezia.section.routing as routing';
 
 // ---- file-scope private state (moved verbatim from main.js) ----
 var addTunnelInFlight = false;

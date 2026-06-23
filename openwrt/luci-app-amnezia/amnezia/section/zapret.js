@@ -2,7 +2,7 @@
 'require baseclass';
 'require fs';
 'require ui';
-'require amnezia.util';
+'require amnezia.util as util';
 
 // ---- file-scope private state (moved verbatim from main.js) ----
 

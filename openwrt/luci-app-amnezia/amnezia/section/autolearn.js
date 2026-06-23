@@ -2,7 +2,7 @@
 'require baseclass';
 'require fs';
 'require ui';
-'require amnezia.util';
+'require amnezia.util as util';
 
 // Guards for autolearn operations.
 var autolearnToggleInFlight = false;
