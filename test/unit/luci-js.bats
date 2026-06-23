@@ -129,24 +129,35 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q 'amnezia-autolearn-ctl' "$ACL"
 }
 
-# ── DoT additions ────────────────────────────────────────────────────────────
-@test "main.js wires the DoT toggle + provider dropdown + plaintext warning" {
-  JS="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
-  grep -q "amnezia-dns-ctl" "$JS"
-  grep -Eq "'enable'|\"enable\"" "$JS"
-  grep -q "set-provider" "$JS"
-  grep -q "active_tier" "$JS"
-  grep -q "plaintext" "$JS"
+# ── Phase 4: dns.js ──────────────────────────────────────────────────────────
+
+@test "dns.js owns DoT toggle/provider + focus-guard, no 'custom' provider" {
+  D="$AMZ/amnezia/section/dns.js"; node --check "$D"
+  grep -q "DNS_PROVIDERS" "$D"                        # positive anchor
+  grep -q "box.contains(document.activeElement)" "$D" # focus-guard
+  grep -q "amnezia-dns-ctl" "$D"
+  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$D"  # negative, anchored
+}
+
+@test "dns.js wires the DoT toggle + provider dropdown + plaintext warning" {
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "amnezia-dns-ctl" "$D"
+  grep -Eq "'enable'|\"enable\"" "$D"
+  grep -q "set-provider" "$D"
+  grep -q "active_tier" "$D"
+  grep -q "plaintext" "$D"
 }
 
 @test "renderDnsRow has a focus guard (M8: no poll-clobber on active DoT controls)" {
   # Guard must be present: box.contains(document.activeElement) inside renderDnsRow.
-  grep -q "box.contains(document.activeElement)" "$F"
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "box.contains(document.activeElement)" "$D"
 }
 
 @test "DNS_PROVIDERS does not include 'custom' (M7: dead-end provider removed)" {
   # 'custom' made dns_profile fail with no recovery path; removed from the dropdown.
-  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$F"
+  D="$AMZ/amnezia/section/dns.js"
+  ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$D"
 }
 
 # ── Phase 1: util.js + harness ───────────────────────────────────────────────
