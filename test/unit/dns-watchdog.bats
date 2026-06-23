@@ -144,28 +144,46 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
 }
 
 @test "structural: _enter_plain commits tier INSIDE the lock (before dnsmasq_unlock)" {
-  # Regression guard: if _set_tier plaintext is moved back outside the lock,
-  # a cross-process interleave can leave UCI saying plaintext while dnsmasq has
-  # no plaintext server — DNS hard-down.  Assert the line number of the
-  # '_set_tier plaintext' call inside _enter_plain is less than the line number
-  # of the NEXT 'dnsmasq_unlock' call that follows it in the function.
+  # Regression guard: if _set_tier plaintext is moved outside the lock (e.g. after
+  # the success-branch dnsmasq_unlock), a cross-process interleave can leave UCI
+  # saying plaintext while dnsmasq has no plaintext server — DNS hard-down.
+  #
+  # Robust approach: extract the _enter_plain body (from its opening line to the
+  # closing '^}') and work only within that body. Assert that the FIRST
+  # dnsmasq_unlock in the body comes AFTER _set_tier plaintext.
+  # This catches the mutation "swap _set_tier and dnsmasq_unlock in success branch"
+  # even when a second dnsmasq_unlock exists in the failure branch further down.
   _src="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
-  # Line number of _set_tier plaintext inside _enter_plain
-  _set_line=$(grep -n '_set_tier plaintext' "$_src" | head -1 | cut -d: -f1)
-  # Line number of the dnsmasq_unlock that follows _set_tier plaintext
-  _unlock_line=$(awk "NR > $_set_line && /dnsmasq_unlock/{print NR; exit}" "$_src")
-  [ -n "$_set_line" ] && [ -n "$_unlock_line" ]
-  [ "$_set_line" -lt "$_unlock_line" ]
+  # Start line of the function body (line after '^_enter_plain() {')
+  _func_start=$(grep -n '^_enter_plain()' "$_src" | head -1 | cut -d: -f1)
+  # Extract the function body (from func_start+1 to closing '^}')
+  _body=$(awk "NR > $_func_start { if (/^\}/) exit; print NR, \$0 }" "$_src")
+  # Line number of _set_tier plaintext within the body (absolute file line)
+  _set_line=$(echo "$_body" | awk '/_set_tier plaintext/{print $1; exit}')
+  # Line number of the FIRST dnsmasq_unlock within the body (absolute file line)
+  _first_unlock=$(echo "$_body" | awk '/dnsmasq_unlock/{print $1; exit}')
+  [ -n "$_set_line" ] || { echo "FAIL: _set_tier plaintext not found in _enter_plain body" >&2; false; }
+  [ -n "$_first_unlock" ] || { echo "FAIL: dnsmasq_unlock not found in _enter_plain body" >&2; false; }
+  # _set_tier must come BEFORE the first dnsmasq_unlock in the function
+  [ "$_set_line" -lt "$_first_unlock" ]
 }
 
 @test "structural: _exit_plain commits tier INSIDE the lock (before dnsmasq_unlock)" {
   # Regression guard: the tier-restore in _exit_plain must be inside the fd-8
-  # lock, so apply's plaintext-gate reads a consistent state.
+  # lock (committed before success-branch dnsmasq_unlock), so apply's
+  # plaintext-gate reads a consistent state.
+  #
+  # Robust approach: extract the _exit_plain body and assert _set_tier comes
+  # before the FIRST dnsmasq_unlock in the body. The function has two unlock
+  # calls (success + failure branch); using "first unlock in body" catches the
+  # mutation even when a second unlock exists further down.
   _src="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
-  # _exit_plain starts at the line with '_exit_plain()'; find _set_tier inside it
-  _func_line=$(grep -n '^_exit_plain()' "$_src" | head -1 | cut -d: -f1)
-  _set_line=$(awk "NR > $_func_line && /_set_tier/{print NR; exit}" "$_src")
-  _unlock_line=$(awk "NR > $_set_line && /dnsmasq_unlock/{print NR; exit}" "$_src")
-  [ -n "$_set_line" ] && [ -n "$_unlock_line" ]
-  [ "$_set_line" -lt "$_unlock_line" ]
+  _func_start=$(grep -n '^_exit_plain()' "$_src" | head -1 | cut -d: -f1)
+  _body=$(awk "NR > $_func_start { if (/^\}/) exit; print NR, \$0 }" "$_src")
+  _set_line=$(echo "$_body" | awk '/_set_tier/{print $1; exit}')
+  _first_unlock=$(echo "$_body" | awk '/dnsmasq_unlock/{print $1; exit}')
+  [ -n "$_set_line" ] || { echo "FAIL: _set_tier not found in _exit_plain body" >&2; false; }
+  [ -n "$_first_unlock" ] || { echo "FAIL: dnsmasq_unlock not found in _exit_plain body" >&2; false; }
+  # _set_tier must come BEFORE the first dnsmasq_unlock in the function
+  [ "$_set_line" -lt "$_first_unlock" ]
 }

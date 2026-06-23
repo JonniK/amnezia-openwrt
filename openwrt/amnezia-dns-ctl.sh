@@ -144,14 +144,14 @@ cmd_watchdog() {
     if _probe_listener "127.0.0.1#$DOT_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
-        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain dot; then _tier=dot; fi; fi
+        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain dot; then _tier="dot"; fi; fi
       else
         [ "$_tier" = dot ] || { _tier="dot"; _set_tier dot; }
       fi
     elif _probe_listener "127.0.0.1#$DOH_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
-        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain doh; then _tier=doh; fi; fi
+        if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain doh; then _tier="doh"; fi; fi
       else
         [ "$_tier" = doh ] || { _tier="doh"; _set_tier doh; }
       fi
