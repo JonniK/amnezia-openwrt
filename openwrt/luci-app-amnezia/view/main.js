@@ -3,6 +3,7 @@
 'require fs';
 'require ui';
 'require poll';
+'require amnezia.util';
 
 // Module-level handle for the poll callback. LuCI has no teardown hook for
 // views, so the poller self-unregisters when its DOM anchor disappears
@@ -57,40 +58,6 @@ function candidatesSignature(cands) {
 	return parts.join('\x1e');
 }
 
-// Promise-returning confirm modal. confirm() is synchronous and would freeze
-// the 5s poll loop until the user clicks; this drops the user back into the
-// event loop while waiting. The Promise is guaranteed to settle even if the
-// modal is dismissed via Escape/backdrop -- otherwise ui.createHandlerFn
-// would keep the triggering button disabled forever.
-function uiConfirm(message) {
-	return new Promise(function(resolve) {
-		var done = false;
-		var finish = function(v) {
-			if (done) return;
-			done = true;
-			document.removeEventListener('keydown', onKey);
-			clearTimeout(safetyTimer);
-			try { ui.hideModal(); } catch (e) { /* already hidden */ }
-			resolve(v);
-		};
-		var onKey = function(e) {
-			if (e.key === 'Escape' || e.keyCode === 27) finish(false);
-		};
-		// Last-resort fallback: if the modal vanishes via a path we don't
-		// observe (e.g. user navigates and re-renders), give up after 60s.
-		var safetyTimer = setTimeout(function() { finish(false); }, 60000);
-		document.addEventListener('keydown', onKey);
-
-		ui.showModal(_('Confirm'), [
-			E('p', { 'style': 'white-space:pre-wrap;' }, message),
-			E('div', { 'class': 'right' }, [
-				E('button', { 'class': 'btn', 'click': function() { finish(false); } }, _('Cancel')),
-				' ',
-				E('button', { 'class': 'btn cbi-button-positive', 'click': function() { finish(true); } }, _('Confirm'))
-			])
-		]);
-	});
-}
 
 function parseRuStamp(text) {
 	if (!text) return null;
@@ -116,19 +83,6 @@ function parseVerify(text) {
 	} catch (e) { return null; }
 }
 
-// Same vocabulary as the inline switch in handleProbe -- kept as a function so
-// the multi-domain verify table doesn't drift from the single-probe colouring.
-function verdictColor(v) {
-	switch (v) {
-		case 'direct_ok':           return '#3c763d';
-		case 'direct_geoblocked':   return '#a94442';
-		case 'direct_dpi_blocked':  return '#f0ad4e';
-		case 'direct_blocked':      return '#a94442';
-		case 'direct_unreachable':  return '#888';
-		case 'error':               return '#a94442';
-		default:                    return '#666';
-	}
-}
 
 // Split the seed-must-tunnel.list file (one domain per line, # comments) into
 // an array of strings.
@@ -167,37 +121,6 @@ function parseCandidates(text) {
 	return out;
 }
 
-function fmtDur(sec) {
-	if (!sec || sec < 0) return '0s';
-	var m = Math.floor(sec / 60);
-	var s = sec % 60;
-	if (m >= 60) {
-		var h = Math.floor(m / 60); m = m % 60;
-		return h + 'h ' + m + 'm';
-	}
-	if (m > 0) return m + 'm ' + s + 's';
-	return s + 's';
-}
-
-function fmtUptime(sec) {
-	if (sec === null || sec === undefined) return '';
-	var d = Math.floor(sec / 86400);
-	var h = Math.floor((sec % 86400) / 3600);
-	var m = Math.floor((sec % 3600) / 60);
-	if (d > 0) return d + 'd ' + h + 'h';
-	if (h > 0) return h + 'h ' + m + 'm';
-	return m + 'm';
-}
-
-function fmtAge(ts) {
-	if (!ts) return 'never';
-	var now = Math.floor(Date.now() / 1000);
-	var age = now - ts;
-	if (age < 60) return age + 's ago';
-	if (age < 3600) return Math.floor(age / 60) + 'm ago';
-	if (age < 86400) return Math.floor(age / 3600) + 'h ago';
-	return Math.floor(age / 86400) + 'd ago';
-}
 
 function paintZapret(s, errMsg) {
 	var dot = document.getElementById('zapret-dot');
@@ -283,8 +206,8 @@ function paintBlockcheck(s) {
 		stateEl.style.color = colour;
 	}
 	if (elapsedEl) {
-		if (running) elapsedEl.textContent = _('elapsed: ') + fmtDur(elapsed);
-		else if (s.finished_ts) elapsedEl.textContent = _('took: ') + fmtDur(elapsed);
+		if (running) elapsedEl.textContent = _('elapsed: ') + util.fmtDur(elapsed);
+		else if (s.finished_ts) elapsedEl.textContent = _('took: ') + util.fmtDur(elapsed);
 		else elapsedEl.textContent = '';
 	}
 	if (runBtn) {
@@ -540,7 +463,7 @@ function paintRuStamp(stamp) {
 		if (status) { status.textContent = ''; status.style.color = ''; }
 		return;
 	}
-	if (when) when.textContent = fmtAge(stamp.ts) + (stamp.iso ? ' (' + stamp.iso + ')' : '');
+	if (when) when.textContent = util.fmtAge(stamp.ts) + (stamp.iso ? ' (' + stamp.iso + ')' : '');
 	if (count) count.textContent = stamp.count ? (stamp.count + ' CIDRs') : '';
 	if (src) src.textContent = stamp.source ? ('source: ' + stamp.source) : '';
 	if (status) {
@@ -689,7 +612,7 @@ function paintForceStamp(stamp) {
 		return;
 	}
 
-	if (whenEl) whenEl.textContent = fmtAge(stamp.ts);
+	if (whenEl) whenEl.textContent = util.fmtAge(stamp.ts);
 
 	// Aggregate per-source counts and detect any failures.
 	var totalCount = 0;
@@ -907,7 +830,7 @@ return view.extend({
 			ui.addNotification(null, E('p', {}, _('A purge is already in progress')), 'info');
 			return Promise.resolve();
 		}
-		return uiConfirm(_('Purge all auto-learned entries?\n\nThis empties the auto.list and clears the candidate store. The deny.list is NOT cleared — vetoed domains remain denied.')).then(L.bind(function(ok) {
+		return util.uiConfirm(_('Purge all auto-learned entries?\n\nThis empties the auto.list and clears the candidate store. The deny.list is NOT cleared — vetoed domains remain denied.')).then(L.bind(function(ok) {
 			if (!ok) return null;
 			autolearnPurgeInFlight = true;
 			var btn = document.getElementById('autolearn-purge-btn');
@@ -969,7 +892,7 @@ return view.extend({
 		var btnId = 'awg-remove-' + tunnelName;
 		var btn = document.getElementById(btnId);
 		if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Removing...'); }
-		return uiConfirm(msg).then(L.bind(function(ok) {
+		return util.uiConfirm(msg).then(L.bind(function(ok) {
 			if (!ok) {
 				removeTunnelInFlight = false;
 				if (btn) { delete btn.dataset.busy; btn.disabled = false; btn.textContent = _('Remove'); }
@@ -1030,7 +953,7 @@ return view.extend({
 					// Show the decoded preview and ask the user to confirm.
 					var previewMsg = _('Decoded vpn:// for slot ') + slotName + _(':\n\n') + decoded + _('\n\nProceed?');
 					addTunnelInFlight = true;
-					return uiConfirm(previewMsg).then(L.bind(function(ok) {
+					return util.uiConfirm(previewMsg).then(L.bind(function(ok) {
 						if (!ok) { addTunnelInFlight = false; return null; }
 						return this._doAddTunnel(slotName, decoded, label);
 					}, this));
@@ -1041,7 +964,7 @@ return view.extend({
 			var confirmMsg = _('Add tunnel ') + slotName + _(' with the pasted .conf?');
 			if (label) confirmMsg += _('\nLabel: ') + label;
 			addTunnelInFlight = true;
-			return uiConfirm(confirmMsg).then(L.bind(function(ok) {
+			return util.uiConfirm(confirmMsg).then(L.bind(function(ok) {
 				if (!ok) { addTunnelInFlight = false; return null; }
 				return this._doAddTunnel(slotName, raw, label);
 			}, this));
@@ -1090,7 +1013,7 @@ return view.extend({
 			? _('Switch to DIRECT-DEFAULT (allowlist) mode?\n\nOnly addresses in the force-tunnel list will use the tunnel. Everything else goes direct via WAN + zapret. Change takes effect immediately for new connections.')
 			: _('Switch to TUNNEL-DEFAULT mode?\n\nAll foreign traffic routes through the tunnel; RU addresses go direct. Change takes effect immediately for new connections.');
 		routingModeInFlight = true;
-		return uiConfirm(msg).then(L.bind(function(ok) {
+		return util.uiConfirm(msg).then(L.bind(function(ok) {
 			if (!ok) { routingModeInFlight = false; return null; }
 			if (sel) sel.disabled = true;
 			return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-routing-mode', newMode]).then(L.bind(function(res) {
@@ -1225,7 +1148,7 @@ return view.extend({
 				return;
 			}
 			if (resultEl) {
-				resultEl.style.color = verdictColor(parsed.verdict);
+				resultEl.style.color = util.verdictColor(parsed.verdict);
 				resultEl.innerHTML = '';
 				resultEl.appendChild(E('strong', {}, parsed.verdict));
 				resultEl.appendChild(document.createTextNode(' — ' + parsed.reason));
@@ -1314,7 +1237,7 @@ return view.extend({
 					var row = E('tr', {}, [
 						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;font-family:monospace;word-break:break-all;' },
 							r.domain || ''),
-						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;color:' + verdictColor(v) + ';font-weight:bold;' },
+						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;color:' + util.verdictColor(v) + ';font-weight:bold;' },
 							v),
 						E('td', { 'style': 'padding:3px 6px;border-bottom:1px solid #eee;color:#444;word-break:break-word;' },
 							r.reason || ''),
@@ -1438,7 +1361,7 @@ return view.extend({
 		// Lock the buttons BEFORE the confirm modal: a 5s poll firing while the
 		// user reads the dialog must not re-enable Apply for a second click.
 		applyInFlight = true;
-		return uiConfirm(msg + '\n\n' + composed).then(L.bind(function(ok) {
+		return util.uiConfirm(msg + '\n\n' + composed).then(L.bind(function(ok) {
 			if (!ok) { applyInFlight = false; return null; }
 			var btn = document.getElementById('apply-btn');
 			if (btn) { btn.disabled = true; btn.textContent = _('Applying...'); }
@@ -1459,7 +1382,7 @@ return view.extend({
 
 	handleRevert: function(ev) {
 		applyInFlight = true;
-		return uiConfirm(_('Revert NFQWS_OPT to the previous backup and restart zapret?')).then(L.bind(function(ok) {
+		return util.uiConfirm(_('Revert NFQWS_OPT to the previous backup and restart zapret?')).then(L.bind(function(ok) {
 			if (!ok) { applyInFlight = false; return null; }
 			var btn = document.getElementById('apply-revert-btn');
 			if (btn) { btn.disabled = true; }
@@ -1657,7 +1580,7 @@ return view.extend({
 		// force-update stamp baked into the initial render (mirrors paintForceStamp)
 		// so "Last update" shows on page load, not only after the first poll tick.
 		var forceStamp = parseRuStamp(data && data[9]);
-		var forceWhen = forceStamp ? fmtAge(forceStamp.ts) : _('never updated');
+		var forceWhen = forceStamp ? util.fmtAge(forceStamp.ts) : _('never updated');
 		var forceTotal = 0, forceFailed = false;
 		if (forceStamp && forceStamp.sources) {
 			var _fsn = Object.keys(forceStamp.sources);
@@ -1940,7 +1863,7 @@ return view.extend({
 					E('div', { 'class': 'cbi-value' }, [
 						E('label', { 'class': 'cbi-value-title' }, _('Last update')),
 						E('div', { 'class': 'cbi-value-field' }, [
-							E('strong', { 'id': 'awg-ru-when' }, stamp ? fmtAge(stamp.ts) : _('never updated')),
+							E('strong', { 'id': 'awg-ru-when' }, stamp ? util.fmtAge(stamp.ts) : _('never updated')),
 							E('span', { 'id': 'awg-ru-status', 'style': 'margin-left:12px;' }, stamp ? (stamp.status || '') : '')
 						])
 					]),

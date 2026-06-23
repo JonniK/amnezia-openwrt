@@ -1,6 +1,9 @@
 #!/usr/bin/env bats
 load '../lib/harness.bash'
 F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
+AMZ="$HARNESS_DIR/../openwrt/luci-app-amnezia"
+# ALLJS: every shipped JS file (view + modules). Negative guards run over this union.
+alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "main.js parses and references the failover state file + per-tunnel table" {
   node --check "$F"
   grep -q "amnezia-failover.json" "$F"
@@ -14,12 +17,8 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
   # The ctl helper is installed as amnezia-failover-ctl (see F3/ACL).
   grep -q "amnezia-failover-ctl" "$F"
 }
-@test "pbr panel is gone: no pbr-status or pbr-reload exec calls" {
-  # Issue #9: pbr binaries no longer exist; the panel must be fully removed.
-  ! grep -q "pbr-status" "$F"
-  ! grep -q "pbr-reload" "$F"
-  ! grep -q "pbr-reload-btn" "$F"
-  ! grep -q "handlePbrReload" "$F"
+@test "no pbr panel anywhere (Issue #9)" {
+  for f in $(alljs); do ! grep -qE "pbr-status|pbr-reload|handlePbrReload" "$f"; done
 }
 @test "failover tunnel panel is present: renderTunnelTable and failover-tunnel-table id" {
   grep -q "renderTunnelTable" "$F"
@@ -82,9 +81,8 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
   grep -q "handleTunnelRemove" "$F"
 }
 
-@test "main.js uses no fs.write() calls anywhere (argv-only channel)" {
-  # Match actual call sites (fs.write followed by opening paren), not comments.
-  ! grep -qE "fs\.write\s*\(" "$F"
+@test "no fs.write() in any module (argv-only channel)" {
+  for f in $(alljs); do ! grep -qE "fs\.write\s*\(" "$f"; done
 }
 
 @test "main.js add-tunnel section has textarea and Add tunnel button" {
@@ -142,4 +140,16 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
 @test "DNS_PROVIDERS does not include 'custom' (M7: dead-end provider removed)" {
   # 'custom' made dns_profile fail with no recovery path; removed from the dropdown.
   ! grep -qE "DNS_PROVIDERS\s*=\s*\[.*'custom'" "$F"
+}
+
+# ── Phase 1: util.js + harness ───────────────────────────────────────────────
+
+@test "util.js exists and exports the cross-cutting helpers" {
+  U="$AMZ/amnezia/util.js"
+  node --check "$U"
+  for fn in fmtDur fmtAge verdictColor uiConfirm; do grep -q "$fn" "$U"; done
+}
+@test "render harness loads every module + executes render with no ReferenceError" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
 }
