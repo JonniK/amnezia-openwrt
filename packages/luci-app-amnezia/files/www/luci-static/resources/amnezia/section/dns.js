@@ -55,6 +55,6 @@ return baseclass.extend({
 	},
 
 	refresh: function(view) {
-		return refreshDnsStatus();
+		return L.resolveDefault(refreshDnsStatus(), null);
 	}
 });
