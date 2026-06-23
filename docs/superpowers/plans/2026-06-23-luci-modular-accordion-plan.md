@@ -68,7 +68,47 @@ return baseclass.extend({
 });
 ```
 
-`util.js` is the same shape minus `handlers`/`render`/`refresh`: `return baseclass.extend({ fmtDur:…, fmtUptime:…, fmtAge:…, verdictColor:…, uiConfirm:… });` and `'require ui';` (uiConfirm builds a modal).
+`util.js` is the same shape minus `handlers`/`render`/`refresh`: `return baseclass.extend({ fmtDur:…, fmtAge:…, verdictColor:…, uiConfirm:… });` and `'require ui';` (uiConfirm builds a modal). **Drop `fmtUptime`** — it has zero call sites in the repo (dead code); do not move it, do not grep for it.
+
+### Data-bundle contract (load → render)
+
+`load()` (main.js:1624-1640) stays **unchanged**: it returns the same positional
+10-element array. The shell `render(data)` passes the **raw `data` array** to every
+`module.render(view, data)`. Each module parses **only its own indices** — the preamble
+parse lines (main.js:1648-1671) move into the owning module's `render`, NOT the shell:
+
+| Index | Source | Parser → owner |
+|---|---|---|
+| `data[0]` | ru-update.json | `parseRuStamp` → **routing** (RU stamp) |
+| `data[1]` | zapret-status | `parseZapret` → **zapret** |
+| `data[2]` | blockcheck.json | `parseBlockcheck` → **zapret** |
+| `data[3]` | blockcheck log | (raw `.stdout`) → **zapret** |
+| `data[4]` | zapret-apply state | `parseApplyState` → **zapret** |
+| `data[5]` | zapret-apply parse | `parseCandidates` → **zapret** (+ seeds `candidatesSig`) |
+| `data[6]` | seed-must-tunnel.list | `parseSeedList` → **zapret** (probe reference list) |
+| `data[7]` | amnezia-failover.json | `parseFailoverState` → **failover** |
+| `data[8]` | force-tunnel.list | (raw) → **routing** (manual-entries prefill) |
+| `data[9]` | force-update.json | `parseRuStamp` + the `forceStamp/forceWhen/forceTotal/forceFailed` block (1665-1671) → **routing** |
+| — | (none) | **dns** + **autolearn** read no load data — poll-only first paint (matches today: DoT row + autolearn table are painted by the first poll, not load; this is the intentional exception to "render does first paint inline"). |
+
+**Node order is preserved.** `render` composes the 5 module renders in their existing
+visual order; modules slot in place. Visual regrouping into accordion families happens
+only via the `<details>` wrappers (which each module emits from Phase 2 on) — never by
+reordering nodes.
+
+### Offline render harness (the gate `node --check`+grep cannot provide)
+
+`node --check` is syntax-only and `grep` is text-only — neither catches a missed `util.`
+prefix, a symbol left in the shell whose definition moved to a module, a broken
+cross-module reference, or a multi-line `'open'` attribute. Phase 1 creates
+`test/lib/luci-harness.js`: it stubs the LuCI globals + a **recording `E()`** (returns
+`{tag, attrs, children}`), emulates the `'require'` directives by passing already-loaded
+modules as named params, loads every module in dependency order (util → routing → zapret →
+dns → autolearn → failover → main.js), **calls each `module.render(viewStub, dataStub)`**
+(catching render-time `ReferenceError`s — the real blank-panel cause), and walks the
+returned tree so structural assertions (family `<details>` count, per-family `open` state,
+action panels never `open`) are exact, not grep-vacuous. Every phase runs it for the
+modules that exist so far.
 
 ---
 
@@ -80,20 +120,72 @@ return baseclass.extend({
 - Modify: `test/unit/luci-js.bats`
 
 **Interfaces:**
-- Produces: `util.fmtDur(sec)`, `util.fmtUptime(sec)`, `util.fmtAge(ts)`, `util.verdictColor(v)`, `util.uiConfirm(message)` — all moved verbatim from main.js (lines 65, 121, 170, 182, 192).
+- Produces: `util.fmtDur(sec)`, `util.fmtAge(ts)`, `util.verdictColor(v)`, `util.uiConfirm(message)` — moved verbatim from main.js (lines 65, 121, 170, 192). (`fmtUptime` dropped — dead code.)
+- Creates `test/lib/luci-harness.js` (the offline render harness used by ALL later phases).
 
+- [ ] **Step 0: Create the render harness `test/lib/luci-harness.js`.**
+```js
+// Offline loader for LuCI 'require'-style modules. Stubs globals, records E() tree,
+// executes each module + its render() to catch undefined-symbol ReferenceErrors and
+// to expose the virtual DOM for structural (accordion) assertions.
+const fs = require('fs'), path = require('path');
+const ROOT = path.resolve(__dirname, '../../openwrt/luci-app-amnezia');
+function E(tag, attrs, children){ if (attrs && (Array.isArray(attrs)||typeof attrs!=='object')){children=attrs;attrs={};}
+  return { tag, attrs: attrs||{}, children: [].concat(children||[]).filter(x=>x!=null) }; }
+const _ = s => s;
+const L = { bind:(fn,ctx)=>fn.bind(ctx), resolveDefault:(_p,d)=>Promise.resolve(d) };
+const ui = { createHandlerFn:()=>function(){return Promise.resolve();}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
+const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null) };
+const poll = { add:()=>{}, remove:()=>{} };
+const baseclass = { extend:o=>o }, view = { extend:o=>o };
+const documentStub = { getElementById:()=>null, activeElement:null, querySelectorAll:()=>[], createElement:()=>E('div') };
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', ''];
+function load(rel, deps){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
+  const src = fs.readFileSync(file,'utf8');
+  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns','autolearn'];
+  const fn = new Function(...names, src);
+  return fn(baseclass, ui, fsApi, poll, view, E, _, L, documentStub,
+           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns, deps.autolearn); }
+const d = {};
+d.util      = load('amnezia/util.js', d);
+d.routing   = load('amnezia/section/routing.js', d);
+d.zapret    = load('amnezia/section/zapret.js', d);
+d.dns       = load('amnezia/section/dns.js', d);
+d.autolearn = load('amnezia/section/autolearn.js', d);
+d.failover  = load('amnezia/section/failover.js', d);
+const main  = load('view/main.js', d);
+// Execute every render() that exists → throws on undefined-symbol refs.
+const panels = [];
+for (const k of ['failover','routing','zapret','dns','autolearn']) {
+  if (d[k] && typeof d[k].render === 'function') { const node = d[k].render({}, DATA); panels.push([k,node]); } }
+function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[]).forEach(c=>walk(c,fn)); }
+module.exports = { d, main, panels, walk, DATA };
+if (require.main === module) {
+  // Self-test mode: assert accordion invariants when all section modules exist.
+  let details=[], badOpen=[];
+  panels.forEach(([k,node])=>walk(node,n=>{ if(n.tag==='details'){ details.push(n);
+    const cls=(n.attrs.class||''); const open=Object.prototype.hasOwnProperty.call(n.attrs,'open') && n.attrs.open!=null;
+    if(cls.indexOf('amnezia-action')>=0 && open) badOpen.push(k); }}));
+  if (badOpen.length) { console.error('FAIL: action panel open by default in '+badOpen.join(',')); process.exit(1); }
+  console.log('harness ok: modules='+Object.keys(d).filter(k=>d[k]).length+' panels='+panels.length+' details='+details.length);
+}
+```
 - [ ] **Step 1: Write/extend the failing bats harness.** In `test/unit/luci-js.bats`, add near the top:
 ```bash
 AMZ="$HARNESS_DIR/../openwrt/luci-app-amnezia"
 # ALLJS: every shipped JS file (view + modules). Negative guards run over this union.
 alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 ```
-Add a test:
+Add tests:
 ```bash
 @test "util.js exists and exports the cross-cutting helpers" {
   U="$AMZ/amnezia/util.js"
   node --check "$U"
-  for fn in fmtDur fmtUptime fmtAge verdictColor uiConfirm; do grep -q "$fn" "$U"; done
+  for fn in fmtDur fmtAge verdictColor uiConfirm; do grep -q "$fn" "$U"; done
+}
+@test "render harness loads every module + executes render with no ReferenceError" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
 }
 ```
 - [ ] **Step 2: Run it — expect FAIL** (`util.js` absent). Run: `bats test/unit/luci-js.bats -f "util.js exists"` → FAIL "No such file".
@@ -134,7 +226,7 @@ Leave the `handshake_age`/`Date.now` and `DNS_PROVIDERS…'custom'` guards point
 }
 ```
 - [ ] **Step 2: Run — expect FAIL** (file absent).
-- [ ] **Step 3: Create `routing.js`.** Move verbatim into the module: the 5 handlers, `parseRuStamp`/`paintRuStamp`/`paintForceStamp`, the 3 inFlight vars. Build `render(view,data)`: cut the Routing mode (1810-1838), Allowlist sources (1839-1905), Manual entries (1906-1934), RU IP list (1935-1966) section blocks from main.js's render and reassemble inside the family `<details>` (Manual + RU-update buttons as nested collapsed `<details>`). Add `applyFailoverState(state)` exporting the reconcile logic (move the body from p5 lines 1585-1602). Requires: `baseclass`, `fs`, `ui`, `amnezia.util`.
+- [ ] **Step 3: Create `routing.js`.** Move verbatim into the module: the 5 handlers, `parseRuStamp`/`paintRuStamp`/`paintForceStamp` (**`paintForceStamp` is owned by routing — this intentionally overrides the design doc's table, since force-update belongs to the Routing & Allowlist family; the design line was corrected to match**), the 3 inFlight vars. Build `render(view,data)`: cut the Routing mode (1810-1838), Allowlist sources (1839-1905), Manual entries (1906-1934), RU IP list (1935-1966) section blocks and reassemble inside the family `<details>` (Manual + RU-update buttons as nested collapsed `<details>`). **Move routing's data-bundle parses into `render`'s top:** `data[0]`→`parseRuStamp` (RU stamp), `data[8]`→`forceTunnelList` prefill, `data[9]`→`parseRuStamp` + the `forceStamp/forceWhen/forceTotal/forceFailed` block (main.js:1665-1671). Add `applyFailoverState(state)` exporting the p5 reconcile (move the body from main.js:1585-1602). Requires: `baseclass`, `fs`, `ui`, `amnezia.util`.
 - [ ] **Step 4: Rewire main.js.** Add `'require amnezia.section.routing';`. Delete moved functions/vars/sections. In `view.extend`, spread `routing.handlers`. In `render`, replace the 4 inline routing sections with `routing.render(this, data)`. In `refresh` p5, replace the inline routing reconcile (1585-1602) with `routing.applyFailoverState(st)`. Keep p1 (RU stamp) — move it into `routing.refresh` OR keep in shell; **decision:** move RU-stamp read (p1) + force-stamp read (p6) into `routing.refresh(view)`; shell's refresh calls `routing.refresh(this)`.
 - [ ] **Step 5: Verify.** `node --check` both files; `bats test/unit/luci-js.bats` all PASS; grep main.js no longer defines `handleRoutingMode`/`parseRuStamp`.
 - [ ] **Step 6: Commit.** `refactor(luci): extract routing.js (routing/allowlist/manual/RU + applyFailoverState)`
@@ -158,7 +250,7 @@ Leave the `handshake_age`/`Date.now` and `DNS_PROVIDERS…'custom'` guards point
 }
 ```
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Create `zapret.js`.** Move all listed symbols verbatim. Build `render` from sections DPI desync (1967-2013), Domain probe (2014-2067), Verify list (2068-2101), Blockcheck (2102-2232). Requires: `baseclass`, `fs`, `ui`, `poll` (blockcheck uses poll? verify with grep — if `poll.` is used in the blockcheck log tail, require it), `amnezia.util`.
+- [ ] **Step 3: Create `zapret.js`.** Move all listed symbols verbatim. Build `render(view,data)` from sections DPI desync (1967-2013), Domain probe (2014-2067), Verify list (2068-2101), Blockcheck (2102-2232). **Move the data-bundle parses for indices 1-6 (main.js:1649-1656) INTO `zapret.render`'s top:** `zap`/`bc`/`bcLog`/`applySt`/`applyCands`/`seedList`, AND the rebuild-guard seed `candidatesSig = candidatesSignature(applyCands);` (main.js:1671) — without this seed the first poll's `paintApply` tears down the freshly-rendered `<select>` (the exact regression the seed prevents). Requires: `baseclass`, `fs`, `ui`, `amnezia.util`. **`zapret.js` does NOT require `poll`** — polling is driven by the shell's `refresh`→`zapret.refresh`; verified zapret has no direct `poll.` call.
 - [ ] **Step 4: Rewire main.js.** `'require amnezia.section.zapret';`; delete moved code; spread `zapret.handlers`; `zapret.render(this,data)` in render; move p2/p3/p4 (zapret-status, blockcheck.json, apply-state reads) into `zapret.refresh(view)`; shell refresh calls it.
 - [ ] **Step 5: Verify.** `node --check`; full bats PASS.
 - [ ] **Step 6: Commit.** `refactor(luci): extract zapret.js (DPI/probe/verify/blockcheck)`
@@ -230,7 +322,7 @@ Leave the `handshake_age`/`Date.now` and `DNS_PROVIDERS…'custom'` guards point
 }
 ```
 - [ ] **Step 2: Run — FAIL.**
-- [ ] **Step 3: Create `failover.js`.** Move symbols + the Failover (1678-1766) and Add tunnel (1767-1803) sections verbatim, including the two inline `set-mode`/`set-sticky` closures inside `render`. Add `refresh(view)` doing the single failover.json read + `routing.applyFailoverState`. Requires: `baseclass`, `fs`, `ui`, `amnezia.util`, `amnezia.section.routing`.
+- [ ] **Step 3: Create `failover.js`.** Move symbols + the Failover (1678-1766) and Add tunnel (1767-1803) sections verbatim, including the two inline `set-mode`/`set-sticky` closures inside `render`. **Move `data[7]`→`parseFailoverState` (main.js:1657) into `failover.render`'s top** (its `failoverState` feeds the Mode-select `selected` + Sticky `value` + table). Add `refresh(view)` doing the single failover.json read + `routing.applyFailoverState`. Requires: `baseclass`, `fs`, `ui`, `amnezia.util`, `amnezia.section.routing`.
 - [ ] **Step 4: Final-slim main.js.** Now main.js should contain ONLY: requires (view/fs/ui/poll + util + 5 sections), shell-globals `pollFn`/`domSeen`, and `view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, autolearn.handlers, { load, render, refresh, handleRefresh, handleSaveApply:null, handleSave:null, handleReset:null }))`. `render` composes `[h2, cbi-map-descr(intro), style, accordion(5 module renders), refreshFooter]`. `refresh` = anchor-guard + `Promise.all([failover.refresh,routing.refresh,zapret.refresh,dns.refresh,autolearn.refresh].map(fn=>fn(this)))`. `load` stays (batch reads → data bundle). Move the handshake_age direct-render test's old `$F` assertion (luci-js.bats:29-34) → now expects ABSENCE in main.js (it moved) — keep as ALLJS-anchored in failover test above; delete the main.js-targeted one or retarget to failover.js.
 - [ ] **Step 5: Verify.** `node --check` all 7 files; **full bats PASS**; confirm main.js line count dropped to ≲ 220 (`wc -l`); grep main.js contains no `function parse`/`function paint` (all moved).
 - [ ] **Step 6: Commit.** `refactor(luci): extract failover.js + slim main.js to orchestration shell`
@@ -241,35 +333,43 @@ Leave the `handshake_age`/`Date.now` and `DNS_PROVIDERS…'custom'` guards point
 
 **Files:** Modify the 5 section `render`s (wrap in family `<details>`), `view/main.js` (inject `<style>`, accordion container, keep footer outside), `test/unit/luci-js.bats`.
 
-**Interfaces:** Each `module.render` returns `E('details',{class:'amnezia-panel', open:<perMap>},[E('summary',…), …])`. Default-open map: failover/routing/dns/autolearn → `'open':''`; zapret → `'open':null`. Action sub-panels → nested `E('details',{class:'amnezia-action'},[…])` never `open`.
+**CONTRACT (resolves the fork):** Phases 2-6 each `module.render` ALREADY emits its family
+`E('details',{'class':'amnezia-panel','open':<perMap>},[E('summary',…),…])` with action
+sub-sections as nested `E('details',{'class':'amnezia-action'},[…])` (never `open`).
+Default-open map: failover/routing/dns/autolearn → `'open':''`; zapret → `'open': null`
+(omitted). **Phase 7 adds ONLY:** the `amnezia-accordion` container in the shell render,
+the one injected `<style>`, and the structural tests. It does NOT wrap renders (already
+wrapped) — no double-wrapping.
 
-> If Phases 2-6 already emitted the `<details>` structure inline, this phase only adds the injected `<style>`, the `amnezia-accordion` container, and the tests. Otherwise, wrap each module render here.
-
-- [ ] **Step 1: Failing accordion tests.**
+- [ ] **Step 1: Failing tests — structural, via the harness (not grep).** The harness
+already walks the rendered tree; assert exact structure so multi-line `open` can't slip:
 ```bash
-@test "accordion: 5 family details, correct default-open set" {
-  # render strings: assert each family summary + open attr
-  grep -q "amnezia-panel" "$AMZ/amnezia/section/failover.js"
+@test "accordion: 5 family panels with correct default-open set (harness)" {
+  run node -e '
+    const h=require("./test/lib/luci-harness.js");
+    const fams={}; h.panels.forEach(([k,n])=>h.walk(n,x=>{ if(x.tag==="details" && (x.attrs.class||"").includes("amnezia-panel")){
+      fams[k]=Object.prototype.hasOwnProperty.call(x.attrs,"open") && x.attrs.open!=null; }}));
+    const want={failover:true,routing:true,dns:true,autolearn:true,zapret:false};
+    for(const k of Object.keys(want)){ if(fams[k]!==want[k]){ console.error("open mismatch "+k+": "+fams[k]); process.exit(1);} }
+    process.exit(0);'
+  [ "$status" -eq 0 ]
+}
+@test "accordion: action sub-panels nested and never open (harness self-test)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"   # exits 1 if any amnezia-action has open
+  [ "$status" -eq 0 ]
   grep -q "amnezia-accordion" "$AMZ/view/main.js"
-  # default-open families carry open=''; zapret family does NOT
-  grep -qE "'open':\s*''" "$AMZ/amnezia/section/dns.js"
 }
-@test "accordion: action sub-panels are nested collapsed details" {
-  grep -q "amnezia-action" "$AMZ/amnezia/section/failover.js"   # Add tunnel
-  grep -q "amnezia-action" "$AMZ/amnezia/section/zapret.js"      # probe/verify/blockcheck
-  for f in $(alljs); do ! grep -q "amnezia-action.*'open'" "$f"; done   # actions never open
-}
-@test "main.js require-graph resolves (openwrt + packages)" {
+@test "main.js require-graph resolves to existing files" {
   for m in util section/failover section/routing section/zapret section/dns section/autolearn; do
     grep -q "require amnezia.${m//\//.}" "$AMZ/view/main.js"
     [ -f "$AMZ/amnezia/$m.js" ]
   done
-  ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"
+  ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"   # .mjs is NOT in the require graph
 }
 ```
-- [ ] **Step 2: Run — FAIL** (no `amnezia-panel`/`amnezia-accordion` yet).
-- [ ] **Step 3: Implement accordion.** Wrap each `module.render` body's existing `cbi-section`(s) into the family `<details>` per the design's default-open map; nest the action sections as `amnezia-action` `<details>`. In main.js render, build `E('div',{class:'amnezia-accordion'},[...5 renders])` and inject one `<style>` node (hide default marker; `summary{cursor:pointer;…}`; `summary::before{content:'▸'}`; `details[open]>summary::before{content:'▾'}`; indent `.amnezia-action`). Keep the Refresh footer OUTSIDE the accordion.
-- [ ] **Step 4: Verify.** `node --check` all; **full bats PASS**; eyeball the render strings.
+- [ ] **Step 2: Run — FAIL** (no `amnezia-accordion`; harness open-map may already pass if P2-6 wrapped correctly — then this phase only adds the container/style/tests).
+- [ ] **Step 3: Implement.** In main.js render, build `E('div',{'class':'amnezia-accordion'},[...5 module renders])` and inject one `<style>` node (hide default marker; `summary{cursor:pointer;…}`; `summary::before{content:'▸'}`; `details[open]>summary::before{content:'▾'}`; indent `.amnezia-action`). Keep the Refresh footer OUTSIDE the accordion.
+- [ ] **Step 4: Verify.** `node --check` all; harness exits 0; **full bats PASS**; `[ "$(wc -l < openwrt/luci-app-amnezia/view/main.js)" -le 230 ]` (hard gate — shell must be lean).
 - [ ] **Step 5: Commit.** `feat(luci): two-level details accordion (status open, actions collapsed)`
 
 ---
@@ -288,12 +388,12 @@ Leave the `handshake_age`/`Date.now` and `DNS_PROVIDERS…'custom'` guards point
 }
 ```
 - [ ] **Step 2: Run — FAIL** (sync hasn't copied modules).
-- [ ] **Step 3: Update `dev/sync-to-packages.sh`.** Add `…/resources/amnezia/section` to the `mkdir -p` block (~line 38); after the main.js/decode-vpn cp, add `cp -r "$SRC/luci-app-amnezia/amnezia/." "$LUCI_PKG/www/luci-static/resources/amnezia/"`; replace per-file chmod with `find "$LUCI_PKG/www/luci-static/resources/amnezia" -type f -exec chmod 0644 {} +`.
-- [ ] **Step 4: Update `openwrt/install-luci-app-amnezia.sh`.** Add preflight `[ -f "$SRC/amnezia/util.js" ]` (+ a loop over the 5 sections); `mkdir -p /www/luci-static/resources/amnezia/section`; `cp -r "$SRC/amnezia/." /www/luci-static/resources/amnezia/`; chmod 0644 the copied files; **also copy `decode-vpn.mjs`** (fix the pre-existing omission); ensure `main.js` is copied LAST.
+- [ ] **Step 3: Update `dev/sync-to-packages.sh`.** Note `sync` does `rm -rf "$LUCI_PKG"` then `mkdir -p` each run, so the new dir MUST be in the `mkdir -p` block (~line 38) and the `mkdir` MUST precede the `cp -r`. Add `…/resources/amnezia/section` to the `mkdir -p` list; after the main.js/decode-vpn cp, add `cp -r "$SRC/luci-app-amnezia/amnezia/." "$LUCI_PKG/www/luci-static/resources/amnezia/"`; then `find "$LUCI_PKG/www/luci-static/resources/amnezia" -type f -exec chmod 0644 {} +`. (Parity contract = git's tracked mode, i.e. the executable bit: keep all JS non-executable `0644`.)
+- [ ] **Step 4: Update `openwrt/install-luci-app-amnezia.sh`.** Add preflight `[ -f "$SRC/amnezia/util.js" ]` (+ a loop over the 5 sections); `mkdir -p /www/luci-static/resources/amnezia/section`; `cp -r "$SRC/amnezia/." /www/luci-static/resources/amnezia/`; chmod 0644 the copied files; ensure `main.js` is copied LAST (after the modules — entry references must resolve). **`decode-vpn.mjs` is intentionally left untouched** on all imperative surfaces — `decodeVpnLink` is inlined (now in `failover.js`), so the `.mjs` is a dead standalone fixture not in the require graph; do NOT add it here (avoids an inconsistent partial fix across surfaces).
 - [ ] **Step 5: Update `install.sh`** (staging ~123-126): `mkdir -p /tmp/luci-app-amnezia/amnezia` and `cp -r "$SRC/luci-app-amnezia/amnezia/." /tmp/luci-app-amnezia/amnezia/`.
 - [ ] **Step 6: Update `dev/deploy-openwrt-safe.sh`** (staging loop ~78-82): add every `openwrt/luci-app-amnezia/amnezia/**` file to the `for _f` list (preserve relative path so it lands at `/tmp/luci-app-amnezia/amnezia/…`); ensure `view/main.js` is staged/written LAST; add a brief comment that modules must land before main.js on-device.
-- [ ] **Step 7: Update Makefile.** Bump `PKG_RELEASE` (3→4); drop the stale "PBR health + Reload button" line from the description. (File list unchanged — `$(CP) ./files/.` is wholesale.)
-- [ ] **Step 8: Run sync + parity.** `bash dev/sync-to-packages.sh`; run it AGAIN → `git diff --quiet packages/` (idempotent); `bats test/unit/luci-js.bats` (parity + require-graph-against-packages PASS); any repo-wide sync-parity test green.
+- [ ] **Step 7: Update Makefile.** Bump `PKG_RELEASE` (3→4); refresh the now-stale metadata while here: `TITLE` (line 17, drop "+ PBR") and the description block (line 26-34) — drop "PBR health + Reload button" and mention the shipped features (failover, tunnel mgmt, DoT, auto-learning) so the package metadata is accurate (fix all stale strings, not just one). (File list unchanged — `$(CP) ./files/.` is wholesale.)
+- [ ] **Step 8: Run sync + parity — mirror CI exactly.** The CI gate (`.github/workflows`) runs `sh dev/sync-to-packages.sh` ONCE then `git diff --quiet -- packages/` against committed state — the real failure is "one run differs from what's committed," not "two runs differ." So: `sh dev/sync-to-packages.sh` → `git add packages/` → the resulting commit (Step 9) must leave `git diff --quiet -- packages/` clean. Verify: after committing, `sh dev/sync-to-packages.sh && git diff --quiet -- packages/` exits 0. Then `bats test/unit/luci-js.bats` (the packages-mirror existence test + full suite PASS).
 - [ ] **Step 9: Commit.** `build(luci): ship amnezia module tree across all 4 delivery surfaces + Makefile`
 
 ---

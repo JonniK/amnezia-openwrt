@@ -213,8 +213,8 @@ through `render(view, data)`.
 | `main.js` shell | Refresh footer | `handleRefresh` |
 
 Parsers/painters move with their module: `parseFailoverState`/`renderTunnelTable`/
-`paintFailoverSummary`/`decodeVpnLink`/`paintForceStamp` → `failover.js`;
-`parseRuStamp`/`paintRuStamp` → `routing.js`; `parseZapret`/`paintZapret`/
+`paintFailoverSummary`/`decodeVpnLink` → `failover.js`;
+`parseRuStamp`/`paintRuStamp`/`paintForceStamp` → `routing.js` (force-update belongs to the Routing & Allowlist family); `parseZapret`/`paintZapret`/
 `parseProbe`/`parseVerify`/`parseSeedList`/`parseBlockcheck`/`paintBlockcheck`/
 `paintBlockcheckLog`/`parseApplyState`/`parseCandidates`/`paintApply`/`candidateKey`/
 `candidatesSignature`/`composeNfqwsOpt` → `zapret.js`; `parseAutolearnStatus`/
