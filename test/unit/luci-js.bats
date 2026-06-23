@@ -4,51 +4,63 @@ F="$HARNESS_DIR/../openwrt/luci-app-amnezia/view/main.js"
 AMZ="$HARNESS_DIR/../openwrt/luci-app-amnezia"
 # ALLJS: every shipped JS file (view + modules). Negative guards run over this union.
 alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
-@test "main.js parses and references the failover state file + per-tunnel table" {
+@test "failover state file + per-tunnel table present across shipped JS" {
   node --check "$F"
+  # amnezia-failover.json is read in main.js load() and failover.js refresh()
   grep -q "amnezia-failover.json" "$F"
-  grep -q "renderTunnelTable" "$F"
-  grep -q "parseFailoverState" "$F"
+  # renderTunnelTable + parseFailoverState now live in failover.js
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "renderTunnelTable" "$FV"
+  grep -q "parseFailoverState" "$FV"
 }
 @test "main.js still reads seed-must-tunnel.list at the existing runtime path (~line 962)" {
   grep -q "seed-must-tunnel.list" "$F"
 }
 @test "panel calls amnezia-failover-ctl matching the helper installed name" {
   # The ctl helper is installed as amnezia-failover-ctl (see F3/ACL).
-  grep -q "amnezia-failover-ctl" "$F"
+  # Now lives in failover.js.
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "amnezia-failover-ctl" "$FV"
 }
 @test "no pbr panel anywhere (Issue #9)" {
   for f in $(alljs); do ! grep -qE "pbr-status|pbr-reload|handlePbrReload" "$f"; done
 }
 @test "failover tunnel panel is present: renderTunnelTable and failover-tunnel-table id" {
-  grep -q "renderTunnelTable" "$F"
-  grep -q "failover-tunnel-table" "$F"
-  grep -q "Failover tunnels" "$F"
+  # These now live in failover.js; main.js has the anchor guard in refresh().
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "renderTunnelTable" "$FV"
+  grep -q "failover-tunnel-table" "$FV"
+  grep -q "Failover tunnels" "$FV"
 }
 @test "handshake_age is rendered directly as age-in-seconds (no Date.now subtract)" {
   # Issue MED: producer emits age-in-seconds; consumer must not double-convert via Date.now().
-  # Ensure the stale pattern is gone and the direct path is present.
-  ! grep -q "Date.now().*handshake_age\|handshake_age.*Date.now()" "$F"
-  grep -q "age < 0.*never\|age < 60.*ago" "$F"
+  # direct age path now lives in failover.js; main.js must not have the stale pattern.
+  ! grep -qE "Date\.Now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$F"
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -qE "age < 0.*never|age < 60.*ago" "$FV"
 }
 
 # ── Phase E additions ────────────────────────────────────────────────────────
 
-@test "main.js contains decodeVpnLink function" {
-  grep -q "function decodeVpnLink" "$F"
+@test "failover.js contains decodeVpnLink function" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "function decodeVpnLink" "$FV"
 }
 
-@test "main.js decodeVpnLink returns null for non-vpn:// prefix" {
-  grep -q "indexOf('vpn://') !== 0" "$F"
+@test "failover.js decodeVpnLink returns null for non-vpn:// prefix" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "indexOf('vpn://') !== 0" "$FV"
 }
 
-@test "main.js has handleAddTunnel handler" {
-  grep -q "handleAddTunnel" "$F"
+@test "failover.js has handleAddTunnel handler" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleAddTunnel" "$FV"
 }
 
-@test "main.js has handleTunnelRemove handler calling amnezia-tunnel-ctl remove" {
-  grep -q "handleTunnelRemove" "$F"
-  grep -q "amnezia-tunnel-ctl.*remove\|remove.*amnezia-tunnel-ctl" "$F"
+@test "failover.js has handleTunnelRemove handler calling amnezia-tunnel-ctl remove" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleTunnelRemove" "$FV"
+  grep -q "amnezia-tunnel-ctl.*remove\|remove.*amnezia-tunnel-ctl" "$FV"
 }
 
 @test "routing module has handleRoutingMode calling set-routing-mode" {
@@ -80,18 +92,20 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "force-update.json" "$F"
 }
 
-@test "main.js has Remove button in renderTunnelTable (per-row remove column)" {
-  grep -q "awg-remove-" "$F"
-  grep -q "handleTunnelRemove" "$F"
+@test "failover.js has Remove button in renderTunnelTable (per-row remove column)" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "awg-remove-" "$FV"
+  grep -q "handleTunnelRemove" "$FV"
 }
 
 @test "no fs.write() in any module (argv-only channel)" {
   for f in $(alljs); do ! grep -qE "fs\.write\s*\(" "$f"; done
 }
 
-@test "main.js add-tunnel section has textarea and Add tunnel button" {
-  grep -q "add-tunnel-conf" "$F"
-  grep -q "add-tunnel-btn" "$F"
+@test "failover.js add-tunnel section has textarea and Add tunnel button" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "add-tunnel-conf" "$FV"
+  grep -q "add-tunnel-btn" "$FV"
 }
 
 @test "routing module has routing-mode select with tunnel-default and direct-default options" {
@@ -192,4 +206,13 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "autolearn.js wires toggle/list + row handlers" {
   A="$AMZ/amnezia/section/autolearn.js"; node --check "$A"
   for s in amnezia-autolearn-ctl set-enabled handleAutolearnVeto handleAutolearnPromote handleAutolearnPurge; do grep -q "$s" "$A"; done
+}
+
+# ── Phase 6: failover.js ──────────────────────────────────────────────────────
+
+@test "failover.js owns tunnel table, add-tunnel, set-mode/set-sticky, sentinel; direct handshake_age" {
+  FV="$AMZ/amnezia/section/failover.js"; node --check "$FV"
+  for s in renderTunnelTable decodeVpnLink handleAddTunnel handleTunnelRemove failover-tunnel-table set-mode set-sticky; do grep -q "$s" "$FV"; done
+  grep -qE "age < 0.*never|age < 60.*ago" "$FV"                 # positive: direct age path present
+  ! grep -qE "Date\.now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$FV"
 }
