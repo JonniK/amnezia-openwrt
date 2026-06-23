@@ -235,6 +235,16 @@ setup() {
   _add_line=$(grep -n "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG" | tail -1 | cut -d: -f1)
   [ -n "$_del_line" ] && [ -n "$_add_line" ]
   [ "$_del_line" -lt "$_add_line" ]
+  # STRICT ordering guard (cycle-3 leak fix): the final add_list of the encrypted
+  # listener (5453) must appear BEFORE the final add_list of the plaintext WAN
+  # server (109.195.112.1). If dns_dnsmasq_add_plain is ever moved before
+  # dns_dnsmasq_encrypted, 5453 would be added after the plaintext IP, making
+  # dnsmasq use the plaintext WAN server first under strict-order — exactly the
+  # plaintext-first bug this block fixes.
+  _enc_line=$(grep -n "add_list dhcp.@dnsmasq\[0\].server=127.0.0.1#5453" "$STUB_LOG" | tail -1 | cut -d: -f1)
+  _plain_add_line=$(grep -n "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG" | tail -1 | cut -d: -f1)
+  [ -n "$_enc_line" ] && [ -n "$_plain_add_line" ]
+  [ "$_enc_line" -lt "$_plain_add_line" ]
 }
 
 @test "_enter_plain: does not mark plaintext tier when dnsmasq reload fails (LOW)" {
