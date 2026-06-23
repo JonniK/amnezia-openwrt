@@ -3,6 +3,7 @@ load '../lib/harness.bash'
 CTL="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
 setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   export UCI_GET_amnezia_config_dns_provider=quad9
+  export UCI_GET_amnezia_config_dot_enabled=1
   printf 'nameserver 109.195.112.1\n' > "$BATS_TEST_TMPDIR/resolv.auto"
   export AMNEZIA_RESOLV_AUTO="$BATS_TEST_TMPDIR/resolv.auto"
 }
@@ -186,4 +187,17 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   [ -n "$_first_unlock" ] || { echo "FAIL: dnsmasq_unlock not found in _exit_plain body" >&2; false; }
   # _set_tier must come BEFORE the first dnsmasq_unlock in the function
   [ "$_set_line" -lt "$_first_unlock" ]
+}
+
+@test "disabled watchdog: dot_enabled=0 breaks loop immediately, never enters plaintext" {
+  # Regression guard for tier-resurrection race: when cmd_disable signals the
+  # watchdog (via procd stop), a late tick already past the signal could run
+  # _enter_plain and commit dns_active_tier=plaintext. The fix re-reads
+  # dot_enabled at the TOP of each iteration and breaks when it is no longer 1.
+  # With dot_enabled=0 and both probes failing + N=1 + TICKS=3 the watchdog
+  # must exit immediately on the first iteration WITHOUT ever calling _enter_plain.
+  run sh -c "UCI_GET_amnezia_config_dot_enabled=0 AMNEZIA_DNS_WD_TICKS=3 AMNEZIA_DNS_WD_N=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # Must NOT have written plaintext tier
+  run grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"; [ "$status" -ne 0 ]
 }

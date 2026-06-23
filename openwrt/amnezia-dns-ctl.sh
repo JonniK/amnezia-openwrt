@@ -141,6 +141,7 @@ cmd_watchdog() {
   # the full dwell must still elapse before recovery — never skip it on respawn.
   if [ "$_tier" = plaintext ] && [ "$_entered" = 0 ]; then _entered=$(_now); fi
   while true; do
+    [ "$(uci -q get amnezia.config.dot_enabled)" = 1 ] || break   # disabled out from under us → stop cleanly
     if _probe_listener "127.0.0.1#$DOT_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
