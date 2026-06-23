@@ -15,8 +15,9 @@ under `openwrt/luci-app-amnezia/amnezia/`:
 
 `main.js` `'require's each module, `Object.assign`s their handler maps
 onto the view, and delegates `refresh()` via `Promise.all`. Presentation:
-native `<details>` accordion — all five status panels open by default;
-action sub-sections collapsed.
+native `<details>` accordion — four status families open by default
+(Tunnels & Failover, Routing & Allowlist, Encrypted DNS, Auto-learning);
+the DPI bypass (zapret) family and all action sub-sections collapsed.
 
 On device modules land at `/www/luci-static/resources/amnezia/`. All four
 delivery surfaces updated: `dev/sync-to-packages.sh`,
