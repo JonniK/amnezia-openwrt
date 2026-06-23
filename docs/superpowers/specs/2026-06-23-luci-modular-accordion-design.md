@@ -146,7 +146,12 @@ return view.extend(Object.assign({},
       var footer = /* Refresh-status button — OUTSIDE the accordion */;
       var style  = /* one injected <style> for accordion chrome */;
       … poll.add(L.bind(this.refresh,this), 5) …
-      return E('div', { 'class': 'cbi-map' }, [ E('h2',{},_('AmneziaWG')), style, acc, footer ]);
+      // preserve the existing h2 + cbi-map-descr intro paragraph (main.js:1674-1676)
+      return E('div', { 'class': 'cbi-map' }, [
+        E('h2', {}, _('AmneziaWG')),
+        E('div', { 'class': 'cbi-map-descr' }, _( /* existing intro text */ )),
+        style, acc, footer
+      ]);
     },
     refresh: function() {
       // unchanged anchor guard: #failover-tunnel-table sentinel + domSeen self-unregister
@@ -167,16 +172,40 @@ return view.extend(Object.assign({},
 ```
 
 The `#failover-tunnel-table` sentinel **must** remain in `failover.render`'s output
-(it gates poll self-unregister). `applyInFlight` is referenced by zapret's
-apply/revert path; it stays a shell-global imported by zapret? No — `applyInFlight`
-guards zapret's blockcheck-apply, so it moves into `zapret.js` file scope along with
-`handleApply`/`handleRevert`/`paintApply`. The shell keeps only `pollFn` + `domSeen`.
+(it gates poll self-unregister). `applyInFlight` guards zapret's blockcheck-apply, so
+it moves into `zapret.js` file scope along with `handleApply`/`handleRevert`/`paintApply`.
+The shell keeps only `pollFn` + `domSeen`. **Module-file-scope mutable state** (NOT
+instance state) that must move with its module: `addTunnelInFlight`/`removeTunnelInFlight`
+→ failover; `routingModeInFlight`/`forceUpdateInFlight`/`saveManualInFlight` → routing;
+`probeInFlight`/`verifyInFlight`/`applyInFlight`/`candidatesSig` → zapret
+(`candidatesSig`, main.js:51, is seeded by `zapret.render` and read/written by
+`zapret.refresh`→`paintApply` — both live in the same module file so the closure works).
+
+**Cross-module refresh contract (the one real coupling).** Today `refresh()` p5
+(main.js:1575) reads `/var/run/amnezia-failover.json` **once** and from that single
+parsed state paints THREE owners' fields: the failover summary + `#failover-tunnel-table`
+(failover), the `#routing-mode-select` value (routing, guarded by `activeElement`,
+main.js:1585), and the 5 `#force-src-*` checkboxes (routing, guarded, main.js:1591).
+The split must NOT double-read the file or drop the guarded reconcile. Contract:
+`failover.refresh(view)` reads + parses the file once, paints its own fields, then calls
+`routing.applyFailoverState(state)` — an exported routing function that does **only** the
+`activeElement`-guarded routing-mode-select + source-checkbox reconcile. `routing.refresh`
+handles routing's *other* reads (RU stamp, force stamp); it does not re-read the failover
+JSON. This keeps one read per tick and preserves both guards verbatim.
+
+**Inline closures travel with `render`, not the handler map.** The failover Mode-select
+(`set-mode`, main.js:1709) and Sticky input+button (`set-sticky`, main.js:1739) are wired
+with `ui.createHandlerFn(this, function(ev){…})` — anonymous closures, not named view
+methods. They move into `failover.js` *inside* `failover.render`, so `failover.js` MUST
+declare `'require fs'; 'require ui';` (the closures call `fs.exec`/`ui.addNotification`).
+Their initial `selected`/`value` derive from the `data` bundle's `failoverState` — pass it
+through `render(view, data)`.
 
 ### Module → section assignment
 
 | Module | Sections it owns | Handlers it owns |
 |---|---|---|
-| `failover.js` | Failover tunnels (status) · Add tunnel (action) | `handleTunnelToggle`, `handleTunnelRemove`, `handleAddTunnel`, `_doAddTunnel` |
+| `failover.js` | Failover tunnels (status: mode-select, sticky, table) · Add tunnel (action) | `handleTunnelToggle`, `handleTunnelRemove`, `handleAddTunnel`, `_doAddTunnel`, **+ inline `set-mode`/`set-sticky` closures** |
 | `routing.js` | Routing mode · Allowlist sources · Manual entries (action) · RU IP list | `handleRoutingMode`, `handleSourceToggle`, `handleForceUpdate`, `handleSaveManual`, `handleRuUpdate` |
 | `zapret.js` | DPI desync (status) · Domain probe (action) · Verify list (action) · Blockcheck (action) | `handleProbe`, `handleVerify`, `handleBlockcheckRun`, `handleBlockcheckCancel`, `handleSelectRecommended`, `handleApply`, `handleRevert`, `handleZapretToggle` |
 | `dns.js` | Encrypted DNS (DoT) | (inline `setDot`/`setDnsProvider`; no view-method handlers) |
@@ -241,26 +270,58 @@ ship (keeps the wiring surface minimal).
 
 ## Wiring & deployment impact
 
-| Artifact | Change |
-|---|---|
-| `.ipk` Makefile (`packages/luci-app-amnezia/Makefile`) | **none** — `$(CP) ./files/. $(1)/` ships the whole tree once sync populates `files/`. |
-| `dev/sync-to-packages.sh` | **add** recursive copy of `openwrt/luci-app-amnezia/amnezia/` → `packages/.../files/www/luci-static/resources/amnezia/` (mkdir + cp -r + chmod 0644). |
-| `openwrt/install-luci-app-amnezia.sh` | **add** `mkdir -p …/resources/amnezia/section` + copy the new module files; extend the pre-flight existence checks. |
-| ACL (`acl/luci-app-amnezia.json`) | **none** — new files are static JS; same `exec` grants. |
-| Live router deploy | now ~7 files (tar-over-ssh or batched `cat`) instead of 1; **user-gated**; backup-first; **`rpcd restart` not `reload`** (known gotcha); verify panel renders + WAN/DNS/handshake. |
+**CRITICAL — there are FOUR cherry-pick delivery surfaces, not two.** Each hardcodes
+`view/main.js` by name; the new modules live at the **sibling** root
+`/www/luci-static/resources/amnezia/` (NOT under `view/`), so none of these surfaces
+ships them until patched. Converting inlined functions into 6 *runtime-required* modules
+means a half-updated surface → `require amnezia.*` 404 → **blank panel**. All four MUST be
+updated in the same plan; the require-graph + sync-parity tests are the offline guards.
+
+| Surface | Role | Current state | Required change |
+|---|---|---|---|
+| `packages/luci-app-amnezia/Makefile` | `.ipk` build | `$(CP) ./files/. $(1)/` (wholesale) | **none** for file list — ships whole tree once sync populates `files/`. `[autofix]` bump `PKG_RELEASE`; drop stale "PBR health/Reload button" line from description. |
+| `dev/sync-to-packages.sh` | openwrt→packages mirror | cherry-picks `main.js`+`decode-vpn.mjs` (lines 164-167); `mkdir -p` list omits the new dir (line 38) | add `…/resources/amnezia/section` to the `mkdir -p` block; `cp -r openwrt/luci-app-amnezia/amnezia/* → …/resources/amnezia/`; chmod **files only** (`find … -type f -exec chmod 0644`) so dir modes don't break byte+mode parity. |
+| `openwrt/install-luci-app-amnezia.sh` | on-device copy (`/tmp`→`/www`) | copies only `$SRC/view/main.js` → `VIEW_DIR=resources/view/amnezia` (line 13,37); preflight checks 3 files (line 19-21) | `mkdir -p /www/luci-static/resources/amnezia/section`; copy each module to `resources/amnezia/…` (**not** under `VIEW_DIR`); add per-file preflight existence checks for all 6 modules. Also fixes the pre-existing `decode-vpn.mjs` omission while here. |
+| `install.sh` | stages repo→`/tmp/luci-app-amnezia` for the above | stages only `menu/acl/view/main.js` (lines 123-126) | stage the whole `openwrt/luci-app-amnezia/amnezia/` tree into `/tmp/luci-app-amnezia/amnezia/`. |
+| `dev/deploy-openwrt-safe.sh` | **live-router push** (`cat`-over-ssh) | `for _f in … view/main.js` stages 3 files to `/tmp` (lines 77-82) | add every `amnezia/**` module to the staging loop; preserve relative path so it lands at `/tmp/luci-app-amnezia/amnezia/…`. |
+| ACL (`acl/luci-app-amnezia.json`) | rpcd perms | — | **none** — new files are static JS; same `exec` grants. |
+
+`decode-vpn.mjs` is **not** in the require graph (the live `decodeVpnLink` is inlined at
+main.js:585 and moves to `failover.js`); the `.mjs` is a standalone fixture — the
+require-graph test must NOT expect a require for it.
+
+**Live-router deploy (user-gated) — atomicity & ordering.** Multi-file `cat`-over-ssh is
+non-atomic. Invariant: **snapshot every target to `*.pre-modular` BEFORE the first byte is
+overwritten; copy ALL `amnezia/**` modules FIRST; write `view/main.js` LAST** — so at no
+instant does the entry reference a not-yet-present module. After copy: clear LuCI caches,
+**`rpcd restart` not `reload`** (known gotcha), verify the panel renders + every section
+paints + `fs.exec` succeeds + WAN/DNS/handshake. Rollback = restore `*.pre-modular`
+(main.js first to re-pin the old, module-free entry) + `rpcd restart`. Full backup first.
 
 ---
 
 ## Testing
 
+Define one bats helper `ALLJS` = the union glob `view/*.js` + `amnezia/**/*.js` (the
+full shipped JS surface). **Positive** assertions target the specific new owner file;
+**negative** assertions run over `ALLJS` (concatenated), never a single file.
+
 | Gate | What |
 |---|---|
 | `node --check` | every new module + the slimmed `main.js` (CI + bats). |
-| `test/unit/luci-js.bats` | retarget greps: symbols that moved out of `main.js` must be asserted in their new module file (glob `openwrt/luci-app-amnezia/amnezia/**/*.js`). Keep all existing assertions (decodeVpnLink, handlers, no `fs.write`, DoT focus-guard, no `custom` provider, pbr panel gone, etc.) — just point them at the right file. |
-| new bats: accordion structure | assert 5 family `<details>` with `<summary>`; assert the 4 default-open families carry `open` and DPI/zapret does not; assert action sub-panels (`Add tunnel`, `Domain probe`, `Verify list`, `Blockcheck`, `Manual force-tunnel`) are nested `<details>` without `open`. |
-| new bats: require graph | assert `main.js` declares the 6 `'require amnezia.*'` lines and that each referenced file exists. |
-| sync parity | `dev/sync-to-packages.sh` idempotent; `openwrt/ ↔ packages/` match (CI check). |
+| positive symbol assertions | each moved symbol asserted present **in its new owner file** (e.g. `decodeVpnLink`/`renderTunnelTable` in `failover.js`, `DNS_PROVIDERS`/focus-guard in `dns.js`, `handleAutolearn*` in `autolearn.js`). |
+| **negative guards — must not pass vacuously** | the load-bearing `! grep` guards run over `ALLJS` (union of ALL shipped JS), AND are paired with a positive anchor so a vacuous pass is impossible: `! grep pbr-status\|pbr-reload\|handlePbrReload` (Issue #9, across union); `! grep -E 'fs\.write\s*\('` (argv-only security guard — **across all 6 modules + shell**, an `fs.write` could be introduced in any); `! grep Date.now().*handshake_age` paired with asserting `failover.js` contains the direct age path; `! grep DNS_PROVIDERS…'custom'` paired with asserting `dns.js` contains `DNS_PROVIDERS`. |
+| new bats: accordion structure | 5 family `<details>` w/ `<summary>`; the 4 default-open families render `<details … open` and DPI/zapret renders `<details` WITHOUT `open` (structural check on the family node, not a bare `grep open` which is order-sensitive); action sub-panels (`Add tunnel`, `Domain probe`, `Verify list`, `Blockcheck`, `Manual force-tunnel`) are nested `<details>` without `open`. |
+| new bats: require graph | assert `main.js` declares the 6 `'require amnezia.*'` lines and each resolves to an existing file **in both `openwrt/luci-app-amnezia/amnezia/…` AND the synced `packages/.../resources/amnezia/…`** (catches a sync that drops a module). Must NOT expect a require for `decode-vpn.mjs`. |
+| sync parity | `dev/sync-to-packages.sh` run twice → idempotent; `git diff --quiet` after; `openwrt/ ↔ packages/` byte+mode identical (CI check). |
 | `#failover-tunnel-table` sentinel | bats asserts it still appears in `failover.js` (poll self-unregister depends on it). |
+
+LuCI's `E()` **omits null-valued attributes** — proven by the live `'selected': … ? '' :
+null` / `'disabled': … ? null : ''` idioms (main.js:1721, 2006) — so collapsed =
+`'open': isOpen ? '' : null` is safe; the accordion test asserts the rendered structure,
+not a fragile `grep`. No `.po`/`.pot` catalog exists in the repo (Makefile has empty
+`Build/Prepare`/`Compile`); `_()` is resolved at runtime by luci-base, so splitting `_()`
+strings across modules breaks no translation wiring — strings may live in any module.
 
 Offline tests cannot prove LuCI actually resolves every `require` at runtime — only
 the live "panel renders, every section paints, fs.exec calls succeed" check can.
@@ -281,10 +342,12 @@ That is the deploy-time gate and stays user-gated.
 4. **First-paint blank for ~5s** if initial paint is dropped. → each `module.render`
    does the first paint inline from the `load()` data bundle (preserves today's
    behavior); the immediate poll only updates.
-5. **Sync / installer drift** (new files missing on one delivery path). → both
-   `sync-to-packages.sh` and `install-luci-app-amnezia.sh` updated in the same plan;
-   sync-parity CI catches openwrt↔packages mismatch; require-graph bats catches a
-   `require` with no backing file.
+5. **Sync / installer drift** (new files missing on one of FOUR delivery surfaces →
+   blank panel). → all four (`sync-to-packages.sh`, `install-luci-app-amnezia.sh`,
+   `install.sh`, `deploy-openwrt-safe.sh`) + the Makefile updated in the same plan;
+   sync-parity CI catches openwrt↔packages mismatch; require-graph bats (run against both
+   `openwrt/` and `packages/`) catches a `require` with no backing file; live deploy
+   orders modules-first/main.js-last so a partial push never references a missing module.
 
 ## Done criteria
 
