@@ -216,3 +216,28 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -qE "age < 0.*never|age < 60.*ago" "$FV"                 # positive: direct age path present
   ! grep -qE "Date\.now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$FV"
 }
+
+# ── Phase 7: accordion chrome + structural tests ──────────────────────────────
+
+@test "accordion: 5 family panels with correct default-open set (harness)" {
+  run node -e '
+    const h=require("./test/lib/luci-harness.js");
+    const fams={}; h.panels.forEach(([k,n])=>h.walk(n,x=>{ if(x.tag==="details" && (x.attrs.class||"").includes("amnezia-panel")){
+      fams[k]=Object.prototype.hasOwnProperty.call(x.attrs,"open") && x.attrs.open!=null; }}));
+    const want={failover:true,routing:true,dns:true,autolearn:true,zapret:false};
+    for(const k of Object.keys(want)){ if(fams[k]!==want[k]){ console.error("open mismatch "+k+": "+fams[k]); process.exit(1);} }
+    process.exit(0);'
+  [ "$status" -eq 0 ]
+}
+@test "accordion: action sub-panels nested and never open (harness self-test)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  grep -q "amnezia-accordion" "$AMZ/view/main.js"
+}
+@test "main.js require-graph resolves to existing files" {
+  for m in util section/failover section/routing section/zapret section/dns section/autolearn; do
+    grep -q "require amnezia.${m//\//.}" "$AMZ/view/main.js"
+    [ -f "$AMZ/amnezia/$m.js" ]
+  done
+  ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"
+}

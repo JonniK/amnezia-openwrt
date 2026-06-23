@@ -59,6 +59,16 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			E('div', { 'class': 'cbi-map-descr' },
 				_('Multi-tunnel AmneziaWG failover stack. RU traffic goes direct; foreign traffic routes through active tunnel(s). Status refreshes every 5 seconds.')),
 
+			E('style', {}, [
+				'.amnezia-accordion details.amnezia-panel{border:1px solid var(--border-color-medium,#ccc);border-radius:4px;margin:6px 0;padding:4px 8px;}' +
+				'.amnezia-accordion summary{cursor:pointer;font-weight:bold;padding:6px 0;list-style:none;}' +
+				'.amnezia-accordion summary::-webkit-details-marker{display:none;}' +
+				'.amnezia-accordion summary::before{content:"\\25B8 ";}' +
+				'.amnezia-accordion details[open]>summary::before{content:"\\25BE ";}' +
+				'details.amnezia-action{margin:4px 0 4px 16px;padding:2px 6px;}' +
+				'details.amnezia-action summary{font-weight:normal;}'
+			]),
+
 			E('div', { 'class': 'amnezia-accordion' }, [
 				failover.render(this, data),
 				routing.render(this, data),
