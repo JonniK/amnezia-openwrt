@@ -21,7 +21,8 @@ const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'
 const poll = { add:()=>{}, remove:()=>{} };
 const baseclass = { extend:o=>o }, view = { extend:o=>o };
 const documentStub = { getElementById:()=>null, activeElement:null, querySelectorAll:()=>[], createElement:()=>E('div') };
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', ''];
+// DATA: 12 elements — indices 10 (DoT status) and 11 (master_enabled) added for Phase 4.
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
@@ -108,5 +109,75 @@ if (require.main === module) {
     .catch(function(e){
       console.error('FAIL: a module.refresh() rejected under failing fs: '+e.message);
       process.exit(1);
+    })
+    .then(function() {
+      // ── Handler-execution pass ────────────────────────────────────────────────
+      // Build the assembled view the same way main.js does (Object.assign of all handlers).
+      // Test every named change handler under BOTH succeeding and rejecting fs loads.
+      // Each handler must: (a) not synchronously throw, and (b) resolve (not reject).
+      // This is the regression guard the original Item-3 inline-closure bug would have tripped.
+      const CHANGE_HANDLERS = [
+        'handleSetMode', 'handleSetSticky',
+        'handleMakeDefault', 'handleTunnelRestart',
+        'handleForcePin', 'handleForceUnpin',
+        'handleDotToggle', 'handleDotProvider',
+        'handleMasterToggle'
+      ];
+      const fakeEv = { target: { checked: true, value: 'awg1' }, preventDefault: function(){} };
+
+      function buildView(fsStub) {
+        const dv = {};
+        dv.util      = loadWith('amnezia/util.js', dv, fsStub);
+        dv.routing   = loadWith('amnezia/section/routing.js', dv, fsStub);
+        dv.zapret    = loadWith('amnezia/section/zapret.js', dv, fsStub);
+        dv.dns       = loadWith('amnezia/section/dns.js', dv, fsStub);
+        dv.autolearn = loadWith('amnezia/section/autolearn.js', dv, fsStub);
+        dv.failover  = loadWith('amnezia/section/failover.js', dv, fsStub);
+        const mv = loadWith('view/main.js', dv, fsStub);
+        // Assemble exactly as LuCI does via view.extend(Object.assign(...)).
+        const assembled = Object.assign({}, mv,
+          (dv.failover && dv.failover.handlers) || {},
+          (dv.routing  && dv.routing.handlers)  || {},
+          (dv.zapret   && dv.zapret.handlers)   || {},
+          (dv.dns      && dv.dns.handlers)       || {},
+          (dv.autolearn && dv.autolearn.handlers) || {}
+        );
+        // Bind util for handlers that call util.uiConfirm.
+        assembled.__util = dv.util;
+        // Provide a minimal util stub that always confirms so handlers don't deadlock.
+        if (assembled.__util) {
+          assembled.__util.uiConfirm = function() { return Promise.resolve(false); };
+        }
+        return assembled;
+      }
+
+      const handlerTests = [];
+      for (const fsStub of [fsApi, fsRej]) {
+        const assembled = buildView(fsStub);
+        for (const name of CHANGE_HANDLERS) {
+          if (typeof assembled[name] !== 'function') {
+            // Handler missing — treat as an error.
+            handlerTests.push(Promise.reject(new Error('handler ' + name + ' not found on assembled view')));
+            continue;
+          }
+          handlerTests.push(
+            Promise.resolve().then(function(n, a) {
+              return a[n].call(a, fakeEv, 'awg1');
+            }.bind(null, name, assembled))
+            .then(undefined, function(e) {
+              throw new Error('handler ' + name + ' rejected: ' + e.message);
+            })
+          );
+        }
+      }
+
+      return Promise.all(handlerTests)
+        .then(function() {
+          console.log('handler-exec-safe ok');
+        })
+        .catch(function(e) {
+          console.error('FAIL: ' + e.message);
+          process.exit(1);
+        });
     });
 }

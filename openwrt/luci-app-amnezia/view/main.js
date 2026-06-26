@@ -23,6 +23,36 @@ var pollFn = null;
 // stamp) are never painted. Only self-unregister once the anchor has appeared.
 var domSeen = false;
 
+// Paint the master-switch strip (called on render + after handleMasterToggle).
+function paintMasterStrip(masterEnabled) {
+	var strip = document.getElementById('amz-master-strip');
+	var accordion = document.getElementById('amz-accordion');
+	if (!strip) return;
+	var on = masterEnabled !== false && masterEnabled !== '0' && masterEnabled !== 0;
+	strip.innerHTML = '';
+	strip.appendChild(E('div', {
+		'style': 'display:flex;align-items:center;background:' + (on ? '#dff0d8' : '#fcf8e3') +
+			';border:1px solid ' + (on ? '#d6e9c6' : '#faebcc') + ';border-radius:4px;padding:6px 12px;margin-bottom:8px;'
+	}, [
+		E('strong', { 'style': 'margin-right:12px;color:' + (on ? '#3c763d' : '#8a6d3b') + ';' },
+			_('Master switch: ') + (on ? _('ON') : _('OFF'))),
+		E('span', { 'style': 'flex:1;color:#666;font-size:12px;' },
+			on ? _('All routing active.') : _('Policy routing disabled — LAN goes direct to WAN.')),
+		E('button', {
+			'class': 'btn ' + (on ? 'cbi-button-negative' : 'cbi-button-positive'),
+			'style': 'margin-left:12px;',
+			'click': ui.createHandlerFn(this, 'handleMasterToggle', on ? '1' : '0')
+		}, on ? _('Turn OFF') : _('Turn ON'))
+	]));
+	if (accordion) {
+		if (on) {
+			accordion.classList.remove('amnezia-master-off');
+		} else {
+			accordion.classList.add('amnezia-master-off');
+		}
+	}
+}
+
 return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, autolearn.handlers, {
 
 	handleRefresh: function(ev) {
@@ -33,6 +63,34 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 		}, function() {
 			if (btn) btn.disabled = false;
 		});
+	},
+
+	// ── Master switch handler ─────────────────────────────────────────────────
+	// currentState: '1' = currently ON (so toggle = turn OFF), '0' = currently OFF.
+	handleMasterToggle: function(ev, currentState) {
+		var turningOff = (currentState === '1' || currentState === 1);
+		var msg = turningOff
+			? _('Turn OFF the master switch?\n\nThis disables all policy routing — LAN traffic goes direct to WAN.\nDoT (if enabled) reverts to plaintext. Auto-learn pauses.\nSettings are saved and restored when you turn it back ON.\nThis persists across reboot.')
+			: _('Turn ON the master switch?\n\nRestores all saved routing, DoT, and auto-learn settings.');
+		var self = this;
+		return util.uiConfirm(msg).then(L.bind(function(ok) {
+			if (!ok) return Promise.resolve();
+			var verb = turningOff ? 'off' : 'on';
+			return fs.exec('/usr/bin/amnezia-failover-ctl', ['master', verb]).then(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				// Re-read master state and repaint the strip.
+				return L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }).then(function(r) {
+					var newState = (r.stdout || '1').trim();
+					paintMasterStrip(newState !== '0');
+				}).then(function() {
+					return self.refresh();
+				});
+			}).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Action failed: ') + err), 'danger');
+			});
+		}, this));
 	},
 
 	load: function() {
@@ -49,11 +107,19 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			// force-update.json is read at load so the stamp paints on the very
 			// first render (not only on the first poll tick). refresh()'s routing.refresh
 			// keeps it live afterwards.
-			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '')
+			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), ''),
+			// index 10: DoT status — parsed synchronously in dns.render() for first paint.
+			L.resolveDefault(fs.exec('/usr/bin/amnezia-dns-ctl', ['status']), { stdout: '' }),
+			// index 11: master_enabled flag — default '1' (enabled) if uci key absent.
+			L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' })
 		]);
 	},
 
 	render: function(data) {
+		// Parse master flag from index 11; default to enabled.
+		var masterRaw = (data && data[11] && data[11].stdout) || '1';
+		var masterEnabled = masterRaw.trim() !== '0';
+
 		var body = E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('AmneziaWG')),
 			E('div', { 'class': 'cbi-map-descr' },
@@ -66,10 +132,14 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				'.amnezia-accordion summary::before{content:"\\25B8 ";}' +
 				'.amnezia-accordion details[open]>summary::before{content:"\\25BE ";}' +
 				'details.amnezia-action{margin:4px 0 4px 16px;padding:2px 6px;}' +
-				'details.amnezia-action summary{font-weight:normal;}'
+				'details.amnezia-action summary{font-weight:normal;}' +
+				'.amnezia-master-off{opacity:0.55;pointer-events:none;}'
 			]),
 
-			E('div', { 'class': 'amnezia-accordion' }, [
+			// Master switch strip (above accordion, always interactive).
+			E('div', { 'id': 'amz-master-strip' }),
+
+			E('div', { 'class': 'amnezia-accordion', 'id': 'amz-accordion' }, [
 				failover.render(this, data),
 				routing.render(this, data),
 				zapret.render(this, data),
@@ -90,6 +160,12 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				])
 			])
 		]);
+
+		// Paint master strip synchronously (strip element now exists in body above).
+		// We call paintMasterStrip after returning body, so wire it via a microtask.
+		Promise.resolve().then(L.bind(function() {
+			paintMasterStrip.call(this, masterEnabled);
+		}, this));
 
 		if (pollFn) {
 			poll.remove(pollFn);
