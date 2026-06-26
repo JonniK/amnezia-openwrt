@@ -18,7 +18,8 @@
 - **LuCI dotted `require` MUST carry `as <alias>`** (binding footgun). Single-segment requires bind without `as`.
 - **Poll interval is `POLL_INTERVAL=10` s** (daemon line 193) — reason about probe cadence / exit-IP age in 10s units, not 5s.
 - **`*.conf` files contain private keys — never print/commit.**
-- **Existing abstractions:** `routing_install_rules` / `routing_remove_rules` (prefs `RULE_PREF_STICKY=31000`, `RULE_PREF_POOL=31001`, tables 100/101) in `lib/amnezia-routing.sh`; `dns_iprule_flush` (pref `RULE_PREF_DOT=30900`) in `lib/amnezia-dns-lib.sh`; `ST_DIR=/tmp/amnezia-fo` (daemon state dir); daemon source guard `--source-only` (line 298); immediate re-reconcile trigger file `$ST_DIR/immediate` (touch → poll loop breaks its sleep and re-runs `reconcile()` *without* a restart, daemon lines 228/293).
+- **Existing abstractions:** `routing_install_rules` / `routing_remove_rules` (prefs `RULE_PREF_STICKY=31000`, `RULE_PREF_POOL=31001`, tables 100/101) in `lib/amnezia-routing.sh`; `dns_iprule_flush` (pref `RULE_PREF_DOT=30900`) in `lib/amnezia-dns-lib.sh`; daemon source guard `--source-only` (line 298); immediate re-reconcile trigger file `$ST_DIR/immediate` (touch → poll loop breaks its sleep and re-runs `reconcile()` *without* a restart, daemon lines 228/293).
+- **`ST_DIR` MUST be a shared single source of truth.** Today `ST_DIR=/tmp/amnezia-fo` is defined **only in the daemon** and is NOT exported by `amnezia-common.sh` — so `amnezia-failover-ctl` (which sources common.sh, not the daemon) sees `ST_DIR` *empty*. The ctl's `touch "$ST_DIR/immediate"` would therefore write to `/immediate` and the daemon would never see the trigger. **Phase 1 moves the canonical `export ST_DIR="${ST_DIR:-/tmp/amnezia-fo}"` into `amnezia-common.sh`**; the daemon keeps its own `ST_DIR=${ST_DIR:-/tmp/amnezia-fo}` as a harmless default (common.sh wins when sourced). Tests must NOT blindly pre-export a different `ST_DIR` and assume it reaches both processes — let common.sh resolve it (or assert the resolved default).
 
 ---
 
@@ -74,7 +75,7 @@ _ctl_tun_enabled() { [ "$(uci -q get amnezia.$1.enabled 2>/dev/null)" = 1 ]; }
 
 **Files:**
 - Modify: `openwrt/amnezia-failover` (`_best_pool` ~101, `reconcile()` ~116, `run_loop` member build ~197, `write_state` per-tunnel object ~150/160 & top-level printf ~182)
-- Modify: `openwrt/lib/amnezia-common.sh` (exit-IP endpoints/TTL; `amz_master_enabled` — placed here in Phase 1 so Wave-1 stays file-disjoint; Phase 3 only consumes it)
+- Modify: `openwrt/lib/amnezia-common.sh` (exit-IP endpoints/TTL; `amz_master_enabled`; **`export ST_DIR`** — placed here in Phase 1 so Wave-1 stays file-disjoint; Phase 3 only consumes the helper)
 - Test: `test/unit/failover-daemon.bats` (extend; sources daemon with `--source-only` like the existing `debounce.bats`/`health.bats`)
 
 **Interfaces:**
@@ -207,12 +208,18 @@ Replace the per-tunnel `"exit_ip":null` with `"exit_ip":$_eipj,"exit_ip_age":$_e
 
 ### Part C — master helper (consumed in Phase 3)
 
-- [ ] **Step 13: Failing test + implement `amz_master_enabled`** in `lib/amnezia-common.sh`:
+- [ ] **Step 13: Export shared `ST_DIR` from common.sh** (single source of truth so the ctl sees the same path as the daemon). Add near the other exports in `lib/amnezia-common.sh`:
+```sh
+export ST_DIR="${ST_DIR:-/tmp/amnezia-fo}"
+```
+Leave the daemon's own `ST_DIR=${ST_DIR:-/tmp/amnezia-fo}` as a default (common.sh wins when sourced). bats: source `amnezia-common.sh` with `ST_DIR` unset → assert `ST_DIR` resolves to `/tmp/amnezia-fo`.
+
+- [ ] **Step 14: Failing test + implement `amz_master_enabled`** in `lib/amnezia-common.sh`:
 ```sh
 # True (0) unless master_enabled is explicitly 0. Default = enabled.
 amz_master_enabled() { [ "$(uci -q get amnezia.config.master_enabled 2>/dev/null || echo 1)" != 0 ]; }
 ```
-bats (stub `uci`): unset→true(0), `1`→true(0), `0`→false(1). Run — PASS. **Commit** `feat(common): amz_master_enabled helper + exit-IP endpoint config`.
+bats (stub `uci`): unset→true(0), `1`→true(0), `0`→false(1). Run — PASS. **Commit** `feat(common): export ST_DIR, amz_master_enabled helper + exit-IP endpoint config`.
 
 ---
 
@@ -332,7 +339,10 @@ bats (stub `uci`): unset→true(0), `1`→true(0), `0`→false(1). Run — PASS.
 - [ ] **Step 11: Implement `master`** (snapshot model + WAN/DNS verify; verify cmd overridable for tests):
 ```sh
   master)
-    _verify="${AMNEZIA_VERIFY_CMD:-amnezia-status}"   # bounded WAN/DNS check; tests pass 'true'
+    # Real bounded WAN+DNS probe (amnezia-status only cats JSON → would never fail).
+    # Overridable for tests via AMNEZIA_VERIFY_CMD=true.
+    _amz_verify_conn() { ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && nslookup -timeout=2 openwrt.org >/dev/null 2>&1; }
+    _verify="${AMNEZIA_VERIFY_CMD:-_amz_verify_conn}"
     case "$2" in
       off)
         _ds=$(uci -q get amnezia.config.dot_enabled 2>/dev/null || echo 0)
@@ -487,7 +497,9 @@ L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled
 
 **Spec coverage:** Item 1 → P1A (daemon honor) + P2 (make-default, force-pin/unpin) + P4C. Item 2 → P4B. Item 3 → P4A (named Mode/Sticky) + P4E (harness reaches them). Item 4 → P2 (restart) + P4C. Item 5 → P1B + P4C. Item 6 → P2 (master snapshot model) + P3 (failover.init gate) + P4D. Tests/parity → P4E + P5. ✔
 
-**Review findings folded in:** R2-C1 DoT-preference-loss → snapshot model (P2 S11). R1-C1/R2-C2 autolearn-init-gate → only failover.init gated; DoT/autolearn via own flags (P3). R1-C2 invented procd harness → grep-init + helper unit test (P3 S1). R1-C3 fail-open/fw4 → documented contract + guard-before-install test (Contracts + P3 S1). R1-H1/R2-H1 hot-path probe → detached `_refresh_exit_ips` + flock (P1B). R1-H2 uci-read path untested → P1A S1 case 4. R1-H3 dns.js shape → `dnsRowMarkup(view,st)` + `handlers:` map (P4B). R1-H4 harness can't reach inline closures → named `handleSetMode`/`handleSetSticky` (P4A). R2-H2 disabled make-default → `_ctl_tun_enabled` reject (P2 S1/3). MEDIUMs: no `_restart_monitor` rules-gone window for force-pin (trigger touch, Contracts); `ST_DIR`/`--source-only` conventions (P1); 10s interval; make-default hide via `active_pool` not `carrying` (P4C S6); master verify (P2 S11); grow `DATA` (P4E S12); read real PKG_RELEASE (P5 S2).
+**Review findings folded in:** R2-C1 DoT-preference-loss → snapshot model (P2 S11). R1-C1/R2-C2 autolearn-init-gate → only failover.init gated; DoT/autolearn via own flags (P3). R1-C2 invented procd harness → grep-init + helper unit test (P3 S1). R1-C3 fail-open/fw4 → documented contract + guard-before-install test (Contracts + P3 S1). R1-H1/R2-H1 hot-path probe → detached `_refresh_exit_ips` + flock (P1B). R1-H2 uci-read path untested → P1A S1 case 4. R1-H3 dns.js shape → `dnsRowMarkup(view,st)` + `handlers:` map (P4B). R1-H4 harness can't reach inline closures → named `handleSetMode`/`handleSetSticky` (P4A). R2-H2 disabled make-default → `_ctl_tun_enabled` reject (P2 S1/3). MEDIUMs: no `_restart_monitor` rules-gone window for force-pin (trigger touch, Contracts); `--source-only` convention (P1); 10s interval; make-default hide via `active_pool` not `carrying` (P4C S6); grow `DATA` (P4E S12); read real PKG_RELEASE (P5 S2).
+
+**Cycle-2 review findings folded in:** (C) `$ST_DIR` undefined in the ctl process → `export ST_DIR` from `amnezia-common.sh` as the single source of truth (P1 S13), so `force-pin`'s `touch "$ST_DIR/immediate"` reaches the daemon on the live router, not `/`. (H) master verify was a no-op (`amnezia-status` only cats JSON) → real bounded `_amz_verify_conn` (`ping` + `nslookup`), `AMNEZIA_VERIFY_CMD=true` overridable in tests (P2 S11).
 
 **Placeholder scan:** all code/test steps carry real content; the one conditional (down→up re-probe hook) has an explicit TTL fallback. ✔
 
