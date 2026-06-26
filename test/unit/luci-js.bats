@@ -35,7 +35,7 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "handshake_age is rendered directly as age-in-seconds (no Date.now subtract)" {
   # Issue MED: producer emits age-in-seconds; consumer must not double-convert via Date.now().
   # direct age path now lives in failover.js; main.js must not have the stale pattern.
-  ! grep -qE "Date\.Now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$F"
+  ! grep -qE "Date\.now\(\).*handshake_age|handshake_age.*Date\.now\(\)" "$F"
   FV="$AMZ/amnezia/section/failover.js"
   grep -qE "age < 0.*never|age < 60.*ago" "$FV"
 }

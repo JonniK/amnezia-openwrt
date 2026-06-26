@@ -83,7 +83,7 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				// Re-read master state and repaint the strip.
 				return L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }).then(function(r) {
 					var newState = (r.stdout || '1').trim();
-					paintMasterStrip(newState !== '0');
+					paintMasterStrip.call(self, newState !== '0');
 				}).then(function() {
 					return self.refresh();
 				});
