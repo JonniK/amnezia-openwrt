@@ -98,7 +98,12 @@ debounce() {
 _is_healthy() { case " $HEALTHY " in *" $1 "*) return 0 ;; esac; return 1; }
 
 # Lowest metric among healthy; ties keep first.
+# If FORCE_POOL is set, return it only if healthy (fail-closed: no silent switch).
 _best_pool() {
+  if [ -n "$FORCE_POOL" ]; then
+    _is_healthy "$FORCE_POOL" && echo "$FORCE_POOL"   # pinned: honor only if healthy
+    return                                             # else fail-closed (no output)
+  fi
   _b=""; _bm=9999
   for _m in $MEMBERS; do _n=${_m%%:*}; _met=$(echo "$_m" | cut -d: -f2)
     _is_healthy "$_n" || continue
@@ -113,6 +118,7 @@ _sticky_pick() {  # prefer sticky_target if healthy, else best pool
 }
 
 reconcile() {
+  FORCE_POOL=$(uci -q get amnezia.globals.force_pool 2>/dev/null || echo "")
   _pool=$(_best_pool); _stk=$(_sticky_pick)
   _changed=0
   [ "$_pool" != "${_PREV_POOL:-}" ] && _changed=1
@@ -176,14 +182,17 @@ write_state() {
   done
   _sources_json="${_sources_json%,}"
 
+  # Emit force_pool: the current pinned tunnel or null.
+  _fp=null; [ -n "$FORCE_POOL" ] && _fp="\"$FORCE_POOL\""
+
   # Write to a temp file on the same filesystem then atomically rename so the
   # LuCI reader never sees a partial/truncated JSON.
   _sf_tmp="${STATE_FILE}.tmp.$$"
-  printf '{"mode":"%s","routing_mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"sources":{%s},"tunnels":[%s]}\n' \
+  printf '{"mode":"%s","routing_mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"force_pool":%s,"sources":{%s},"tunnels":[%s]}\n' \
     "$MODE" "$_rmode" \
     "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
     "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" \
-    "$_alldown" "$_sources_json" "${_t%,}" > "$_sf_tmp"
+    "$_alldown" "$_fp" "$_sources_json" "${_t%,}" > "$_sf_tmp"
   mv "$_sf_tmp" "$STATE_FILE"
 }
 

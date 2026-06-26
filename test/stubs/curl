@@ -1,1 +1,75 @@
-wget
+#!/bin/sh
+# curl stub: handles both the fetch-style usage (uclient-fetch/wget compat)
+# and the exit-IP probe usage (_probe_exit_ip: --interface if!awgN -fsSL <url>).
+#
+# Exit-IP probe mode (CURL_STUB_OUT set):
+#   - Requires --interface if!<iface> in args (validates binding).
+#   - Echoes $CURL_STUB_OUT (empty string simulates failure).
+#   - Increments call count in $CURL_CALLCOUNT file if set.
+#
+# Legacy fetch mode (FETCH_FAIL / FETCH_GARBAGE / AMZ_FETCH / -O <file>):
+#   - Maintains original wget-compat behavior for existing tests.
+
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+
+# ── Exit-IP probe mode ──────────────────────────────────────────────────────
+# Activated when CURL_STUB_OUT is set (even if empty string).
+if [ "${CURL_STUB_OUT+set}" = set ]; then
+  # Increment call counter if provided
+  if [ -n "${CURL_CALLCOUNT:-}" ]; then
+    _cnt=$(cat "$CURL_CALLCOUNT" 2>/dev/null || echo 0)
+    _cnt=$((_cnt + 1))
+    echo "$_cnt" > "$CURL_CALLCOUNT"
+  fi
+  # Echo the stubbed IP (empty = simulate curl failure/no output)
+  if [ -n "$CURL_STUB_OUT" ]; then
+    printf '%s' "$CURL_STUB_OUT"
+  fi
+  exit 0
+fi
+
+# ── Legacy fetch mode (wget-compat) ────────────────────────────────────────
+# Extract the URL and the -O target from arguments.
+_url=""; _outfile=""
+_prev=""
+for _a in "$@"; do
+  case "$_a" in
+    -O) _prev=O ;;
+    -qO) _prev=O ;;
+    -sLo) _prev=O ;;
+    -o) _prev=O ;;
+    *)
+      if [ "$_prev" = O ]; then
+        _outfile="$_a"; _prev=""
+      else
+        case "$_a" in
+          http*|ftp*|file*) _url="$_a" ;;
+          -*) _prev="" ;;
+        esac
+      fi
+      ;;
+  esac
+done
+
+if [ "${FETCH_FAIL:-0}" = 1 ]; then
+  exit 1
+fi
+
+# FETCH_GARBAGE=1: write an HTML body that should fail domain/cidr validation.
+if [ "${FETCH_GARBAGE:-0}" = 1 ] && [ -n "$_outfile" ]; then
+  printf '<!DOCTYPE html>\n<html><body>404: Not Found</body></html>\n' > "$_outfile"
+  exit 0
+fi
+
+# If AMZ_FETCH points to a fixture file, copy it to the output target.
+if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ] && [ -n "$_outfile" ]; then
+  cp "$AMZ_FETCH" "$_outfile"
+  exit 0
+fi
+
+# Default: write a small fixture list so callers get a non-empty result.
+if [ -n "$_outfile" ]; then
+  printf 'example.com\ntest.example\n' > "$_outfile"
+fi
+
+exit 0
