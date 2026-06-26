@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "amnezia-dns-ctl $*" >> "${STUB_LOG:-/dev/null}"
+exit 0
