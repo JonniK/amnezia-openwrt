@@ -24,9 +24,9 @@ _restart_monitor() {
 }
 
 # True when uci reports a section of type 'tunnel' for the given name.
-_ctl_tun_exists()  { [ -n "$1" ] && [ "$(uci -q get amnezia.$1 2>/dev/null)" = tunnel ]; }
+_ctl_tun_exists()  { [ -n "$1" ] && [ "$(uci -q get "amnezia.$1" 2>/dev/null)" = tunnel ]; }
 # True when the tunnel's enabled option is exactly '1'.
-_ctl_tun_enabled() { [ "$(uci -q get amnezia.$1.enabled 2>/dev/null)" = 1 ]; }
+_ctl_tun_enabled() { [ "$(uci -q get "amnezia.$1.enabled" 2>/dev/null)" = 1 ]; }
 
 case "$1" in
   set-mode)
@@ -131,16 +131,19 @@ case "$1" in
   master)
     # Real bounded WAN+DNS probe. Overridable for tests via AMNEZIA_VERIFY_CMD=true.
     _amz_verify_conn() {
-      ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && nslookup -timeout=2 openwrt.org >/dev/null 2>&1
+      ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 && nslookup openwrt.org 127.0.0.1 >/dev/null 2>&1
     }
     _verify="${AMNEZIA_VERIFY_CMD:-_amz_verify_conn}"
     case "$2" in
       off)
-        _ds=$(uci -q get amnezia.config.dot_enabled 2>/dev/null || echo 0)
-        _as=$(uci -q get amnezia.config.autolearn_enabled 2>/dev/null || echo 0)
+        _me=$(uci -q get amnezia.config.master_enabled 2>/dev/null || echo 1)
+        if [ "$_me" != 0 ]; then
+          _ds=$(uci -q get amnezia.config.dot_enabled 2>/dev/null || echo 0)
+          _as=$(uci -q get amnezia.config.autolearn_enabled 2>/dev/null || echo 0)
+          uci set amnezia.config.dot_master_saved="$_ds"
+          uci set amnezia.config.autolearn_master_saved="$_as"
+        fi
         uci set amnezia.config.master_enabled=0
-        uci set amnezia.config.dot_master_saved="$_ds"
-        uci set amnezia.config.autolearn_master_saved="$_as"
         uci commit amnezia
         ${AMNEZIA_FAILOVER_INIT:-/etc/init.d/amnezia-failover} stop 2>/dev/null || true
         if [ "$_ds" = 1 ]; then

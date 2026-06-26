@@ -339,7 +339,10 @@ run_loop() {
     for _m in $MEMBERS; do _n=${_m%%:*}
       _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
       if tunnel_healthy "$_n" "$_track"; then
-        if debounce "$_n" 1; then amz_log "tunnel $_n came up"; fi
+        if debounce "$_n" 1; then
+          amz_log "tunnel $_n came up"
+          rm -f "$ST_DIR/exitip.${_n}.ts" "$ST_DIR/exitip.${_n}.ip"
+        fi
         HEALTHY="$HEALTHY $_n"
       else
         if debounce "$_n" 0; then amz_log "tunnel $_n went down"; fi

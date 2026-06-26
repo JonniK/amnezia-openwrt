@@ -189,6 +189,35 @@ setup() {
   grep -q 'delete amnezia.config.autolearn_master_saved' "$STUB_LOG"
 }
 
+@test "master off idempotent: double-off preserves original dot_master_saved=1" {
+  # First call: master_enabled=1, dot_enabled=1 → saves dot_master_saved=1
+  UCI_GET_amnezia_config_master_enabled=1 \
+  UCI_GET_amnezia_config_dot_enabled=1 \
+  UCI_GET_amnezia_config_autolearn_enabled=0 \
+  run sh "$CTL" master off
+  [ "$status" -eq 0 ]
+  grep -q 'set amnezia.config.dot_master_saved=1' "$STUB_LOG"
+
+  # Second call: master_enabled=0 (already off) — must NOT overwrite dot_master_saved
+  : > "$STUB_LOG"
+  UCI_GET_amnezia_config_master_enabled=0 \
+  UCI_GET_amnezia_config_dot_enabled=0 \
+  UCI_GET_amnezia_config_autolearn_enabled=0 \
+  run sh "$CTL" master off
+  [ "$status" -eq 0 ]
+  # Must NOT write dot_master_saved=0 (would corrupt the saved=1 from first call)
+  ! grep -q 'set amnezia.config.dot_master_saved=' "$STUB_LOG"
+}
+
+@test "master off then on: dot_master_saved=1 survives; master on re-enables DoT" {
+  # Simulate state after first master off (saved=1, master_enabled now 0)
+  UCI_GET_amnezia_config_dot_master_saved=1 \
+  UCI_GET_amnezia_config_autolearn_master_saved=0 \
+  run sh "$CTL" master on
+  [ "$status" -eq 0 ]
+  grep -q 'amnezia-dns-ctl enable' "$STUB_LOG"
+}
+
 @test "master rejects bad subcommand" {
   run sh "$CTL" master sideways
   [ "$status" -ne 0 ]
