@@ -93,6 +93,50 @@ debounce() {
   echo "$_s $_c" > "$ST_DIR/$1"; return 1
 }
 
+# ── exit-IP probe ────────────────────────────────────────────────────────────
+
+# Refresh one tunnel's public egress IP, bound to its device, cached with TTL.
+# Safe to call from a detached subshell; never invoked synchronously in poll body.
+# $1 = awgN ; echoes ip or "" (keeps last-known on curl failure)
+_probe_exit_ip() {
+  _ifn=$1
+  _cf="$ST_DIR/exitip.${_ifn}.ip"
+  _tf="$ST_DIR/exitip.${_ifn}.ts"
+  _now=$(date +%s)
+  _ts=$(cat "$_tf" 2>/dev/null || echo 0)
+  if [ -f "$_cf" ] && [ $((_now - _ts)) -lt "${AMNEZIA_EXITIP_TTL:-300}" ]; then
+    cat "$_cf"
+    return
+  fi
+  _ip=""
+  for _u in ${AMNEZIA_IPECHO_URLS:-https://api.ipify.org}; do
+    _ip=$(curl --interface "if!${_ifn}" -fsSL --connect-timeout 5 --max-time 8 "$_u" 2>/dev/null \
+          | tr -d ' \t\r\n' | grep -Eo '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' || true)
+    [ -n "$_ip" ] && break
+  done
+  if [ -n "$_ip" ]; then
+    printf '%s' "$_ip" > "$_cf"
+    printf '%s' "$_now" > "$_tf"
+    echo "$_ip"
+  else
+    # Return stale cached value on failure (stale-ok: prefer last-known over nothing)
+    cat "$_cf" 2>/dev/null || true
+  fi
+}
+
+# Detached per-cycle refresher: spawns ONE background pass guarded by flock so
+# passes never stack. Poll loop returns immediately; only the child runs curl.
+_refresh_exit_ips() {
+  _lk="$ST_DIR/exitip.lock"
+  (
+    flock -n 9 || exit 0
+    for _m in $MEMBERS; do
+      _n=${_m%%:*}
+      _is_healthy "$_n" && _probe_exit_ip "$_n" >/dev/null
+    done
+  ) 9>"$_lk" &
+}
+
 # ── reconcile ────────────────────────────────────────────────────────────────
 
 _is_healthy() { case " $HEALTHY " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -163,7 +207,17 @@ write_state() {
     else
       _hs_age=-1
     fi
-    _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":$_hs_age,\"carrying\":$_car,\"exit_ip\":null},"
+    # Read exit-IP from cache only (probe runs detached; no curl on the poll path).
+    _eip=$(cat "$ST_DIR/exitip.${_n}.ip" 2>/dev/null || true)
+    _ets=$(cat "$ST_DIR/exitip.${_n}.ts" 2>/dev/null || echo 0)
+    if [ -n "$_eip" ] && [ "$_up" = true ]; then
+      _eipj="\"$_eip\""
+      _eage=$(( _now - _ets ))
+    else
+      _eipj=null
+      _eage=null
+    fi
+    _t="$_t{\"name\":\"$_n\",\"enabled\":true,\"up\":$_up,\"metric\":$_met,\"weight\":$_w,\"handshake_age\":$_hs_age,\"carrying\":$_car,\"exit_ip\":${_eipj},\"exit_ip_age\":${_eage}},"
   done
 
   # C1: read routing_mode from UCI so the LuCI select shows live state.
@@ -294,6 +348,7 @@ run_loop() {
     HEALTHY="${HEALTHY# }"
     _pool=$(_best_pool); _stk=$(_sticky_pick)
     reconcile
+    _refresh_exit_ips
     write_state "$_pool" "$_stk"
     rm -f "$_trigger"
     _slept=0
