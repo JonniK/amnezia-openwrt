@@ -37,17 +37,24 @@ Six capabilities added across daemon, ctl, init, and LuCI UI:
    detached background pass each poll cycle (flock-guarded so passes
    never stack). Each tunnel's egress IP is probed bound to its interface
    (`curl --interface if!awgN`), cached with a 300 s TTL in
-   `$ST_DIR/exitip.<awgN>.ip|.ts`, and emitted in the failover-state JSON
-   as `exit_ip`/`exit_ip_age`. The LuCI table shows the cached IP + age;
-   a down tunnel shows `—`.
+   `$ST_DIR/exitip.<awgN>.ip|.ts` (`$ST_DIR` = `/tmp/amnezia-fo`), and
+   emitted in the failover-state JSON as `exit_ip`/`exit_ip_age`. The
+   LuCI table shows the cached IP + age; a down tunnel shows `—`. Cache
+   is cleared on down→up transition and on `amnezia-tunnel-ctl remove`
+   so a re-added tunnel cannot inherit a previous tenant's exit IP.
 
 6. **Fail-open master on/off switch** — `amnezia-failover-ctl master
-   off|on` snapshot-saves the user's `dot_enabled` / `autolearn_enabled`
-   intent, then operationally disables each subsystem. `amnezia-failover.init
-   start_service` is gated on `amz_master_enabled` (from `amnezia-common.sh`)
-   so the daemon does not reinstall policy-routing rules across reboots
-   while master is OFF. LuCI renders a master-state strip above the
-   accordion with a toggle button.
+   on|off` snapshot-saves the user's `dot_enabled` / `autolearn_enabled`
+   intent into transient UCI keys (`dot_master_saved`,
+   `autolearn_master_saved`), then operationally disables each subsystem.
+   `master off` also removes the failover state JSON so the LuCI table
+   shows "no data" while routing is bypassed, and explicitly flushes the
+   DoT pref-30900 ip rule and tables 100/101 even if `amnezia-dns-ctl
+   disable` fails. `amnezia-failover.init start_service` is gated on
+   `amz_master_enabled` (from `amnezia-common.sh`) so the daemon does not
+   reinstall policy-routing rules across reboots while master is OFF. LuCI
+   renders a master-state strip above the accordion with a toggle button;
+   the accordion dims (`opacity:0.55`) while master is OFF.
 
 ---
 
