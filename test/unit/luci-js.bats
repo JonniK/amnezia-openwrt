@@ -35,7 +35,7 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 @test "handshake_age is rendered directly as age-in-seconds (no Date.now subtract)" {
   # Issue MED: producer emits age-in-seconds; consumer must not double-convert via Date.now().
   # direct age path now lives in failover.js; main.js must not have the stale pattern.
-  ! grep -qE "Date\.Now\(\).*handshake_age|handshake_age.*Date\.Now\(\)" "$F"
+  ! grep -qE "Date\.now\(\).*handshake_age|handshake_age.*Date\.now\(\)" "$F"
   FV="$AMZ/amnezia/section/failover.js"
   grep -qE "age < 0.*never|age < 60.*ago" "$FV"
 }
@@ -259,4 +259,66 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   # or the variable is undefined at runtime → ReferenceError → blank panel.
   run node -e 'const h=require("./test/lib/luci-harness.js"); const b=h.lintRequires(); if(b.length){console.error(b.join("\n"));process.exit(1)}'
   [ "$status" -eq 0 ]
+}
+
+# ── Phase 4: handler harness (Item 3 regression guard) ───────────────────────
+
+@test "harness executes all named change handlers without reject (handler-exec-safe)" {
+  # Every named handler in CHANGE_HANDLERS must resolve under both succeeding
+  # and rejecting fs stubs. This is the regression guard the original Item-3
+  # inline-closure bug (Mode/Sticky didn't repaint AND weren't harness-reachable) would trip.
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "handler-exec-safe ok"
+}
+
+@test "main.js load() reads DoT status (index 10) and master_enabled (index 11)" {
+  grep -q "amnezia-dns-ctl.*status\|status.*amnezia-dns-ctl" "$F"
+  grep -q "amnezia.config.master_enabled" "$F"
+}
+
+@test "main.js has master strip and handleMasterToggle" {
+  grep -q "amz-master-strip" "$F"
+  grep -q "handleMasterToggle" "$F"
+  grep -q "amnezia-failover-ctl.*master\|master.*amnezia-failover-ctl" "$F"
+}
+
+@test "failover.js has named handleSetMode and handleSetSticky handlers" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleSetMode" "$FV"
+  grep -q "handleSetSticky" "$FV"
+}
+
+@test "failover.js has handleMakeDefault, handleTunnelRestart, handleForcePin, handleForceUnpin" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "handleMakeDefault" "$FV"
+  grep -q "handleTunnelRestart" "$FV"
+  grep -q "handleForcePin" "$FV"
+  grep -q "handleForceUnpin" "$FV"
+}
+
+@test "failover.js shows exit_ip with age in tunnel table" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "exit_ip_age" "$FV"
+  grep -q "exit_ip" "$FV"
+}
+
+@test "dns.js has handlers map with handleDotToggle and handleDotProvider" {
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "handleDotToggle" "$D"
+  grep -q "handleDotProvider" "$D"
+  grep -q "handlers:" "$D"
+}
+
+@test "dns.js has dnsRowMarkup helper used by both render and refresh paths" {
+  D="$AMZ/amnezia/section/dns.js"
+  grep -q "dnsRowMarkup" "$D"
+}
+
+@test "failover.js has force-pool banner and force-pool select" {
+  FV="$AMZ/amnezia/section/failover.js"
+  grep -q "failover-force-pool-banner" "$FV"
+  grep -q "failover-force-pool-select" "$FV"
+  grep -q "force-pin" "$FV"
+  grep -q "force-unpin" "$FV"
 }

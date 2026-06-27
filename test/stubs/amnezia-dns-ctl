@@ -1,0 +1,7 @@
+#!/bin/sh
+echo "amnezia-dns-ctl $*" >> "${STUB_LOG:-/dev/null}"
+# AMNEZIA_DNS_CTL_FAIL_DISABLE=1: simulate dns-ctl disable failure (for FIX-3 test).
+if [ "${AMNEZIA_DNS_CTL_FAIL_DISABLE:-0}" = 1 ] && [ "$1" = disable ]; then
+  exit 1
+fi
+exit 0

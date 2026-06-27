@@ -5,7 +5,7 @@ A="$HARNESS_DIR/../packages/amnezia-pbr/Makefile"
   ! grep -Eq "DEPENDS.*\+pbr( |$)" "$A"
   ! grep -q "luci-app-pbr" "$A"
   grep -q "conntrack-tools" "$A"
-  grep -q "PKG_RELEASE:=3" "$A"
+  grep -q "PKG_RELEASE:=4" "$A"
 }
 @test "autolearn files are staged into the package tree" {
   ROOT="$HARNESS_DIR/.."

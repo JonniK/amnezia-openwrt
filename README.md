@@ -23,6 +23,25 @@ What you get on the router:
     the `globals.mode` UCI field.
   - Fail-closed: when all tunnels are down a blackhole default is
     installed so LAN traffic cannot leak through WAN unencrypted.
+  - **Make-default**: `amnezia-failover-ctl make-default <awgN>`
+    renumbers metrics so the chosen tunnel wins the next pool election
+    without disabling any other tunnel.
+  - **Force-pin**: `amnezia-failover-ctl force-pin <awgN>` bypasses
+    metric ordering and routes the full pool through one tunnel. If that
+    tunnel goes down the pool is fail-closed (no silent switch). Unpin
+    with `force-unpin`.
+  - **Per-tunnel restart**: `amnezia-failover-ctl restart <awgN>`
+    bounces a single interface without touching others (LuCI per-row
+    Restart button).
+  - **Exit IP display**: the daemon probes each UP tunnel's public
+    egress IP in a detached background pass (300 s TTL cache) and emits
+    it in the failover JSON as `exit_ip`/`exit_ip_age`. The LuCI table
+    shows the IP + age; down tunnels show `—`.
+  - **Master switch**: `amnezia-failover-ctl master off` fail-opens the
+    router (LAN → WAN direct, no tunnel, no DoT, no autolearn). `master
+    on` restores all saved settings. State persists across reboot via
+    `amnezia.config.master_enabled` (default `1`). LuCI shows a master
+    strip above the accordion.
 - **Two routing modes** switchable at runtime (UCI `config.routing_mode`):
   - `tunnel-default` (default): all foreign traffic routes through the
     tunnel; `.ru` TLDs and RU CIDRs go direct.
@@ -75,10 +94,16 @@ What you get on the router:
 - **IPv6 fail-closed**: LAN→WAN IPv6 forwarding is dropped and LAN
   RA/DHCPv6/NDP are disabled. Tunnels carry IPv4 traffic only.
 - A LuCI page at **Network → Amnezia** with:
-  - tunnel + failover status, per-tunnel health and handshake age
-  - one-click tunnel toggle and mode switch
-  - **Add tunnel** form (paste `.conf` or `vpn://` link) and per-row
-    **Remove** button
+  - **Master switch strip** (above the accordion) to fail-open or restore
+    the whole stack in one click
+  - tunnel + failover status, per-tunnel health, handshake age, and
+    **exit IP** (with cache age)
+  - per-row **Make default**, **Restart**, **Toggle**, and **Remove**
+    buttons
+  - **Force pool through** select + Pin/Unpin controls; warning banner
+    when failover is suspended
+  - one-click mode switch (failover / balance)
+  - **Add tunnel** form (paste `.conf` or `vpn://` link)
   - **Routing mode** selector (tunnel-default / direct-default)
   - **Allowlist sources** with per-source enable/disable checkboxes,
     "Update now" button, and a manual entry textarea
@@ -89,7 +114,8 @@ What you get on the router:
   - **Blockcheck** runner with live log + apply/revert of recommended
     nfqws strategies
   - **Encrypted DNS (DoT)** toggle with provider dropdown and active
-    tier indicator (dot / doh / plaintext fallback / off)
+    tier indicator (dot / doh / plaintext fallback / off); renders on
+    first paint (no blank-row delay)
 
 ## Screenshots
 
@@ -186,6 +212,8 @@ anything — idempotent.
 | `/etc/amnezia/autolearn/candidates.tsv` | 7-column TSV: domain, verdict, count, clients, first_seen, last_probe, reason |
 | `/etc/amnezia/autolearn/deny.list` | Vetoed domains (never re-added by autolearn; suffix-aware exclusion also applied in `amnezia-force-load`) |
 | `/tmp/dnsmasq-queries.log` | DNS query log (tmpfs; present only while autolearn is enabled; lost on reboot) |
+| `/tmp/amnezia-fo/exitip.<awgN>.ip` | Cached exit IP for each tunnel (written by daemon background probe; cleared on down→up or tunnel remove) |
+| `/tmp/amnezia-fo/exitip.<awgN>.ts` | Unix timestamp of the last exit-IP probe for `<awgN>` (TTL 300 s) |
 | `/usr/lib/amnezia/amnezia-dns-lib.sh` | Encrypted-DNS helpers: provider profiles, stubby/https-dns-proxy UCI render, dnsmasq server management, ip rule helpers |
 | `/usr/bin/amnezia-dns-ctl` | Encrypted-DNS state machine CLI (`enable`, `disable`, `apply`, `set-provider`, `status`, `watchdog`) |
 | `/etc/init.d/amnezia-dns` | procd init (START=97): runs `apply` on start, runs `watchdog` as a respawned procd service |
@@ -202,6 +230,7 @@ All failover settings live in `/etc/config/amnezia` (UCI). Edit via
 |---|---|---|
 | `globals.mode` | `failover` | `failover` = strict-priority (single exit IP); `balance` = load-balance across healthy tunnels |
 | `globals.sticky_target` | `awg1` | Tunnel name that carries sticky-marked traffic (claude.ai, anthropic.com) |
+| `globals.force_pool` | — | When set to a tunnel name, forces the entire pool through that tunnel (fail-closed if it goes down); set via `force-pin`, cleared via `force-unpin` |
 
 **`config tunnel 'awgN'`** — one section per tunnel (awg1 … awg5):
 
@@ -246,18 +275,28 @@ amnezia-failover-ctl set-mode failover       # switch back to strict-priority
 amnezia-failover-ctl set-sticky awg2         # pin sticky traffic to awg2
 amnezia-failover-ctl set-weight awg2 3       # raise awg2 weight in balance mode
 amnezia-failover-ctl toggle awg2             # enable/disable awg2 in pool
+amnezia-failover-ctl make-default awg2       # renumber metrics so awg2 wins next poll election
+amnezia-failover-ctl force-pin awg2          # route entire pool through awg2 (fail-closed if down)
+amnezia-failover-ctl force-unpin             # restore normal metric-based pool selection
+amnezia-failover-ctl restart awg2            # ifdown awg2; sleep 1; ifup awg2
+amnezia-failover-ctl master off              # fail-open: disable all VPN routing + DoT + autolearn
+amnezia-failover-ctl master on               # restore stack from saved settings
 amnezia-failover-ctl set-routing-mode direct-default   # switch to allowlist mode
 amnezia-failover-ctl set-routing-mode tunnel-default   # switch back to tunnel-by-default
 amnezia-failover-ctl set-source refilter_domains 1     # enable a source for the force-tunnel list
 amnezia-failover-ctl set-source refilter_domains 0     # disable it
 ```
 
-`set-mode`, `set-sticky`, `set-weight`, and `toggle` commit UCI and restart the
-monitor. `set-routing-mode` regenerates the active classifier, runs
-`amnezia-force-load`, reloads fw4 (in a backgrounded subshell so SSH stays
-open), and flushes conntrack pool/sticky marks so existing flows re-evaluate
-immediately. `set-source` commits UCI only; the change takes effect on the
-next `amnezia-force-update` run.
+`set-mode`, `set-sticky`, `set-weight`, `toggle`, and `make-default` commit
+UCI and restart the monitor. `force-pin` and `force-unpin` commit UCI and
+touch `/tmp/amnezia-fo/immediate` to trigger an immediate daemon reconcile
+without a full restart. `restart` bounces only the named interface. `master
+off|on` stops/starts the daemon, flushes/restores ip rules and DoT, and
+verifies WAN + DNS connectivity before returning. `set-routing-mode`
+regenerates the active classifier, runs `amnezia-force-load`, reloads fw4
+(backgrounded so SSH stays open), and flushes conntrack marks so existing
+flows re-evaluate immediately. `set-source` commits UCI only; the change
+takes effect on the next `amnezia-force-update` run.
 
 ### Managing tunnels at runtime
 
@@ -555,7 +594,8 @@ openwrt/
   install-amnezia-pbr.sh            Main installer + migration pipeline (runs on the router)
   amnezia-failover                  procd failover monitor daemon
   amnezia-failover-ctl.sh           Control helper (set-mode, set-sticky, set-weight, toggle,
-                                      set-routing-mode, set-source)
+                                      set-routing-mode, set-source, make-default, force-pin,
+                                      force-unpin, restart, master on|off)
   amnezia-failover.init             procd init script for amnezia-failover (installs fwmark rules)
   amnezia-tunnel-ctl.sh             Add / remove tunnels (add, remove, list-free)
   amnezia-force-load.sh             Merge force.d/ + manual list -> amnezia_force4 set + dnsmasq

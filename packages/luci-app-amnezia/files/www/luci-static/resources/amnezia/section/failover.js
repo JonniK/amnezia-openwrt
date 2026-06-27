@@ -14,6 +14,28 @@ function parseFailoverState(text) {
 	try { return JSON.parse(text); } catch (e) { return null; }
 }
 
+// Standard handler helper: exec a ctl command then repaint the section.
+// Returns a Promise that always resolves (catches errors and shows a notification).
+function ctlThenRefresh(view, argv, sectionRefresh) {
+	return fs.exec(argv[0], argv.slice(1)).then(function(res) {
+		ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+			(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+			res.code === 0 ? 'info' : 'warning');
+		return sectionRefresh(view);
+	}).catch(function(err) {
+		ui.addNotification(null, E('p', {}, _('Action failed: ') + err), 'danger');
+	});
+}
+
+// Format an age-in-seconds value (same vocabulary as handshake_age rendering).
+function fmtSec(age) {
+	if (age === undefined || age === null || age < 0) return _('?');
+	if (age < 60) return age + 's ago';
+	if (age < 3600) return Math.floor(age / 60) + 'm ago';
+	if (age < 86400) return Math.floor(age / 3600) + 'h ago';
+	return Math.floor(age / 86400) + 'd ago';
+}
+
 // self is the view instance; pass it so toggle/remove buttons can call handlers.
 // self may be null when called without toggle support (e.g. in tests).
 function renderTunnelTable(state, self) {
@@ -25,15 +47,16 @@ function renderTunnelTable(state, self) {
 		'style': 'border-collapse:collapse;font-size:12px;width:100%;table-layout:fixed;'
 	});
 	var head = E('tr', {}, [
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:11%;' }, _('Tunnel')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:9%;' }, _('State')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('Role')),
-		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Metric')),
-		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Weight')),
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:14%;' }, _('Handshake')),
-		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:12%;' }, _('Exit IP')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('Toggle')),
-		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Remove'))
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:10%;' }, _('Tunnel')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:8%;' }, _('State')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:9%;' }, _('Role')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:6%;' }, _('Metric')),
+		E('th', { 'style': 'text-align:right;padding:4px 6px;border-bottom:2px solid #ddd;width:6%;' }, _('Weight')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:13%;' }, _('Handshake')),
+		E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:2px solid #ddd;width:15%;' }, _('Exit IP')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:7%;' }, _('Toggle')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:6%;' }, _('Remove')),
+		E('th', { 'style': 'text-align:center;padding:4px 6px;border-bottom:2px solid #ddd;width:20%;' }, _('Actions'))
 	]);
 	table.appendChild(head);
 	for (var i = 0; i < state.tunnels.length; i++) {
@@ -60,6 +83,35 @@ function renderTunnelTable(state, self) {
 				'click': ui.createHandlerFn(self, 'handleTunnelRemove', t.name, t.exit_ip || '')
 			  }, _('Remove'))
 			: E('span', {}, '');
+
+		// Exit-IP cell: show IP + age when available.
+		var exitIpText = t.exit_ip
+			? (t.exit_ip + ' (' + fmtSec(t.exit_ip_age) + ')')
+			: '—';
+
+		// "Make default" — hidden when this tunnel IS the active pool, or when
+		// force_pool is set (metric is moot while pinned). Do NOT use t.carrying
+		// (carrying is also true for the sticky tunnel).
+		var showMakeDefault = self
+			&& t.name !== state.active_pool
+			&& !state.force_pool;
+		var makeDefaultBtn = showMakeDefault
+			? E('button', {
+				'class': 'btn btn-sm cbi-button-action',
+				'style': 'padding:2px 6px;font-size:11px;margin-right:4px;',
+				'click': ui.createHandlerFn(self, 'handleMakeDefault', t.name)
+			  }, _('Make default'))
+			: E('span', {}, '');
+
+		// "Restart" — confirms before acting.
+		var restartBtn = self
+			? E('button', {
+				'class': 'btn btn-sm cbi-button-action',
+				'style': 'padding:2px 6px;font-size:11px;',
+				'click': ui.createHandlerFn(self, 'handleTunnelRestart', t.name)
+			  }, _('Restart'))
+			: E('span', {}, '');
+
 		var row = E('tr', {}, [
 			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;font-weight:bold;' },
 				t.label ? (t.name + ' (' + t.label + ')') : t.name),
@@ -83,11 +135,15 @@ function renderTunnelTable(state, self) {
 					return Math.floor(age / 86400) + 'd ago';
 				})(t.handshake_age)),
 			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;color:#444;font-family:monospace;font-size:11px;' },
-				t.exit_ip || ''),
+				exitIpText),
 			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },
 				toggleBtn),
 			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;text-align:center;' },
-				removeBtn)
+				removeBtn),
+			E('td', { 'style': rowBg + 'padding:4px 6px;border-bottom:1px solid #eee;' }, [
+				makeDefaultBtn,
+				restartBtn
+			])
 		]);
 		table.appendChild(row);
 	}
@@ -99,11 +155,14 @@ function paintFailoverSummary(state) {
 	var dot = document.getElementById('failover-active-dot');
 	var label = document.getElementById('failover-active-label');
 	var modeEl = document.getElementById('failover-mode-label');
+	var bannerEl = document.getElementById('failover-force-pool-banner');
+	var forceSel = document.getElementById('failover-force-pool-select');
 
 	if (!state) {
 		if (dot) dot.style.background = '#888';
 		if (label) label.textContent = _('no data');
 		if (modeEl) modeEl.textContent = '';
+		if (bannerEl) bannerEl.style.display = 'none';
 		return;
 	}
 
@@ -111,6 +170,22 @@ function paintFailoverSummary(state) {
 	if (dot) dot.style.background = allDown ? '#a94442' : '#3c763d';
 	if (label) label.textContent = allDown ? _('ALL DOWN') : (state.active_pool || _('unknown'));
 	if (modeEl) modeEl.textContent = 'mode: ' + (state.mode || '?');
+
+	// Show/hide the force-pool banner.
+	if (bannerEl) {
+		if (state.force_pool) {
+			bannerEl.style.display = '';
+			bannerEl.textContent = _('Failover suspended — pool pinned to ') + state.force_pool +
+				_('. If it drops, pool traffic stops until you unpin.');
+		} else {
+			bannerEl.style.display = 'none';
+		}
+	}
+
+	// Sync the force-pool select to current state (don't touch while user is interacting).
+	if (forceSel && !forceSel.contains(document.activeElement)) {
+		forceSel.value = state.force_pool || '';
+	}
 }
 
 // ── vpn:// decoder ──────────────────────────────────────────────────────────
@@ -221,6 +296,64 @@ function decodeVpnLink(text) {
 
 return baseclass.extend({
 	handlers: {
+		// ── Mode / Sticky — NAMED so harness can reach them (Item 3 fix) ────────
+
+		handleSetMode: function(ev) {
+			var sel = document.getElementById('failover-mode-select');
+			if (!sel) return Promise.resolve();
+			var failover = this.__failoverModule;
+			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'set-mode', sel.value],
+				failover ? failover.refresh : function() { return Promise.resolve(); });
+		},
+
+		handleSetSticky: function(ev, tunnelName) {
+			var inp = document.getElementById('failover-sticky-input');
+			var val = (inp ? inp.value.trim() : '') || tunnelName || '';
+			if (!val) {
+				ui.addNotification(null, E('p', {}, _('Enter a tunnel name (e.g. awg1)')), 'warning');
+				return Promise.resolve();
+			}
+			var failover = this.__failoverModule;
+			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'set-sticky', val],
+				failover ? failover.refresh : function() { return Promise.resolve(); });
+		},
+
+		// ── Tunnel controls (Items 4, 5) ─────────────────────────────────────────
+
+		handleMakeDefault: function(ev, tunnelName) {
+			var failover = this.__failoverModule;
+			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'make-default', tunnelName || 'awg1'],
+				failover ? failover.refresh : function() { return Promise.resolve(); });
+		},
+
+		handleTunnelRestart: function(ev, tunnelName) {
+			var name = tunnelName || 'awg1';
+			var failover = this.__failoverModule;
+			var sectionRefresh = failover ? failover.refresh : function() { return Promise.resolve(); };
+			return util.uiConfirm(_('Restart tunnel ') + name + _('?\n\nThis will briefly interrupt traffic on this tunnel.')).then(L.bind(function(ok) {
+				if (!ok) return Promise.resolve();
+				return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'restart', name], sectionRefresh);
+			}, this));
+		},
+
+		handleForcePin: function(ev, tunnelName) {
+			var sel = document.getElementById('failover-force-pool-select');
+			var name = (sel ? sel.value : '') || tunnelName || 'awg1';
+			if (!name) {
+				ui.addNotification(null, E('p', {}, _('Select a tunnel to pin')), 'warning');
+				return Promise.resolve();
+			}
+			var failover = this.__failoverModule;
+			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'force-pin', name],
+				failover ? failover.refresh : function() { return Promise.resolve(); });
+		},
+
+		handleForceUnpin: function(ev) {
+			var failover = this.__failoverModule;
+			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'force-unpin'],
+				failover ? failover.refresh : function() { return Promise.resolve(); });
+		},
+
 		handleTunnelToggle: function(ev, tunnelName) {
 			var btnId = 'awg-toggle-' + tunnelName;
 			var btn = document.getElementById(btnId);
@@ -366,6 +499,23 @@ return baseclass.extend({
 	render: function(view, data) {
 		var failoverState = parseFailoverState((data && data[7]) || '');
 
+		// Build tunnel list for the force-pool select.
+		var tunnelNames = [];
+		if (failoverState && failoverState.tunnels) {
+			for (var ti = 0; ti < failoverState.tunnels.length; ti++) {
+				tunnelNames.push(failoverState.tunnels[ti].name);
+			}
+		}
+
+		// Store a back-reference so named handlers can call failover.refresh.
+		view.__failoverModule = this;
+
+		var forcePoolBannerDisplay = (failoverState && failoverState.force_pool) ? '' : 'none';
+		var forcePoolBannerText = failoverState && failoverState.force_pool
+			? (_('Failover suspended — pool pinned to ') + failoverState.force_pool +
+			   _('. If it drops, pool traffic stops until you unpin.'))
+			: '';
+
 		return E('details', { 'class': 'amnezia-panel', 'open': '' }, [
 			E('summary', {}, _('Tunnels & Failover')),
 
@@ -400,17 +550,7 @@ return baseclass.extend({
 								'id': 'failover-mode-select',
 								'class': 'cbi-input-select',
 								'style': 'width:160px;margin-right:8px;',
-								'change': ui.createHandlerFn(view, function(ev) {
-									var sel = document.getElementById('failover-mode-select');
-									if (!sel) return Promise.resolve();
-									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-mode', sel.value]).then(L.bind(function(res) {
-										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
-											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
-											res.code === 0 ? 'info' : 'warning');
-									}, this)).catch(function(err) {
-										ui.addNotification(null, E('p', {}, _('set-mode failed: ') + err), 'danger');
-									});
-								})
+								'change': ui.createHandlerFn(view, 'handleSetMode')
 							}, [
 								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
 								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
@@ -430,22 +570,39 @@ return baseclass.extend({
 							}),
 							E('button', {
 								'class': 'btn cbi-button-action',
-								'click': ui.createHandlerFn(view, function(ev) {
-									var inp = document.getElementById('failover-sticky-input');
-									var val = inp ? inp.value.trim() : '';
-									if (!val) {
-										ui.addNotification(null, E('p', {}, _('Enter a tunnel name (e.g. awg1)')), 'warning');
-										return Promise.resolve();
-									}
-									return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-sticky', val]).then(function(res) {
-										ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
-											(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
-											res.code === 0 ? 'info' : 'warning');
-									}).catch(function(err) {
-										ui.addNotification(null, E('p', {}, _('set-sticky failed: ') + err), 'danger');
-									});
-								})
+								'click': ui.createHandlerFn(view, 'handleSetSticky')
 							}, _('Set sticky'))
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Force pool through')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('select', {
+								'id': 'failover-force-pool-select',
+								'class': 'cbi-input-select',
+								'style': 'width:120px;margin-right:8px;'
+							}, [E('option', { 'value': '' }, _('— select —'))].concat(
+								tunnelNames.map(function(n) {
+									return E('option', {
+										'value': n,
+										'selected': (failoverState && failoverState.force_pool === n) ? '' : null
+									}, n);
+								})
+							)),
+							E('button', {
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(view, 'handleForcePin')
+							}, _('Pin')),
+							' ',
+							E('button', {
+								'class': 'btn cbi-button-neutral',
+								'click': ui.createHandlerFn(view, 'handleForceUnpin')
+							}, _('Unpin')),
+							E('div', {
+								'id': 'failover-force-pool-banner',
+								'class': 'alert-message warning',
+								'style': 'display:' + forcePoolBannerDisplay + ';margin-top:6px;'
+							}, forcePoolBannerText)
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [

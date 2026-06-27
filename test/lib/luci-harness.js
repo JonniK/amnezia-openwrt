@@ -16,12 +16,31 @@ function E(tag, attrs, children){ if (attrs && (Array.isArray(attrs)||typeof att
   return node; }
 const _ = s => s;
 const L = { bind:(fn,ctx)=>fn.bind(ctx), resolveDefault:(p,d)=>Promise.resolve(p).then(v=>v!=null?v:d, ()=>d) };
-const ui = { createHandlerFn:()=>function(){return Promise.resolve();}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
+// Realistic createHandlerFn: throws TypeError if ctx is null/undefined (mirrors LuCI's real
+// `ctx[fn]` deref failing with undefined context), so the this===undefined bug in
+// paintMasterStrip is observable. Does NOT check method existence — section modules legitimately
+// create handlers for methods that live on the assembled view, not on `this` in their own scope.
+const ui = { createHandlerFn:function(ctx, fn){ if(ctx==null) throw new TypeError('handler '+fn+' not found on ctx (ctx is null/undefined)'); return function(){return Promise.resolve();}; }, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
 const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null) };
 const poll = { add:()=>{}, remove:()=>{} };
 const baseclass = { extend:o=>o }, view = { extend:o=>o };
-const documentStub = { getElementById:()=>null, activeElement:null, querySelectorAll:()=>[], createElement:()=>E('div') };
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', ''];
+// Return recording nodes for known element IDs so paintMasterStrip can mutate them.
+function makeRecordingNode(id){
+  var n=E('div',{'id':id});
+  n.classList={add:function(){},remove:function(){},contains:function(){return false;}};
+  n.style={};
+  n.disabled=false;
+  n.value='';
+  n.textContent='';
+  n.dataset={};
+  n.removeAttribute=function(){};
+  n.setAttribute=function(){};
+  n.getAttribute=function(){return null;};
+  return n;
+}
+const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], createElement:()=>E('div') };
+// DATA: 12 elements — indices 10 (DoT status) and 11 (master_enabled) added for Phase 4.
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
@@ -108,5 +127,105 @@ if (require.main === module) {
     .catch(function(e){
       console.error('FAIL: a module.refresh() rejected under failing fs: '+e.message);
       process.exit(1);
+    })
+    .then(function() {
+      // ── Handler-execution pass ────────────────────────────────────────────────
+      // Build the assembled view the same way main.js does (Object.assign of all handlers).
+      // Test every named change handler under BOTH succeeding and rejecting fs loads.
+      // Each handler must: (a) not synchronously throw, and (b) resolve (not reject).
+      // This is the regression guard the original Item-3 inline-closure bug would have tripped.
+      const CHANGE_HANDLERS = [
+        'handleSetMode', 'handleSetSticky',
+        'handleMakeDefault', 'handleTunnelRestart',
+        'handleForcePin', 'handleForceUnpin',
+        'handleDotToggle', 'handleDotProvider',
+        'handleMasterToggle'
+      ];
+      const fakeEv = { target: { checked: true, value: 'awg1' }, preventDefault: function(){} };
+
+      function buildView(fsStub) {
+        const dv = {};
+        dv.util      = loadWith('amnezia/util.js', dv, fsStub);
+        dv.routing   = loadWith('amnezia/section/routing.js', dv, fsStub);
+        dv.zapret    = loadWith('amnezia/section/zapret.js', dv, fsStub);
+        dv.dns       = loadWith('amnezia/section/dns.js', dv, fsStub);
+        dv.autolearn = loadWith('amnezia/section/autolearn.js', dv, fsStub);
+        dv.failover  = loadWith('amnezia/section/failover.js', dv, fsStub);
+        const mv = loadWith('view/main.js', dv, fsStub);
+        // Assemble exactly as LuCI does via view.extend(Object.assign(...)).
+        const assembled = Object.assign({}, mv,
+          (dv.failover && dv.failover.handlers) || {},
+          (dv.routing  && dv.routing.handlers)  || {},
+          (dv.zapret   && dv.zapret.handlers)   || {},
+          (dv.dns      && dv.dns.handlers)       || {},
+          (dv.autolearn && dv.autolearn.handlers) || {}
+        );
+        // Bind util for handlers that call util.uiConfirm.
+        assembled.__util = dv.util;
+        // Provide a minimal util stub that always confirms so handlers don't deadlock.
+        if (assembled.__util) {
+          assembled.__util.uiConfirm = function() { return Promise.resolve(false); };
+        }
+        // Wire __failoverModule so the refresh path inside handlers is real, not the no-op fallback.
+        assembled.__failoverModule = dv.failover || null;
+        return assembled;
+      }
+
+      const handlerTests = [];
+      for (const fsStub of [fsApi, fsRej]) {
+        const assembled = buildView(fsStub);
+        for (const name of CHANGE_HANDLERS) {
+          if (typeof assembled[name] !== 'function') {
+            // Handler missing — treat as an error.
+            handlerTests.push(Promise.reject(new Error('handler ' + name + ' not found on assembled view')));
+            continue;
+          }
+          handlerTests.push(
+            Promise.resolve().then(function(n, a) {
+              return a[n].call(a, fakeEv, 'awg1');
+            }.bind(null, name, assembled))
+            .then(undefined, function(e) {
+              throw new Error('handler ' + name + ' rejected: ' + e.message);
+            })
+          );
+        }
+      }
+
+      return Promise.all(handlerTests)
+        .then(function() {
+          console.log('handler-exec-safe ok');
+        })
+        .catch(function(e) {
+          console.error('FAIL: ' + e.message);
+          process.exit(1);
+        })
+        .then(function() {
+          // ── Master-repaint-safe pass ──────────────────────────────────────────────
+          // Exercises the handleMasterToggle repaint branch: uiConfirm=true, fs.exec=ok.
+          // paintMasterStrip calls ui.createHandlerFn(this, 'handleMasterToggle', ...) —
+          // if this===undefined the realistic createHandlerFn stub throws a TypeError here.
+          // This pass ensures paintMasterStrip is called with the correct `self` context.
+          var repaintView = buildView(fsApi);
+          // Run main.render first so the module-level state (domSeen, pollFn) is seeded.
+          var mr = loadWith('view/main.js', (function(){ var dv2={}; dv2.util=loadWith('amnezia/util.js',dv2,fsApi); dv2.routing=loadWith('amnezia/section/routing.js',dv2,fsApi); dv2.zapret=loadWith('amnezia/section/zapret.js',dv2,fsApi); dv2.dns=loadWith('amnezia/section/dns.js',dv2,fsApi); dv2.autolearn=loadWith('amnezia/section/autolearn.js',dv2,fsApi); dv2.failover=loadWith('amnezia/section/failover.js',dv2,fsApi); return dv2; }()), fsApi);
+          if (mr && typeof mr.render === 'function') { try { mr.render.call(mr, DATA); } catch(e2) { /* ignore render errors in this sub-env */ } }
+          // Override uiConfirm to resolve TRUE so the toggle actually executes the repaint path.
+          if (repaintView.__util) repaintView.__util.uiConfirm = function() { return Promise.resolve(true); };
+          // Track whether a 'danger' notification was added (indicates TypeError in repaint).
+          var dangerFired = false;
+          var origAddNotification = ui.addNotification;
+          ui.addNotification = function(id, node, cls) { if (cls === 'danger') dangerFired = true; origAddNotification(id, node, cls); };
+          return Promise.resolve()
+            .then(function() { return repaintView.handleMasterToggle.call(repaintView, {preventDefault:function(){}}, '1'); })
+            .then(function() {
+              ui.addNotification = origAddNotification;
+              if (dangerFired) { console.error('FAIL: master-repaint fired danger notification (TypeError in paintMasterStrip — this not bound)'); process.exit(1); }
+              console.log('master-repaint-safe ok');
+            }, function(e) {
+              ui.addNotification = origAddNotification;
+              console.error('FAIL: master-repaint rejected: ' + e.message);
+              process.exit(1);
+            });
+        });
     });
 }

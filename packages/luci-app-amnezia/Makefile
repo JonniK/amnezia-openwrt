@@ -3,7 +3,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-amnezia
 PKG_VERSION:=0.2.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 PKG_MAINTAINER:=JonniK <esmirnov@socialprofiler.com>
 PKG_LICENSE:=GPL-2.0-only
 PKG_LICENSE_FILES:=LICENSE

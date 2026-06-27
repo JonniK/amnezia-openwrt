@@ -17,6 +17,7 @@ _amnezia_load_routing() {
 
 start_service() {
   _amnezia_load_routing
+  amz_master_enabled || { logger -t amnezia "master disabled — failover start skipped"; return 0; }
   command -v routing_install_rules >/dev/null 2>&1 && routing_install_rules
 
   procd_open_instance

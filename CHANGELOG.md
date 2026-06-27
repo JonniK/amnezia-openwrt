@@ -2,6 +2,62 @@
 
 ## [unreleased]
 
+### Tunnel control, DoT fixes, exit-IP & master switch
+
+Six capabilities added across daemon, ctl, init, and LuCI UI:
+
+1. **Make-default + force-pin tunnel selection** — `amnezia-failover-ctl
+   make-default <awgN>` renumbers metrics so the chosen tunnel wins the
+   pool election on next reconcile. `force-pin <awgN>` / `force-unpin`
+   bypass metric ordering entirely: the daemon reads `globals.force_pool`
+   each cycle and routes the full pool through the pinned tunnel
+   (fail-closed if it goes down). LuCI shows the active pin as a warning
+   banner; a "Force pool through" select + Unpin button appear in the
+   Failover section.
+
+2. **DoT enable/disable toggle visible on first paint** — the DoT
+   enabled/disabled toggle is now rendered synchronously from `load()`
+   (index 10 in the data bundle) rather than deferred to the first poll,
+   eliminating the blank-row flash on initial page load.
+
+3. **Change-handler XHR / no-repaint fix** — the routing-mode and sticky
+   change closures are now named handlers (`handleSetMode`,
+   `handleSetSticky`) wired via `ui.createHandlerFn`. They follow the
+   standard `ctlThenRefresh` shape (exec → repaint → notify, no
+   unhandled rejection), so a mode change now repaints the table
+   immediately. The test harness executes every named handler under both
+   succeeding and rejecting fs stubs and asserts they resolve (never
+   reject).
+
+4. **Per-tunnel restart button** — `amnezia-failover-ctl restart <awgN>`
+   runs `ifdown <awgN>; sleep 1; ifup <awgN>`. A Restart button appears
+   in each tunnel row in LuCI (with `uiConfirm` gate).
+
+5. **Background cached exit-IP display** — `_refresh_exit_ips` spawns a
+   detached background pass each poll cycle (flock-guarded so passes
+   never stack). Each tunnel's egress IP is probed bound to its interface
+   (`curl --interface if!awgN`), cached with a 300 s TTL in
+   `$ST_DIR/exitip.<awgN>.ip|.ts` (`$ST_DIR` = `/tmp/amnezia-fo`), and
+   emitted in the failover-state JSON as `exit_ip`/`exit_ip_age`. The
+   LuCI table shows the cached IP + age; a down tunnel shows `—`. Cache
+   is cleared on down→up transition and on `amnezia-tunnel-ctl remove`
+   so a re-added tunnel cannot inherit a previous tenant's exit IP.
+
+6. **Fail-open master on/off switch** — `amnezia-failover-ctl master
+   on|off` snapshot-saves the user's `dot_enabled` / `autolearn_enabled`
+   intent into transient UCI keys (`dot_master_saved`,
+   `autolearn_master_saved`), then operationally disables each subsystem.
+   `master off` also removes the failover state JSON so the LuCI table
+   shows "no data" while routing is bypassed, and explicitly flushes the
+   DoT pref-30900 ip rule and tables 100/101 even if `amnezia-dns-ctl
+   disable` fails. `amnezia-failover.init start_service` is gated on
+   `amz_master_enabled` (from `amnezia-common.sh`) so the daemon does not
+   reinstall policy-routing rules across reboots while master is OFF. LuCI
+   renders a master-state strip above the accordion with a toggle button;
+   the accordion dims (`opacity:0.55`) while master is OFF.
+
+---
+
 ### Modular LuCI UI + accordion (no behavior change)
 
 `openwrt/luci-app-amnezia/view/main.js` (was ~2300 lines) is now a

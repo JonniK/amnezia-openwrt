@@ -13,14 +13,25 @@ export RULE_PREF_POOL=31001
 export SET_RU4=amnezia_ru4
 export SET_RU_TLD4=amnezia_ru_tld4
 export SET_STICKY4=amnezia_sticky4
-export STATE_FILE=/var/run/amnezia-failover.json
+export STATE_FILE="${STATE_FILE:-/var/run/amnezia-failover.json}"
 export CONF_DIR=/etc/amnezia
 export RU_CIDR_PERSIST=/etc/amnezia/ru.cidr
 export MAX_TUNNELS=5
 export RULE_PREF_DOT=30900            # DoT-IP ip rule; above pbr cleanup (30000), below sticky (31000)
 export DNSMASQ_LOCK=/var/lock/amnezia-dnsmasq.lock
 
+# Exit-IP probe: endpoints tried in order, first valid IPv4 wins.
+export AMNEZIA_IPECHO_URLS="${AMNEZIA_IPECHO_URLS:-https://api.ipify.org https://ifconfig.co/ip}"
+# Cache TTL in seconds; re-probe after expiry.
+export AMNEZIA_EXITIP_TTL="${AMNEZIA_EXITIP_TTL:-300}"
+
+# Shared state directory (single source of truth so ctl and daemon agree).
+export ST_DIR="${ST_DIR:-/tmp/amnezia-fo}"
+
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
+
+# True (exit 0) unless master_enabled is explicitly set to 0. Default = enabled.
+amz_master_enabled() { [ "$(uci -q get amnezia.config.master_enabled 2>/dev/null || echo 1)" != 0 ]; }
 
 # Active tunnel egress device for router-origin traffic that MUST be tunneled.
 # Router-origin packets are not seen by the prerouting/mangle classifier, so they
