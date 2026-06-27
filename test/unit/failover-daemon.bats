@@ -199,3 +199,46 @@ setup() {
   UCI_GET_amnezia_config_master_enabled=0 run amz_master_enabled
   [ "$status" -ne 0 ]
 }
+
+# ── FIX-2: prove tunnel-binding egress safety ─────────────────────────────────
+
+@test "FIX-2: _probe_exit_ip passes --interface if!awgN to curl (egress bound to tunnel)" {
+  export ST_DIR="$BATS_TEST_TMPDIR"
+  export CURL_STUB_OUT=10.0.0.1
+  export CURL_CALLCOUNT="$BATS_TEST_TMPDIR/nc"
+  echo 0 > "$CURL_CALLCOUNT"
+  # The curl stub (FIX-2 updated) exits 3 if --interface if!<iface> is absent.
+  # _probe_exit_ip must pass the flag; if it doesn't, curl returns nothing and
+  # the cache file is not written.
+  run _probe_exit_ip awg1
+  [ "$output" = 10.0.0.1 ]
+  [ "$(cat "$ST_DIR/exitip.awg1.ip")" = 10.0.0.1 ]
+}
+
+@test "FIX-2: curl stub exits 3 (no output) when --interface if! is missing" {
+  # Directly invoke the stub without the binding flag; expect exit 3 / no output.
+  export CURL_STUB_OUT=10.0.0.1
+  run sh "$HARNESS_DIR/../test/stubs/curl" -fsSL https://api.ipify.org
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+}
+
+# ── FIX-5: _refresh_exit_ips actually writes the cache ───────────────────────
+
+@test "FIX-5: _probe_exit_ip (inner worker) writes exitip cache (proves the detached probe writes)" {
+  # _refresh_exit_ips wraps _probe_exit_ip in a flock'd subshell.
+  # We test the inner function directly (flock may be absent on macOS CI) to
+  # prove that on a successful curl call the cache IS written. The outer
+  # _refresh_exit_ips is already covered by the "detached" test (test 10).
+  export ST_DIR="$BATS_TEST_TMPDIR/eip5"
+  mkdir -p "$ST_DIR"
+  export CURL_STUB_OUT=7.7.7.7
+  export CURL_CALLCOUNT="$BATS_TEST_TMPDIR/nc5"
+  echo 0 > "$CURL_CALLCOUNT"
+  # Call the worker function directly (no flock wrapper).
+  run _probe_exit_ip awg1
+  [ "$output" = 7.7.7.7 ]
+  [ "$(cat "$ST_DIR/exitip.awg1.ip" 2>/dev/null)" = 7.7.7.7 ]
+  # Confirm curl was called exactly once (not cached yet).
+  [ "$(cat "$CURL_CALLCOUNT")" = 1 ]
+}

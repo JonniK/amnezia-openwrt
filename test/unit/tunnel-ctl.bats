@@ -146,3 +146,18 @@ setup() {
   run grep -q 'del_list firewall.vpn.network=awg2' "$STUB_LOG"
   [ "$status" -ne 0 ]
 }
+
+# FIX-1: remove must clear exit-IP cache and debounce state for the freed slot
+@test "FIX-1: remove clears exitip cache files for the removed slot" {
+  export ST_DIR="$BATS_TEST_TMPDIR/amnezia-fo"
+  mkdir -p "$ST_DIR"
+  # Seed stale exit-IP cache + debounce state for awg2
+  printf '1.2.3.4' > "$ST_DIR/exitip.awg2.ip"
+  printf '0'       > "$ST_DIR/exitip.awg2.ts"
+  echo "up 0"      > "$ST_DIR/awg2"
+  UCI_FAKE_TUNNELS="awg1 awg2" UCI_FAKE_FWNET="awg1 awg2" run sh "$TC" remove awg2
+  [ "$status" -eq 0 ]
+  [ ! -f "$ST_DIR/exitip.awg2.ip" ]
+  [ ! -f "$ST_DIR/exitip.awg2.ts" ]
+  [ ! -f "$ST_DIR/awg2" ]
+}

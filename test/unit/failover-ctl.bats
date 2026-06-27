@@ -227,3 +227,39 @@ setup() {
   run sh "$CTL" master
   [ "$status" -ne 0 ]
 }
+
+# ---------------------------------------------------------------------------
+# FIX-3: master off flushes pref-30900 even when amnezia-dns-ctl disable fails
+# ---------------------------------------------------------------------------
+
+@test "FIX-3: master off flushes pref-30900 (ip rule del pref 30900) even when dns-ctl fails" {
+  # Arrange: dns-ctl stub will exit nonzero for 'disable'.
+  export AMNEZIA_DNS_CTL_FAIL_DISABLE=1
+  UCI_GET_amnezia_config_dot_enabled=1 \
+  UCI_GET_amnezia_config_autolearn_enabled=0 \
+  run sh "$CTL" master off
+  [ "$status" -eq 0 ]
+  # dns_iprule_flush calls: ip rule del pref 30900 (RULE_PREF_DOT=30900)
+  grep -q 'rule del pref 30900' "$STUB_LOG"
+}
+
+@test "FIX-3: master off flushes pref-30900 when dot was disabled (no dns-ctl call)" {
+  UCI_GET_amnezia_config_dot_enabled=0 \
+  run sh "$CTL" master off
+  [ "$status" -eq 0 ]
+  # Flush must happen regardless of dot_enabled state
+  grep -q 'rule del pref 30900' "$STUB_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# FIX-4: master off removes STATE_FILE
+# ---------------------------------------------------------------------------
+
+@test "FIX-4: master off removes STATE_FILE so LuCI shows no stale tunnel state" {
+  # Seed a fake state file
+  export STATE_FILE="$BATS_TEST_TMPDIR/failover.json"
+  echo '{"tunnels":[]}' > "$STATE_FILE"
+  run sh "$CTL" master off
+  [ "$status" -eq 0 ]
+  [ ! -f "$STATE_FILE" ]
+}

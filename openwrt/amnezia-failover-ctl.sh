@@ -18,6 +18,13 @@ if [ -f "$AMNEZIA_LIB/amnezia-routing.sh" ]; then
 else
   . "$(dirname "$0")/lib/amnezia-routing.sh"
 fi
+# shellcheck source=lib/amnezia-dns-lib.sh
+# Optional: dns-lib may be absent on a minimal install (DNS feature not deployed).
+# Source it when present so dns_iprule_flush is available for master-off cleanup.
+_dns_lib="${AMNEZIA_LIB}/amnezia-dns-lib.sh"
+[ -r "$_dns_lib" ] || _dns_lib="$(dirname "$0")/lib/amnezia-dns-lib.sh"
+# shellcheck disable=SC1090
+[ -r "$_dns_lib" ] && . "$_dns_lib"
 
 _restart_monitor() {
   ( sleep 1 && /etc/init.d/amnezia-failover restart ) &
@@ -146,11 +153,20 @@ case "$1" in
         uci set amnezia.config.master_enabled=0
         uci commit amnezia
         ${AMNEZIA_FAILOVER_INIT:-/etc/init.d/amnezia-failover} stop 2>/dev/null || true
+        # Remove stale state JSON so the LuCI table shows "No tunnel state available"
+        # instead of dimmed UP tunnels under the "routing disabled" strip.
+        rm -f "$STATE_FILE"
         if [ "$_ds" = 1 ]; then
           ${AMNEZIA_DNS_CTL:-amnezia-dns-ctl} disable 2>/dev/null || true
         fi
         if [ "$_as" = 1 ]; then
           ${AMNEZIA_AL_CTL:-amnezia-autolearn-ctl} set-enabled 0 2>/dev/null || true
+        fi
+        # Explicitly flush pref-30900 (DoT ip rule) even if amnezia-dns-ctl disable
+        # failed — prevents the rule from stranding against the flushed table 100.
+        # dns_iprule_flush is a documented safe-when-absent no-op (loops until no more).
+        if command -v dns_iprule_flush >/dev/null 2>&1; then
+          dns_iprule_flush 2>/dev/null || true
         fi
         ip route flush table 100 2>/dev/null || true
         ip route flush table 101 2>/dev/null || true
@@ -175,10 +191,18 @@ case "$1" in
         uci -q delete amnezia.config.dot_master_saved
         uci -q delete amnezia.config.autolearn_master_saved
         uci commit amnezia
-        if $_verify >/dev/null 2>&1; then
+        # Cold-start verify: retry up to 3 times with 2s sleep to allow the daemon's
+        # first poll + AWG handshake (~15s total) to complete before logging failure.
+        # Failure is advisory only — never fails the verb.
+        _vi=0; _vok=0
+        while [ "$_vi" -lt 3 ]; do
+          if $_verify >/dev/null 2>&1; then _vok=1; break; fi
+          _vi=$((_vi+1)); [ "$_vi" -lt 3 ] && sleep 2
+        done
+        if [ "$_vok" = 1 ]; then
           amz_log "ctl: master ON — stack restored"
         else
-          amz_log "ctl: master ON applied but verify FAILED — check handshake/DNS"
+          amz_log "ctl: master ON applied but verify FAILED — handshake may take ~15s, check logs if persists"
         fi
         ;;
       *) amz_log "ctl: master requires on|off"; exit 1 ;;

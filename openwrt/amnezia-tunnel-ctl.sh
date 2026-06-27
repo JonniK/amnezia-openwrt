@@ -190,6 +190,9 @@ case "$1" in
     # Remove conf file
     rm -f "${CONF_DIR:-/etc/amnezia}/${_name}.conf"
 
+    # Clear exit-IP cache and debounce state so a re-added slot starts clean.
+    rm -f "$ST_DIR/exitip.${_name}.ip" "$ST_DIR/exitip.${_name}.ts" "$ST_DIR/$_name"
+
     # Commit all changes
     uci commit network
     uci commit firewall

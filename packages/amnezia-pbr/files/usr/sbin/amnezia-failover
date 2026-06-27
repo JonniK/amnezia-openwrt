@@ -200,7 +200,6 @@ write_state() {
   for _m in $MEMBERS; do _n=${_m%%:*}; _met=$(echo "$_m"|cut -d: -f2); _w=$(echo "$_m"|cut -d: -f3)
     _up=false; _is_healthy "$_n" && _up=true
     _car=false; { [ "$_n" = "$_pool" ] || [ "$_n" = "$_stk" ]; } && _car=true
-    # exit_ip is deferred to a future enhancement (requires a bound external probe, throttled).
     _hs=$(awg show "$_n" latest-handshakes 2>/dev/null | awk '{print $2; exit}')
     if [ -n "$_hs" ] && [ "$_hs" -gt 0 ] 2>/dev/null; then
       _hs_age=$(( _now - _hs ))
@@ -274,8 +273,13 @@ run_loop() {
       probe_setup "$_tun" "$_track" "$_probe_tbl"
       # Preserve debounce state across daemon restarts so a tunnel confirmed down
       # does not require a fresh 3-sample reconvergence (~30s) on every ctl mutation.
-      # Only seed "up 0" if no prior state file exists.
-      [ -f "$ST_DIR/$_tun" ] || state_reset "$_tun"
+      # Only seed "up 0" if no prior state file exists (fresh/never-seen slot).
+      # Belt-and-suspenders: also clear any stale exit-IP cache for a brand-new
+      # slot so a re-added tunnel cannot inherit the previous tenant's exit IP.
+      if [ ! -f "$ST_DIR/$_tun" ]; then
+        state_reset "$_tun"
+        rm -f "$ST_DIR/exitip.${_tun}.ip" "$ST_DIR/exitip.${_tun}.ts"
+      fi
     fi
     _i=$((_i+1))
   done

@@ -14,7 +14,20 @@ echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 
 # ── Exit-IP probe mode ──────────────────────────────────────────────────────
 # Activated when CURL_STUB_OUT is set (even if empty string).
+# Validates that the probe is bound to a tunnel interface via --interface if!<iface>.
+# Exits 3 (no output) if the binding flag is absent — proves the daemon always binds.
 if [ "${CURL_STUB_OUT+set}" = set ]; then
+  # Check that --interface if!<something> is present in args.
+  _has_iface=0
+  for _ca in "$@"; do
+    case "$_ca" in
+      if!*) _has_iface=1; break ;;
+    esac
+  done
+  if [ "$_has_iface" = 0 ]; then
+    # Missing tunnel binding — fail so tests catch this regression.
+    exit 3
+  fi
   # Increment call counter if provided
   if [ -n "${CURL_CALLCOUNT:-}" ]; then
     _cnt=$(cat "$CURL_CALLCOUNT" 2>/dev/null || echo 0)
