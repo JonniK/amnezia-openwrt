@@ -8,6 +8,7 @@
 var routingModeInFlight = false;
 var forceUpdateInFlight = false;
 var saveManualInFlight = false;
+var appAddInFlight = false;
 
 function parseRuStamp(text) {
 	if (!text) return null;
@@ -68,6 +69,53 @@ function paintForceStamp(stamp) {
 	if (statusEl) {
 		statusEl.textContent = anyFailed ? _('some sources failed') : _('ok');
 		statusEl.style.color = anyFailed ? '#a94442' : '#3c763d';
+	}
+}
+
+// ── Tunnel apps helpers ───────────────────────────────────────────────────────
+
+function parseApps(stdout) {
+	if (!stdout) return [];
+	try { return JSON.parse(stdout) || []; } catch (e) { return []; }
+}
+
+// Repaint the apps table from a live app list (called from refresh).
+function paintAppsTable(view, apps) {
+	var tbody = document.getElementById('tunnel-apps-tbody');
+	if (!tbody) return;
+	// Rebuild the tbody children.
+	tbody.innerHTML = '';
+	if (!apps || apps.length === 0) {
+		var row = E('tr', {}, [
+			E('td', { 'colspan': '5', 'style': 'color:#888;font-style:italic;' }, _('No apps configured.'))
+		]);
+		tbody.appendChild(row);
+		return;
+	}
+	for (var i = 0; i < apps.length; i++) {
+		(function(app) {
+			var row = E('tr', {}, [
+				E('td', {}, app.title || app.name),
+				E('td', {}, app.kind),
+				E('td', {}, String(app.count || 0)),
+				E('td', {}, [
+					E('input', {
+						'type': 'checkbox',
+						'id': 'app-cb-' + app.name,
+						'checked': app.enabled === 1 || app.enabled === '1' ? '' : null,
+						'change': ui.createHandlerFn(view, 'handleAppToggle', app.name)
+					})
+				]),
+				E('td', {}, [
+					E('button', {
+						'class': 'btn cbi-button-negative',
+						'style': 'padding:2px 8px;',
+						'click': ui.createHandlerFn(view, 'handleAppRemove', app.name)
+					}, _('Remove'))
+				])
+			]);
+			tbody.appendChild(row);
+		})(apps[i]);
 	}
 }
 
@@ -200,6 +248,121 @@ return baseclass.extend({
 				if (b) { delete b.dataset.busy; b.disabled = false; b.textContent = _('Update now'); }
 			});
 		},
+
+		// ── Tunnel-apps handlers ──────────────────────────────────────────────────
+		// LuCI createHandlerFn convention: extra args FIRST, event LAST.
+		// handleAppToggle(name, ev) — name from createHandlerFn extra arg.
+		handleAppToggle: function(name, ev) {
+			var cb = document.getElementById('app-cb-' + name);
+			var enabled = (cb && cb.checked) ? '1' : '0';
+			if (cb) cb.disabled = true;
+			return fs.exec('/usr/bin/amnezia-failover-ctl', ['set-source', name, enabled]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				if (cb) cb.disabled = false;
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Toggle failed: ') + err), 'danger');
+				var c = document.getElementById('app-cb-' + name);
+				if (c) { c.disabled = false; c.checked = !c.checked; }
+			});
+		},
+
+		// handleAppRemove(name, ev) — name from createHandlerFn extra arg.
+		handleAppRemove: function(name, ev) {
+			var self = this;
+			return util.uiConfirm(_('Remove app "') + name + '"?').then(L.bind(function(ok) {
+				if (!ok) return Promise.resolve();
+				return fs.exec('/usr/bin/amnezia-app-ctl', ['remove', name]).then(L.bind(function(res) {
+					ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+						(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+						res.code === 0 ? 'info' : 'warning');
+					return self.refresh();
+				}, this)).catch(function(err) {
+					ui.addNotification(null, E('p', {}, _('Remove failed: ') + err), 'danger');
+				});
+			}, this));
+		},
+
+		// handleAppPreset(presetId, ev) — presetId from createHandlerFn extra arg.
+		handleAppPreset: function(presetId, ev) {
+			// Preset title map (kept in sync with amnezia-app-ctl.sh presets).
+			var titles = { telegram: 'Telegram', meta: 'Meta (WhatsApp/Instagram/FB)' };
+			var title = titles[presetId] || presetId;
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-app-ctl', ['add', presetId, title, 'preset', presetId]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Preset failed: ') + err), 'danger');
+			});
+		},
+
+		// handleAppAdd(ev) — NO extra arg; reads form fields in the handler (DOM exists here).
+		handleAppAdd: function(ev) {
+			if (appAddInFlight) {
+				ui.addNotification(null, E('p', {}, _('An add is already in progress')), 'info');
+				return Promise.resolve();
+			}
+			var nameEl   = document.getElementById('app-add-name');
+			var titleEl  = document.getElementById('app-add-title');
+			var methEl   = document.querySelector('input[name="app-add-method"]:checked');
+			var asEl     = document.getElementById('app-add-asn');
+			var cidrEl   = document.getElementById('app-add-cidrs');
+			var urlEl    = document.getElementById('app-add-url');
+
+			var name  = nameEl  ? nameEl.value.trim()  : '';
+			var title = titleEl ? titleEl.value.trim()  : '';
+			var meth  = methEl  ? methEl.value          : 'as';
+			var data  = '';
+			switch (meth) {
+				case 'as':     data = asEl   ? asEl.value.trim()   : ''; break;
+				case 'static': data = cidrEl ? cidrEl.value.trim() : ''; break;
+				case 'url':    data = urlEl  ? urlEl.value.trim()  : ''; break;
+			}
+
+			if (!name) {
+				ui.addNotification(null, E('p', {}, _('App name is required')), 'warning');
+				return Promise.resolve();
+			}
+			if (!/^[a-z0-9_]+$/.test(name)) {
+				ui.addNotification(null, E('p', {}, _('Name must match ^[a-z0-9_]+$')), 'warning');
+				return Promise.resolve();
+			}
+			if (!data) {
+				ui.addNotification(null, E('p', {}, _('Method data is required')), 'warning');
+				return Promise.resolve();
+			}
+
+			appAddInFlight = true;
+			var btn = document.getElementById('app-add-btn');
+			if (btn) { btn.disabled = true; btn.textContent = _('Adding...'); }
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-app-ctl', ['add', name, title || name, meth, data]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				appAddInFlight = false;
+				if (btn) { btn.disabled = false; btn.textContent = _('Add'); }
+				// Clear form on success.
+				if (res.code === 0) {
+					if (nameEl) nameEl.value = '';
+					if (titleEl) titleEl.value = '';
+					if (asEl) asEl.value = '';
+					if (cidrEl) cidrEl.value = '';
+					if (urlEl) urlEl.value = '';
+				}
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Add failed: ') + err), 'danger');
+				appAddInFlight = false;
+				var b = document.getElementById('app-add-btn');
+				if (b) { b.disabled = false; b.textContent = _('Add'); }
+			});
+		},
 	},
 
 	// ── applyFailoverState ───────────────────────────────────────────────────
@@ -229,13 +392,53 @@ return baseclass.extend({
 		}
 	},
 
+	// ── renderAppsRows: build <tr> nodes from an apps array (synchronous, no getElementById) ──
+	renderAppsRows: function(view, apps) {
+		if (!apps || apps.length === 0) {
+			return [E('tr', {}, [
+				E('td', { 'colspan': '5', 'style': 'color:#888;font-style:italic;' }, _('No apps configured.'))
+			])];
+		}
+		var rows = [];
+		for (var i = 0; i < apps.length; i++) {
+			(function(app) {
+				rows.push(E('tr', {}, [
+					E('td', {}, app.title || app.name),
+					E('td', {}, app.kind),
+					E('td', {}, String(app.count || 0)),
+					E('td', {}, [
+						E('input', {
+							'type': 'checkbox',
+							'id': 'app-cb-' + app.name,
+							'checked': (app.enabled === 1 || app.enabled === '1') ? '' : null,
+							'change': ui.createHandlerFn(view, 'handleAppToggle', app.name)
+						})
+					]),
+					E('td', {}, [
+						E('button', {
+							'class': 'btn cbi-button-negative',
+							'style': 'padding:2px 8px;',
+							'click': ui.createHandlerFn(view, 'handleAppRemove', app.name)
+						}, _('Remove'))
+					])
+				]));
+			})(apps[i]);
+		}
+		return rows;
+	},
+
 	render: function(view, data) {
 		// data[0] → parseRuStamp (RU stamp)
 		// data[8] → forceTunnelList prefill
 		// data[9] → parseRuStamp + forceStamp/forceWhen/forceTotal/forceFailed block
+		// data[12] → amnezia-app-ctl list JSON for first-paint tunnel apps table
 		var stamp = parseRuStamp(data && data[0]);
 		var forceTunnelList = (data && data[8]) || '';
 		var forceStamp = parseRuStamp(data && data[9]);
+		// Parse index 12: app list for first-paint (may be result object or raw string).
+		var appsData12 = data && data[12];
+		var appsStdout = appsData12 && typeof appsData12 === 'object' ? (appsData12.stdout || '[]') : (appsData12 || '[]');
+		var initialApps = parseApps(appsStdout);
 		var forceWhen = forceStamp ? util.fmtAge(forceStamp.ts) : _('never updated');
 		var forceTotal = 0, forceFailed = false;
 		if (forceStamp && forceStamp.sources) {
@@ -392,6 +595,152 @@ return baseclass.extend({
 				])
 			]),
 
+			// ── Tunnel apps section ───────────────────────────────────────────
+			E('div', { 'class': 'cbi-section' }, [
+				E('h3', {}, _('Tunnel apps')),
+				E('div', { 'class': 'cbi-map-descr' },
+					_('Per-app CIDR lists. In direct-default mode these IPs route through the tunnel. Add apps by AS number, pasted CIDRs, or URL, or use a built-in preset.')),
+
+				// Apps table — populated synchronously on first paint from data[12].
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('table', { 'style': 'width:100%;border-collapse:collapse;' }, [
+						E('thead', {}, [
+							E('tr', {}, [
+								E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Title')),
+								E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Kind')),
+								E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('#CIDRs')),
+								E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Enabled')),
+								E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Actions'))
+							])
+						]),
+						// Rows built synchronously from data[12] so no blank-flash on first paint.
+						E('tbody', { 'id': 'tunnel-apps-tbody' }, (function(self2, v, apps) {
+							return self2.renderAppsRows(v, apps);
+						})(this, view, initialApps))
+					])
+				]),
+
+				// Preset buttons — one-click add for common apps.
+				E('div', { 'class': 'cbi-section-node', 'style': 'margin-top:8px;' }, [
+					E('strong', { 'style': 'display:block;margin-bottom:6px;' }, _('Quick presets:')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'telegram')
+					}, _('Add Telegram')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'meta')
+					}, _('Add Meta / WhatsApp'))
+				]),
+
+				// Add-app form — collapsed action panel.
+				E('details', { 'class': 'amnezia-action' }, [
+					E('summary', {}, _('Add app')),
+					E('div', { 'class': 'cbi-section-node' }, [
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Name')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('input', {
+									'id': 'app-add-name',
+									'type': 'text',
+									'class': 'cbi-input-text',
+									'style': 'width:180px;',
+									'placeholder': 'e.g. myapp'
+								})
+							])
+						]),
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Title')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('input', {
+									'id': 'app-add-title',
+									'type': 'text',
+									'class': 'cbi-input-text',
+									'style': 'width:220px;',
+									'placeholder': _('Display name (optional)')
+								})
+							])
+						]),
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Method')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								// Method radio buttons + inline data fields.
+								E('div', { 'style': 'margin-bottom:6px;' }, [
+									E('label', { 'style': 'margin-right:16px;' }, [
+										E('input', { 'type': 'radio', 'name': 'app-add-method', 'value': 'as', 'checked': '' }),
+										_(' AS number')
+									]),
+									E('label', { 'style': 'margin-right:16px;' }, [
+										E('input', { 'type': 'radio', 'name': 'app-add-method', 'value': 'static' }),
+										_(' Paste CIDRs')
+									]),
+									E('label', {}, [
+										E('input', { 'type': 'radio', 'name': 'app-add-method', 'value': 'url' }),
+										_(' URL')
+									])
+								]),
+								E('div', { 'style': 'margin-top:4px;' }, [
+									E('input', {
+										'id': 'app-add-asn',
+										'type': 'text',
+										'class': 'cbi-input-text',
+										'style': 'width:120px;',
+										'placeholder': _('e.g. 32934 or AS32934')
+									})
+								]),
+								E('div', { 'style': 'margin-top:4px;' }, [
+									E('textarea', {
+										'id': 'app-add-cidrs',
+										'class': 'cbi-input-text',
+										'style': 'width:100%;height:80px;font-family:monospace;font-size:11px;box-sizing:border-box;',
+										'placeholder': '91.108.4.0/22\n149.154.160.0/20'
+									})
+								]),
+								E('div', { 'style': 'margin-top:4px;' }, [
+									E('input', {
+										'id': 'app-add-url',
+										'type': 'text',
+										'class': 'cbi-input-text',
+										'style': 'width:360px;',
+										'placeholder': 'https://example.com/cidrs.txt'
+									})
+								])
+							])
+						]),
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Action')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('button', {
+									'id': 'app-add-btn',
+									'class': 'btn cbi-button-positive',
+									'click': ui.createHandlerFn(view, 'handleAppAdd')
+								}, _('Add'))
+							])
+						])
+					])
+				]),
+
+				// Help: how to find an app's AS number.
+				E('details', { 'class': 'amnezia-action' }, [
+					E('summary', {}, _('How to find an app\'s AS number')),
+					E('div', { 'class': 'cbi-map-descr', 'style': 'margin:8px 0;' }, [
+						E('ol', { 'style': 'margin:4px 0 4px 20px;padding:0;' }, [
+							E('li', {}, _('Find the app\'s server IP — use nslookup <domain> or the app\'s own documentation.')),
+							E('li', {}, [
+								_('Look up that IP at '),
+								E('a', { 'href': 'https://bgp.he.net', 'target': '_blank' }, 'bgp.he.net'),
+								_(' or '),
+								E('a', { 'href': 'https://ipinfo.io', 'target': '_blank' }, 'ipinfo.io/<ip>'),
+								_(' — the AS field (ASxxxxx) is the network operator.')
+							]),
+							E('li', {}, _('Examples: Meta / WhatsApp / Instagram / Facebook = AS32934; Google = AS15169; X / Twitter = AS13414.')),
+							E('li', {}, _('Note: Telegram spans several ASes — use its preset (static CIDR list) instead of a single AS.'))
+						])
+					])
+				])
+			]),
+
 			// ── RU IP list section ────────────────────────────────────────────
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', {}, _('RU IP list')),
@@ -441,6 +790,12 @@ return baseclass.extend({
 		var p6 = L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), '').then(function(text) {
 			paintForceStamp(parseRuStamp(text));
 		});
-		return Promise.all([p1, p6]);
+		// Refresh the apps table from the live CLI output.
+		var pApps = L.resolveDefault(fs.exec('/usr/bin/amnezia-app-ctl', ['list']), { stdout: '[]' }).then(function(res) {
+			var apps = [];
+			try { apps = JSON.parse((res && res.stdout) ? res.stdout : (res || '[]')); } catch (e) { apps = []; }
+			paintAppsTable(view, apps);
+		});
+		return Promise.all([p1, p6, pApps]);
 	}
 });
