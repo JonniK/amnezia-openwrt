@@ -554,7 +554,12 @@ return baseclass.extend({
 							}, [
 								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
 								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
-							])
+							]),
+							// balance needs kernel `ip nexthop`; without it the daemon degrades to
+							// failover (lowest-metric), so flag that the choice is running as failover.
+							(failoverState && failoverState.nexthop_supported === false)
+								? E('span', { 'style': 'color:#8a6d3b;font-size:11px;margin-left:4px;' }, _('balance unavailable on this kernel (no ip nexthop) — running as failover'))
+								: ''
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [
