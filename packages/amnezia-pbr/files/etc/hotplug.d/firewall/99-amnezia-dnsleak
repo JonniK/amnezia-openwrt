@@ -1,0 +1,10 @@
+#!/bin/sh
+# Re-assert DNS-leak prevention rules on every firewall reload.
+# fw4 reload regenerates the full ruleset from UCI, so the redirect +
+# reject entries come back automatically — this hotplug is a belt-and-
+# suspenders idempotent apply that also handles the dnsleak_failopen
+# state transition on reload (if failopen was set, apply is a no-op
+# while fw4 reload itself re-installs rules from UCI anyway).
+[ "$ACTION" = reload ] || exit 0
+[ "$(uci -q get amnezia.config.dnsleak_enabled)" = 1 ] || exit 0
+/usr/bin/amnezia-dnsleak-ctl apply >/dev/null 2>&1 &

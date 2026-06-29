@@ -5,5 +5,27 @@ case "$*" in
     # NFT_FAKE_RU4_COUNT: number of elements to emit (0 = empty set).
     _n=${NFT_FAKE_RU4_COUNT:-0}
     if [ "$_n" -gt 0 ]; then printf 'elements = { '; i=0; while [ $i -lt $_n ]; do printf '10.0.%d.0/24, ' $i; i=$((i+1)); done; printf '}\n'; fi ;;
+  "-a list table inet fw4")
+    # NFT_FAKE_FW4=dnsleak: emit a realistic fw4 ruleset with dnsleak rules and
+    # https-dns-proxy redirect, each with a distinct `# handle N` suffix so the
+    # failopen handle-parse is genuinely exercised.
+    # Real nft -a list output has chain blocks; we emit a minimal but structurally
+    # correct subset (enough for the awk/grep handle extraction to work).
+    if [ "${NFT_FAKE_FW4:-}" = "dnsleak" ]; then
+      cat <<'NFTEOF'
+table inet fw4 {
+	chain dstnat_lan {
+		type nat hook prerouting priority dstnat + 1; policy accept;
+		meta nfproto ipv4 tcp dport 53 redirect to :53 comment "!fw4: ubus:https-dns-proxy[instance1] redirect 0" # handle 41
+		meta nfproto ipv4 { ip protocol tcp, ip protocol udp } dport 53 dnat ip to 192.168.1.1:53 comment "!fw4: amnezia-dns-intercept" # handle 42
+	}
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		tcp dport 853 reject comment "!fw4: amnezia-block-DoT" # handle 43
+		ip daddr { 1.1.1.1, 1.0.0.1, 8.8.8.8, 8.8.4.4 } tcp dport 443 reject comment "!fw4: amnezia-block-DoH-ips" # handle 44
+	}
+}
+NFTEOF
+    fi ;;
 esac
 exit 0
