@@ -37,6 +37,7 @@ cmd_apply() {
 }
 
 AMNEZIA_NSLOOKUP="${AMNEZIA_NSLOOKUP:-nslookup}"
+AMNEZIA_GETDNS_QUERY="${AMNEZIA_GETDNS_QUERY:-getdns_query}"
 AMNEZIA_DNS_INIT="${AMNEZIA_DNS_INIT:-/etc/init.d/amnezia-dns}"
 
 _probe_listener() {                    # $1 = 127.0.0.1#<port>
@@ -44,8 +45,18 @@ _probe_listener() {                    # $1 = 127.0.0.1#<port>
     *"#$DOT_PORT") [ -n "${AMNEZIA_VERIFY_DOT:-}" ] && { [ "$AMNEZIA_VERIFY_DOT" = pass ]; return; } ;;
     *"#$DOH_PORT") [ -n "${AMNEZIA_VERIFY_DOH:-}" ] && { [ "$AMNEZIA_VERIFY_DOH" = pass ]; return; } ;;
   esac
-  # L1/L4: honor _PROBE_TIMEOUT override (status path sets 1s; default 3s).
-  "$AMNEZIA_NSLOOKUP" "-timeout=${_PROBE_TIMEOUT:-3}" openwrt.org "$1" >/dev/null 2>&1
+  _ph=${1%%#*}; _pp=${1##*#}
+  # The encrypted listeners bind a NON-standard port (5453/5454). BusyBox nslookup
+  # cannot target a custom port (it rejects `host#port` and has no -timeout flag), so a
+  # nslookup probe always fails and `enable` auto-reverts even when DoT is healthy. Use
+  # getdns_query (ships with the getdns/stubby package) which IS port-capable; success =
+  # a GOOD response status. Fall back to nslookup only when getdns_query is unavailable.
+  if command -v "$AMNEZIA_GETDNS_QUERY" >/dev/null 2>&1; then
+    # -t <ms>: bound the probe (status path passes _PROBE_TIMEOUT=1 → 1000ms).
+    "$AMNEZIA_GETDNS_QUERY" -t "$(( ${_PROBE_TIMEOUT:-3} * 1000 ))" -s "@$_ph:$_pp" openwrt.org A 2>/dev/null | grep -q "GETDNS_RESPSTATUS_GOOD"
+  else
+    "$AMNEZIA_NSLOOKUP" openwrt.org "$_ph" >/dev/null 2>&1
+  fi
 }
 _verify_encrypted() { _probe_listener "127.0.0.1#$DOT_PORT" || _probe_listener "127.0.0.1#$DOH_PORT"; }
 

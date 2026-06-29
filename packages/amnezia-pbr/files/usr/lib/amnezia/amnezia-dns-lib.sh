@@ -62,6 +62,10 @@ dns_render_stubby() {
   uci add_list "stubby.global.listen_address=127.0.0.1@$DOT_PORT"
   uci set "stubby.global.tls_connection_timeout=2"   # short: bound the tunnel-down stall
   uci commit stubby
+  # The stubby init's start_service opens its procd instance ONLY when the service is
+  # `enabled` — a bare `restart` on a disabled service is a silent no-op (no listener).
+  # Enable first so restart actually launches it.
+  "$AMNEZIA_STUBBY_INIT" enable 2>/dev/null || true
   "$AMNEZIA_STUBBY_INIT" restart 2>/dev/null || true
 }
 
@@ -73,6 +77,8 @@ dns_render_doh() {
   uci set "https-dns-proxy.$_d.listen_addr=127.0.0.1"
   uci set "https-dns-proxy.$_d.listen_port=$DOH_PORT"
   uci commit https-dns-proxy
+  # Same as stubby: enable so the init actually starts the instance on restart.
+  "$AMNEZIA_DOH_INIT" enable 2>/dev/null || true
   "$AMNEZIA_DOH_INIT" restart 2>/dev/null || true
 }
 
