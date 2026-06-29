@@ -23,14 +23,14 @@ var pollFn = null;
 // stamp) are never painted. Only self-unregister once the anchor has appeared.
 var domSeen = false;
 
-// Paint the master-switch strip (called on render + after handleMasterToggle).
-function paintMasterStrip(masterEnabled) {
-	var strip = document.getElementById('amz-master-strip');
-	var accordion = document.getElementById('amz-accordion');
-	if (!strip) return;
+// Build the populated master-switch strip content. `view` is the LuCI view
+// instance (handler context). Used BOTH synchronously in render() (so the strip
+// is painted in the returned tree — never via a microtask+getElementById, which
+// races LuCI's own DOM insertion and silently no-ops) AND by paintMasterStrip()
+// for the post-toggle repaint (where the element is already in the DOM).
+function masterStripContent(view, masterEnabled) {
 	var on = masterEnabled !== false && masterEnabled !== '0' && masterEnabled !== 0;
-	strip.innerHTML = '';
-	strip.appendChild(E('div', {
+	return E('div', {
 		'style': 'display:flex;align-items:center;background:' + (on ? '#dff0d8' : '#fcf8e3') +
 			';border:1px solid ' + (on ? '#d6e9c6' : '#faebcc') + ';border-radius:4px;padding:6px 12px;margin-bottom:8px;'
 	}, [
@@ -41,15 +41,20 @@ function paintMasterStrip(masterEnabled) {
 		E('button', {
 			'class': 'btn ' + (on ? 'cbi-button-negative' : 'cbi-button-positive'),
 			'style': 'margin-left:12px;',
-			'click': ui.createHandlerFn(this, 'handleMasterToggle', on ? '1' : '0')
+			'click': ui.createHandlerFn(view, 'handleMasterToggle', on ? '1' : '0')
 		}, on ? _('Turn OFF') : _('Turn ON'))
-	]));
+	]);
+}
+
+// Repaint the strip after a master toggle (element is in the DOM by then).
+function paintMasterStrip(view, masterEnabled) {
+	var strip = document.getElementById('amz-master-strip');
+	var accordion = document.getElementById('amz-accordion');
+	var on = masterEnabled !== false && masterEnabled !== '0' && masterEnabled !== 0;
+	if (strip) { strip.innerHTML = ''; strip.appendChild(masterStripContent(view, masterEnabled)); }
 	if (accordion) {
-		if (on) {
-			accordion.classList.remove('amnezia-master-off');
-		} else {
-			accordion.classList.add('amnezia-master-off');
-		}
+		if (on) accordion.classList.remove('amnezia-master-off');
+		else accordion.classList.add('amnezia-master-off');
 	}
 }
 
@@ -67,7 +72,7 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 
 	// ── Master switch handler ─────────────────────────────────────────────────
 	// currentState: '1' = currently ON (so toggle = turn OFF), '0' = currently OFF.
-	handleMasterToggle: function(ev, currentState) {
+	handleMasterToggle: function(currentState, ev) {
 		var turningOff = (currentState === '1' || currentState === 1);
 		var msg = turningOff
 			? _('Turn OFF the master switch?\n\nThis disables all policy routing — LAN traffic goes direct to WAN.\nDoT (if enabled) reverts to plaintext. Auto-learn pauses.\nSettings are saved and restored when you turn it back ON.\nThis persists across reboot.')
@@ -83,7 +88,7 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				// Re-read master state and repaint the strip.
 				return L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }).then(function(r) {
 					var newState = (r.stdout || '1').trim();
-					paintMasterStrip.call(self, newState !== '0');
+					paintMasterStrip(self, newState !== '0');
 				}).then(function() {
 					return self.refresh();
 				});
@@ -137,9 +142,10 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			]),
 
 			// Master switch strip (above accordion, always interactive).
-			E('div', { 'id': 'amz-master-strip' }),
+			// Built populated synchronously so it paints on first render.
+			E('div', { 'id': 'amz-master-strip' }, [ masterStripContent(this, masterEnabled) ]),
 
-			E('div', { 'class': 'amnezia-accordion', 'id': 'amz-accordion' }, [
+			E('div', { 'class': 'amnezia-accordion' + (masterEnabled ? '' : ' amnezia-master-off'), 'id': 'amz-accordion' }, [
 				failover.render(this, data),
 				routing.render(this, data),
 				zapret.render(this, data),
@@ -160,12 +166,6 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				])
 			])
 		]);
-
-		// Paint master strip synchronously (strip element now exists in body above).
-		// We call paintMasterStrip after returning body, so wire it via a microtask.
-		Promise.resolve().then(L.bind(function() {
-			paintMasterStrip.call(this, masterEnabled);
-		}, this));
 
 		if (pollFn) {
 			poll.remove(pollFn);

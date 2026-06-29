@@ -20,7 +20,20 @@ const L = { bind:(fn,ctx)=>fn.bind(ctx), resolveDefault:(p,d)=>Promise.resolve(p
 // `ctx[fn]` deref failing with undefined context), so the this===undefined bug in
 // paintMasterStrip is observable. Does NOT check method existence — section modules legitimately
 // create handlers for methods that live on the assembled view, not on `this` in their own scope.
-const ui = { createHandlerFn:function(ctx, fn){ if(ctx==null) throw new TypeError('handler '+fn+' not found on ctx (ctx is null/undefined)'); return function(){return Promise.resolve();}; }, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
+// Mirror LuCI's REAL createHandlerFn: binds extra args FIRST, passes the DOM event LAST
+// (handler is called as fn(...args, event), NOT fn(event, ...args)). Returns null when the
+// method is missing (→ no listener → inert button), exactly like LuCI. This is what makes
+// the param-order bug observable: a handler defined function(ev, name) wired with an extra
+// arg receives (name, event) and would mis-send the event as the backend argument.
+const ui = { createHandlerFn:function(ctx, fn){
+		if(ctx==null) throw new TypeError('handler '+fn+' not found on ctx (ctx is null/undefined)');
+		var args = Array.prototype.slice.call(arguments, 2);
+		var f = (typeof fn === 'string') ? ctx[fn] : fn;
+		if(typeof f !== 'function') return null;
+		// LuCI returns L.bind(wrapper, ctx, ...args): the bound fn has the extra args
+		// PREPENDED, and the DOM appends the event → handler is called f(...args, event).
+		return function(){ var callArgs = Array.prototype.slice.call(arguments); return Promise.resolve(f.apply(ctx, args.concat(callArgs))); };
+	}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
 const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null) };
 const poll = { add:()=>{}, remove:()=>{} };
 const baseclass = { extend:o=>o }, view = { extend:o=>o };
@@ -62,7 +75,23 @@ d.autolearn = load('amnezia/section/autolearn.js', d);
 d.failover  = load('amnezia/section/failover.js', d);
 const main  = load('view/main.js', d);
 // FIX: use call(main, DATA) so this=main and data=DATA (LuCI single-arg render signature).
-if (main && typeof main.render === 'function') { try { main.render.call(main, DATA); } catch(e){ console.error('main.render threw: '+e.message); process.exit(1);} }
+let mainTree = null;
+if (main && typeof main.render === 'function') { try { mainTree = main.render.call(main, DATA); } catch(e){ console.error('main.render threw: '+e.message); process.exit(1);} }
+// Teeth: the master-switch strip MUST be populated synchronously in the render
+// tree (NOT via a microtask + getElementById, which races LuCI's DOM insertion
+// on the real router and silently leaves the strip empty). Walk the returned
+// tree (not document) and assert #amz-master-strip has a button child.
+function findById(n, id){ if(!n||typeof n!=='object') return null;
+  if(n.attrs && n.attrs.id===id) return n;
+  for(const c of (n.children||[])){ const r=findById(c,id); if(r) return r; } return null; }
+function hasTag(n, tag){ if(!n||typeof n!=='object') return false;
+  if(n.tag===tag) return true;
+  return (n.children||[]).some(c=>hasTag(c,tag)); }
+if (mainTree) {
+  const strip = findById(mainTree, 'amz-master-strip');
+  if (!strip) { console.error('FAIL: #amz-master-strip not found in render tree'); process.exit(1); }
+  if (!hasTag(strip, 'button')) { console.error('FAIL: #amz-master-strip is EMPTY in render tree (microtask/getElementById race — strip would be blank on the real router)'); process.exit(1); }
+}
 // Execute every render() that exists → throws on undefined-symbol refs.
 const panels = [];
 for (const k of ['failover','routing','zapret','dns','autolearn']) {
@@ -134,14 +163,21 @@ if (require.main === module) {
       // Test every named change handler under BOTH succeeding and rejecting fs loads.
       // Each handler must: (a) not synchronously throw, and (b) resolve (not reject).
       // This is the regression guard the original Item-3 inline-closure bug would have tripped.
-      const CHANGE_HANDLERS = [
-        'handleSetMode', 'handleSetSticky',
-        'handleMakeDefault', 'handleTunnelRestart',
-        'handleForcePin', 'handleForceUnpin',
-        'handleDotToggle', 'handleDotProvider',
-        'handleMasterToggle'
-      ];
-      const fakeEv = { target: { checked: true, value: 'awg1' }, preventDefault: function(){} };
+      // Each handler mapped to the EXTRA args its button wires via createHandlerFn
+      // (NOT including the event — LuCI appends that last). Sentinels are recognizable
+      // strings so the arg-order spy can assert they reach the backend (and the event does NOT).
+      const WIRING = {
+        handleSetMode: [], handleSetSticky: [],
+        handleMakeDefault: ['awgSENT'], handleTunnelRestart: ['awgSENT'],
+        handleTunnelToggle: ['awgSENT'], handleTunnelRemove: ['awgSENT', '1.2.3.4'],
+        handleForcePin: [], handleForceUnpin: [],
+        handleDotSetEnabled: ['1'], handleDotProvider: [], handleDotTest: [],
+        handleMasterToggle: ['1'],
+        handleAutolearnVeto: ['ex.com'], handleAutolearnPromote: ['ex.com'],
+        handleProbe: ['ex.com'], handleSourceToggle: ['itdoginfo_inside']
+      };
+      const CHANGE_HANDLERS = Object.keys(WIRING);
+      const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };
 
       function buildView(fsStub) {
         const dv = {};
@@ -171,33 +207,56 @@ if (require.main === module) {
         return assembled;
       }
 
+      // Reject-safety: invoke every handler VIA the LuCI-accurate createHandlerFn (extra
+      // args first, event last) under succeeding + rejecting fs; each must resolve.
       const handlerTests = [];
       for (const fsStub of [fsApi, fsRej]) {
         const assembled = buildView(fsStub);
+        if (assembled.__util) assembled.__util.uiConfirm = function(){ return Promise.resolve(true); };
         for (const name of CHANGE_HANDLERS) {
-          if (typeof assembled[name] !== 'function') {
-            // Handler missing — treat as an error.
-            handlerTests.push(Promise.reject(new Error('handler ' + name + ' not found on assembled view')));
-            continue;
-          }
-          handlerTests.push(
-            Promise.resolve().then(function(n, a) {
-              return a[n].call(a, fakeEv, 'awg1');
-            }.bind(null, name, assembled))
-            .then(undefined, function(e) {
-              throw new Error('handler ' + name + ' rejected: ' + e.message);
-            })
-          );
+          const h = ui.createHandlerFn(assembled, name, ...(WIRING[name] || []));
+          if (h == null) { handlerTests.push(Promise.reject(new Error('createHandlerFn returned null for ' + name + ' (method missing on view)'))); continue; }
+          handlerTests.push(Promise.resolve().then(function(){ return h(fakeEv); })
+            .then(undefined, function(e){ throw new Error('handler ' + name + ' rejected: ' + e.message); }));
         }
       }
 
       return Promise.all(handlerTests)
+        .then(function() { console.log('handler-exec-safe ok'); })
+        .catch(function(e) { console.error('FAIL: ' + e.message); process.exit(1); })
         .then(function() {
-          console.log('handler-exec-safe ok');
-        })
-        .catch(function(e) {
-          console.error('FAIL: ' + e.message);
-          process.exit(1);
+          // ── Arg-order pass (teeth for the createHandlerFn convention) ─────────────
+          // LuCI calls handlers as fn(...extraArgs, event). A handler defined function(ev, x)
+          // wired with an extra arg would mis-send the EVENT object as a backend argument.
+          // Spy fs.exec: assert every backend arg is a STRING (never the event object), and
+          // that the sentinel extra arg actually reaches the exec.
+          const execCalls = [];
+          const fsSpy = { read:()=>Promise.resolve(''), stat:()=>Promise.resolve(null),
+            exec:function(cmd, args){ execCalls.push({cmd:cmd, args:(args||[]).slice()}); return Promise.resolve({stdout:'{}',stderr:'',code:0}); } };
+          const av = buildView(fsSpy);
+          if (av.__util) av.__util.uiConfirm = function(){ return Promise.resolve(true); };
+          let chain = Promise.resolve();
+          const bad = [];
+          CHANGE_HANDLERS.forEach(function(name){
+            chain = chain.then(function(){
+              const before = execCalls.length;
+              const h = ui.createHandlerFn(av, name, ...(WIRING[name] || []));
+              if (h == null) { bad.push(name + ': createHandlerFn null'); return; }
+              return Promise.resolve(h(fakeEv)).catch(function(){}).then(function(){
+                // The teeth: if a handler defined function(ev, x) is wired with an extra arg,
+                // LuCI passes (x, event) → the event object leaks in as a backend argument.
+                execCalls.slice(before).forEach(function(c){
+                  c.args.forEach(function(arg){
+                    if (typeof arg !== 'string') bad.push(name + ' passed non-string arg to exec (' + Object.prototype.toString.call(arg) + ') — arg-order bug: event leaked as backend argument');
+                  });
+                });
+              });
+            });
+          });
+          return chain.then(function(){
+            if (bad.length) { console.error('FAIL: handler arg-order:\n  ' + bad.join('\n  ')); process.exit(1); }
+            console.log('handler-argorder ok');
+          });
         })
         .then(function() {
           // ── Master-repaint-safe pass ──────────────────────────────────────────────
@@ -216,7 +275,8 @@ if (require.main === module) {
           var origAddNotification = ui.addNotification;
           ui.addNotification = function(id, node, cls) { if (cls === 'danger') dangerFired = true; origAddNotification(id, node, cls); };
           return Promise.resolve()
-            .then(function() { return repaintView.handleMasterToggle.call(repaintView, {preventDefault:function(){}}, '1'); })
+            // handleMasterToggle(currentState, ev) — LuCI convention: extra arg first, event last.
+            .then(function() { return repaintView.handleMasterToggle.call(repaintView, '1', {preventDefault:function(){}}); })
             .then(function() {
               ui.addNotification = origAddNotification;
               if (dangerFired) { console.error('FAIL: master-repaint fired danger notification (TypeError in paintMasterStrip — this not bound)'); process.exit(1); }

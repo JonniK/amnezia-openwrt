@@ -128,7 +128,7 @@ return baseclass.extend({
 
 		// ── handleAutolearnVeto ──────────────────────────────────────────────────
 		// Per-row Remove: adds domain to deny.list and removes from auto.list.
-		handleAutolearnVeto: function(ev, domain) {
+		handleAutolearnVeto: function(domain, ev) {
 			if (autolearnVetoInFlight) return Promise.resolve();
 			autolearnVetoInFlight = true;
 			return fs.exec('/usr/bin/amnezia-autolearn-ctl', ['veto', domain]).then(L.bind(function(res) {
@@ -145,7 +145,7 @@ return baseclass.extend({
 
 		// ── handleAutolearnPromote ───────────────────────────────────────────────
 		// Per-row Promote: moves domain to the permanent force-tunnel.list.
-		handleAutolearnPromote: function(ev, domain) {
+		handleAutolearnPromote: function(domain, ev) {
 			if (autolearnPromoteInFlight) return Promise.resolve();
 			autolearnPromoteInFlight = true;
 			return fs.exec('/usr/bin/amnezia-autolearn-ctl', ['promote', domain]).then(L.bind(function(res) {
