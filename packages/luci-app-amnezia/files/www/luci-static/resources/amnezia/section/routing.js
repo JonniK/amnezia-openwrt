@@ -288,7 +288,16 @@ return baseclass.extend({
 		// handleAppPreset(presetId, ev) — presetId from createHandlerFn extra arg.
 		handleAppPreset: function(presetId, ev) {
 			// Preset title map (kept in sync with amnezia-app-ctl.sh presets).
-			var titles = { telegram: 'Telegram', meta: 'Meta (WhatsApp/Instagram/FB)' };
+			var titles = {
+				telegram: 'Telegram',
+				meta: 'Meta (WhatsApp/Instagram/FB)',
+				x: 'X (Twitter)',
+				discord: 'Discord',
+				tiktok: 'TikTok',
+				viber: 'Viber',
+				linkedin: 'LinkedIn',
+				netflix: 'Netflix'
+			};
 			var title = titles[presetId] || presetId;
 			var self = this;
 			return fs.exec('/usr/bin/amnezia-app-ctl', ['add', presetId, title, 'preset', presetId]).then(L.bind(function(res) {
@@ -625,13 +634,44 @@ return baseclass.extend({
 					E('strong', { 'style': 'display:block;margin-bottom:6px;' }, _('Quick presets:')),
 					E('button', {
 						'class': 'btn cbi-button-action',
-						'style': 'margin-right:8px;',
+						'style': 'margin-right:8px;margin-bottom:6px;',
 						'click': ui.createHandlerFn(view, 'handleAppPreset', 'telegram')
 					}, _('Add Telegram')),
 					E('button', {
 						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
 						'click': ui.createHandlerFn(view, 'handleAppPreset', 'meta')
-					}, _('Add Meta / WhatsApp'))
+					}, _('Add Meta / WhatsApp')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'x')
+					}, _('Add X (Twitter)')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'discord')
+					}, _('Add Discord')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'tiktok')
+					}, _('Add TikTok')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'viber')
+					}, _('Add Viber')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-right:8px;margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'linkedin')
+					}, _('Add LinkedIn')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'netflix')
+					}, _('Add Netflix'))
 				]),
 
 				// Add-app form — collapsed action panel.

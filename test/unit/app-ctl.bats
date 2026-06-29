@@ -196,6 +196,42 @@ setup() {
   echo "$output" | grep -q 'meta'
 }
 
+@test "preset list: includes all 8 preset ids" {
+  run sh "$SCRIPT" preset list
+  [ "$status" -eq 0 ]
+  for id in telegram meta x discord tiktok viber linkedin netflix; do
+    echo "$output" | grep -q "$id" \
+      || { echo "missing preset id: $id; output: $output"; false; }
+  done
+}
+
+# ---------------------------------------------------------------------------
+# add preset x (new AS preset — spot-check kind=as + asn=13414)
+# ---------------------------------------------------------------------------
+@test "add preset x: creates as section with ASN 13414" {
+  run sh "$SCRIPT" add x "X (Twitter)" preset x
+  [ "$status" -eq 0 ]
+  grep -q '13414' "$STUB_LOG" \
+    || { echo "ASN 13414 not wired; log: $(cat $STUB_LOG)"; false; }
+  grep -q 'set.*x.*kind.*as' "$STUB_LOG" \
+    || grep -q 'kind.*as' "$STUB_LOG" \
+    || { echo "kind=as not set; log: $(cat $STUB_LOG)"; false; }
+}
+
+@test "add preset discord: creates as section with ASN 49544" {
+  run sh "$SCRIPT" add discord "Discord" preset discord
+  [ "$status" -eq 0 ]
+  grep -q '49544' "$STUB_LOG" \
+    || { echo "ASN 49544 not wired; log: $(cat $STUB_LOG)"; false; }
+}
+
+@test "add preset netflix: creates as section with ASN 2906" {
+  run sh "$SCRIPT" add netflix "Netflix" preset netflix
+  [ "$status" -eq 0 ]
+  grep -q '2906' "$STUB_LOG" \
+    || { echo "ASN 2906 not wired; log: $(cat $STUB_LOG)"; false; }
+}
+
 # ---------------------------------------------------------------------------
 # bad usage
 # ---------------------------------------------------------------------------

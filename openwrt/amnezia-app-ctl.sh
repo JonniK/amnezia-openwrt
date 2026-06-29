@@ -16,7 +16,7 @@ FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
 # ---------------------------------------------------------------------------
 # Preset definitions
 # ---------------------------------------------------------------------------
-PRESET_IDS="telegram meta"
+PRESET_IDS="telegram meta x discord tiktok viber linkedin netflix"
 
 _preset_expand() {
   _pid="$1"
@@ -32,6 +32,42 @@ _preset_expand() {
       PRESET_METHOD="as"
       PRESET_TITLE="Meta (WhatsApp/Instagram/FB)"
       PRESET_DATA="32934"
+      ;;
+    x)
+      # X (Twitter) — AS13414.
+      PRESET_METHOD="as"
+      PRESET_TITLE="X (Twitter)"
+      PRESET_DATA="13414"
+      ;;
+    discord)
+      # Discord — AS49544.
+      PRESET_METHOD="as"
+      PRESET_TITLE="Discord"
+      PRESET_DATA="49544"
+      ;;
+    tiktok)
+      # TikTok — AS396986.
+      PRESET_METHOD="as"
+      PRESET_TITLE="TikTok"
+      PRESET_DATA="396986"
+      ;;
+    viber)
+      # Viber — AS30873.
+      PRESET_METHOD="as"
+      PRESET_TITLE="Viber"
+      PRESET_DATA="30873"
+      ;;
+    linkedin)
+      # LinkedIn — AS14413.
+      PRESET_METHOD="as"
+      PRESET_TITLE="LinkedIn"
+      PRESET_DATA="14413"
+      ;;
+    netflix)
+      # Netflix — AS2906.
+      PRESET_METHOD="as"
+      PRESET_TITLE="Netflix"
+      PRESET_DATA="2906"
       ;;
     *)
       echo "app-ctl: unknown preset '$_pid'" >&2
