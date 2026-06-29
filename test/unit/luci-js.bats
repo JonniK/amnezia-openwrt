@@ -303,10 +303,12 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "exit_ip" "$FV"
 }
 
-@test "dns.js has handlers map with handleDotToggle and handleDotProvider" {
+@test "dns.js has handlers map with labeled enable/disable, provider, and test" {
   D="$AMZ/amnezia/section/dns.js"
-  grep -q "handleDotToggle" "$D"
+  grep -q "handleDotSetEnabled" "$D"
   grep -q "handleDotProvider" "$D"
+  grep -q "handleDotTest" "$D"
+  grep -q "Enable DoT" "$D"
   grep -q "handlers:" "$D"
 }
 

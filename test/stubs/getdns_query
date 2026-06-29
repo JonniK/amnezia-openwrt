@@ -1,0 +1,9 @@
+#!/bin/sh
+# Test stub for getdns_query (port-capable DNS probe used by _probe_listener).
+# Logs its argv and emits a GOOD response status unless GETDNS_QUERY_FAIL=1.
+echo "getdns_query $*" >> "${STUB_LOG:-/dev/null}"
+if [ "${GETDNS_QUERY_FAIL:-0}" = 1 ]; then
+	printf '  "status": GETDNS_RESPSTATUS_ALL_TIMEOUT\n'
+else
+	printf '  "status": GETDNS_RESPSTATUS_GOOD\n'
+fi

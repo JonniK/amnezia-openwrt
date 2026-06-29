@@ -242,3 +242,23 @@ setup() {
   # Confirm curl was called exactly once (not cached yet).
   [ "$(cat "$CURL_CALLCOUNT")" = 1 ]
 }
+
+# ── Part D: balance-mode degrade when kernel lacks `ip nexthop` ────────────────
+
+@test "balance mode + no nexthop support: degrades to failover lowest-metric (not first tunnel)" {
+  export UCI_GET_amnezia_globals_force_pool=""
+  MODE=balance NEXTHOP_OK=0 MEMBERS="awg1:2:1 awg2:3:1 awg3:1:1" HEALTHY="awg1 awg2 awg3" \
+    STICKY_TARGET=awg3 POOL_MARK=0xb0000 MARK_MASK=0xff0000 run reconcile
+  [ "$status" -eq 0 ]
+  # Pool table (101) must point to the LOWEST-METRIC tunnel awg3 (honors make-default),
+  # NOT awg1 (the first member by index that the old balance fallback would pin).
+  grep -q "route replace default dev awg3 table 101" "$STUB_LOG"
+  ! grep -q "route replace default dev awg1 table 101" "$STUB_LOG"
+  # Must NOT build a balance nexthop group on an unsupported kernel...
+  ! grep -q "nexthop replace" "$STUB_LOG"
+  # ...and must warn (once) so the degrade isn't a silent surprise.
+  grep -q "balance mode unavailable" "$STUB_LOG"
+}
+# (The balance-WITH-nexthop path can't be exercised offline — routing_set_pool_balance's
+#  own routing_nexthop_supported check needs /proc/sys/net/ipv4/fib_multipath_hash_policy,
+#  absent on dev/CI machines — so it's covered by the live device, not a unit test.)

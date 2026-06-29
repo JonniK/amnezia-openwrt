@@ -168,7 +168,7 @@ reconcile() {
   [ "$_pool" != "${_PREV_POOL:-}" ] && _changed=1
   [ "$_stk"  != "${_PREV_STKY:-}" ] && _changed=1
 
-  if [ "$MODE" = balance ]; then
+  if [ "$MODE" = balance ] && [ "${NEXTHOP_OK:-0}" = 1 ]; then
     _list=""
     for _m in $MEMBERS; do _n=${_m%%:*}; _w=$(echo "$_m" | cut -d: -f3)
       _is_healthy "$_n" && _list="$_list $_n:$_w"
@@ -180,6 +180,15 @@ reconcile() {
     # future enhancement: it requires a classifier that stamps per-member marks,
     # which is not yet implemented.
   else
+    # failover mode — OR balance requested on a kernel WITHOUT `ip nexthop`. In the
+    # latter case real load-balancing is impossible (resilient nexthop groups are
+    # unavailable), so degrade to failover (lowest-metric / make-default-aware) instead
+    # of silently pinning the first tunnel by index. Warn once so it isn't a silent
+    # surprise (e.g. make-default appearing to have no effect).
+    if [ "$MODE" = balance ] && [ "${_BAL_WARNED:-0}" != 1 ]; then
+      amz_log "balance mode unavailable: kernel lacks 'ip nexthop' — using failover (lowest-metric)"
+      _BAL_WARNED=1
+    fi
     routing_set_pool_default "$_pool"
     # Flush conntrack pool-mark entries on every switch (including awg1→awg2
     # hot failover, not just all-down/blackhole).  Masqueraded flows SNAT'd
@@ -241,11 +250,14 @@ write_state() {
   # Write to a temp file on the same filesystem then atomically rename so the
   # LuCI reader never sees a partial/truncated JSON.
   _sf_tmp="${STATE_FILE}.tmp.$$"
-  printf '{"mode":"%s","routing_mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"force_pool":%s,"sources":{%s},"tunnels":[%s]}\n' \
+  # nexthop_supported: lets the LuCI Mode control flag that balance is unavailable
+  # on this kernel (and is silently running as failover) instead of confusing the user.
+  _nhs=$([ "${NEXTHOP_OK:-0}" = 1 ] && echo true || echo false)
+  printf '{"mode":"%s","routing_mode":"%s","active_pool":%s,"active_sticky":%s,"all_down":%s,"force_pool":%s,"nexthop_supported":%s,"sources":{%s},"tunnels":[%s]}\n' \
     "$MODE" "$_rmode" \
     "$([ -n "$_pool" ] && echo "\"$_pool\"" || echo null)" \
     "$([ -n "$_stk" ] && echo "\"$_stk\"" || echo null)" \
-    "$_alldown" "$_fp" "$_sources_json" "${_t%,}" > "$_sf_tmp"
+    "$_alldown" "$_fp" "$_nhs" "$_sources_json" "${_t%,}" > "$_sf_tmp"
   mv "$_sf_tmp" "$STATE_FILE"
 }
 
@@ -285,6 +297,9 @@ run_loop() {
   done
   MEMBERS="${MEMBERS# }"
   HEALTHY=""
+  # Resilient nexthop groups (balance mode) require kernel `ip nexthop` support.
+  # Probe once at startup; reused by reconcile (degrade decision) + write_state (UI hint).
+  NEXTHOP_OK=0; routing_nexthop_supported && NEXTHOP_OK=1
   _PREV_POOL=""; _PREV_STKY=""; _PREV_HEALTHY=""
 
   # Subscribe to netifd interface events and touch the trigger on each event so the

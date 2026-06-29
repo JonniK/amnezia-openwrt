@@ -62,6 +62,9 @@ LIB="$HARNESS_DIR/../openwrt/lib/amnezia-dns-lib.sh"
   grep -q "address=9.9.9.9" "$STUB_LOG"
   grep -q "tls_auth_name=dns.quad9.net" "$STUB_LOG"
   grep -q "tls_connection_timeout=2" "$STUB_LOG"
+  # Regression: the init's start_service no-ops unless ENABLED, so a bare restart
+  # launches nothing (no listener → verify fails → enable auto-reverts). Must enable first.
+  grep -q "stubby enable" "$STUB_LOG"
   grep -q "stubby restart" "$STUB_LOG"
 }
 
@@ -73,6 +76,7 @@ LIB="$HARNESS_DIR/../openwrt/lib/amnezia-dns-lib.sh"
   grep -q "resolver_url=https://dns.adguard-dns.com/dns-query" "$STUB_LOG"
   grep -q "bootstrap_dns=94.140.15.15" "$STUB_LOG"
   grep -q "listen_port=5454" "$STUB_LOG"
+  grep -q "https-dns-proxy enable" "$STUB_LOG"
   grep -q "https-dns-proxy restart" "$STUB_LOG"
 }
 

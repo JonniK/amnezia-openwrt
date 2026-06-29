@@ -106,7 +106,7 @@ return baseclass.extend({
 
 		// ── handleSourceToggle ───────────────────────────────────────────────────
 		// Checkbox toggle for a force_source enabled state.
-		handleSourceToggle: function(ev, sourceName) {
+		handleSourceToggle: function(sourceName, ev) {
 			var cb = document.getElementById('force-src-' + sourceName);
 			if (!cb) return Promise.resolve();
 			var enabled = cb.checked ? '1' : '0';

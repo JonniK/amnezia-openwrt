@@ -337,7 +337,12 @@ function paintBlockcheckLog(text) {
 
 return baseclass.extend({
 	handlers: {
-		handleProbe: function(ev, domainOverride) {
+		handleProbe: function(domainOverride, ev) {
+			// Wired two ways: createHandlerFn(view,'handleProbe') (no extra arg → LuCI
+			// passes only the event) AND createHandlerFn(self,'handleProbe',dom) (per-domain).
+			// LuCI passes the event LAST, so the first param is the event in the no-arg case.
+			// Guard: treat a non-string first param as "no override".
+			if (typeof domainOverride !== 'string') domainOverride = null;
 			if (probeInFlight) {
 				ui.addNotification(null, E('p', {}, _('A probe is already running -- wait for it to finish')), 'info');
 				return Promise.resolve();

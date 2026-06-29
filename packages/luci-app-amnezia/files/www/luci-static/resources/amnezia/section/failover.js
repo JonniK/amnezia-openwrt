@@ -320,13 +320,13 @@ return baseclass.extend({
 
 		// ── Tunnel controls (Items 4, 5) ─────────────────────────────────────────
 
-		handleMakeDefault: function(ev, tunnelName) {
+		handleMakeDefault: function(tunnelName, ev) {
 			var failover = this.__failoverModule;
 			return ctlThenRefresh(this, ['/usr/bin/amnezia-failover-ctl', 'make-default', tunnelName || 'awg1'],
 				failover ? failover.refresh : function() { return Promise.resolve(); });
 		},
 
-		handleTunnelRestart: function(ev, tunnelName) {
+		handleTunnelRestart: function(tunnelName, ev) {
 			var name = tunnelName || 'awg1';
 			var failover = this.__failoverModule;
 			var sectionRefresh = failover ? failover.refresh : function() { return Promise.resolve(); };
@@ -354,7 +354,7 @@ return baseclass.extend({
 				failover ? failover.refresh : function() { return Promise.resolve(); });
 		},
 
-		handleTunnelToggle: function(ev, tunnelName) {
+		handleTunnelToggle: function(tunnelName, ev) {
 			var btnId = 'awg-toggle-' + tunnelName;
 			var btn = document.getElementById(btnId);
 			if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = _('Working...'); }
@@ -374,7 +374,7 @@ return baseclass.extend({
 		// ── handleTunnelRemove ───────────────────────────────────────────────────
 		// Remove button per tunnel row.  Guards: sticky-target, last-member.
 		// Confirm shows tunnel name + exit-IP so the user knows what they're removing.
-		handleTunnelRemove: function(ev, tunnelName, exitIp) {
+		handleTunnelRemove: function(tunnelName, exitIp, ev) {
 			if (removeTunnelInFlight) {
 				ui.addNotification(null, E('p', {}, _('A remove is already in progress')), 'info');
 				return Promise.resolve();
@@ -554,7 +554,12 @@ return baseclass.extend({
 							}, [
 								E('option', { 'value': 'failover', 'selected': (!failoverState || failoverState.mode !== 'balance') ? '' : null }, _('failover (strict priority)')),
 								E('option', { 'value': 'balance', 'selected': (failoverState && failoverState.mode === 'balance') ? '' : null }, _('balance (weighted)'))
-							])
+							]),
+							// balance needs kernel `ip nexthop`; without it the daemon degrades to
+							// failover (lowest-metric), so flag that the choice is running as failover.
+							(failoverState && failoverState.nexthop_supported === false)
+								? E('span', { 'style': 'color:#8a6d3b;font-size:11px;margin-left:4px;' }, _('balance unavailable on this kernel (no ip nexthop) — running as failover'))
+								: ''
 						])
 					]),
 					E('div', { 'class': 'cbi-value' }, [

@@ -40,7 +40,10 @@ setup() {
 @test "balance mode does NOT emit a member-scoped conntrack flush (flow migration via resilient nexthop)" {
   # Per-member surgical conntrack flushing is a future enhancement; balance mode
   # relies on the resilient nexthop group idle_timer/bucket reassignment instead.
-  MODE=balance MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1"
+  # NEXTHOP_OK=1: exercise the real balance path (nexthop available). Without kernel
+  # nexthop support the daemon degrades to failover, which DOES flush — covered by
+  # failover-daemon.bats "balance mode + no nexthop support ... degrades".
+  MODE=balance NEXTHOP_OK=1 MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1"
   _PREV_POOL="" _PREV_STKY="" _PREV_HEALTHY="awg1 awg2"  # awg2 departed
   run reconcile
   ! grep -q "conntrack -D" "$STUB_LOG"
