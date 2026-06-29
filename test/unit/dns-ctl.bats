@@ -145,13 +145,20 @@ setup() {
   run grep -q "nslookup" "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 
-@test "status: probe uses 1s timeout (L1/L4)" {
-  # When dot_enabled=1, _probe_listener must use -timeout=1 not -timeout=3.
-  # Use the real nslookup stub (no AMNEZIA_VERIFY_DOT) so the timeout arg is logged.
+@test "status: probe uses port-capable getdns_query with 1s timeout (L1/L4)" {
+  # BusyBox nslookup cannot target the non-standard listener port (5453/5454) — it
+  # rejects host#port and has no -timeout flag — so the probe MUST use getdns_query.
+  # The status path passes _PROBE_TIMEOUT=1 → -t 1000 (ms). getdns_query stub on PATH.
   run sh -c "sh '$CTL' status"
   [ "$status" -eq 0 ]
-  # The nslookup stub logs 'nslookup -timeout=1 ...' when the timeout is 1s.
-  grep -q "nslookup -timeout=1" "$STUB_LOG"
+  grep -q "getdns_query -t 1000 -s @127.0.0.1:5453" "$STUB_LOG"
+}
+
+@test "status: getdns_query GOOD status → healthy:true; non-GOOD → healthy:false" {
+  run sh -c "sh '$CTL' status"
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"healthy":true'
+  run sh -c "GETDNS_QUERY_FAIL=1 sh '$CTL' status"
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"healthy":false'
 }
 
 @test "apply: flushes stale pref-30900 rule before setting the new one (M1 revert-path)" {
