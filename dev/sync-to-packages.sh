@@ -46,7 +46,8 @@ for src in \
 	zapret-apply.sh zapret-probe.sh zapret-verify.sh \
 	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh \
 	amnezia-tunnel-ctl.sh amnezia-force-load.sh amnezia-force-update.sh \
-	amnezia-autolearn-ctl.sh amnezia-dns-ctl.sh
+	amnezia-autolearn-ctl.sh amnezia-dns-ctl.sh \
+	amnezia-dnsleak-ctl.sh
 do
 	cp "$SRC/$src" "$PBR_PKG/usr/bin/${src%.sh}"
 	chmod 0755 "$PBR_PKG/usr/bin/${src%.sh}"
@@ -110,12 +111,14 @@ cp "$SRC/amnezia-ru-load.init"      "$PBR_PKG/etc/init.d/amnezia-ru-load"
 cp "$SRC/amnezia-force-load.init"   "$PBR_PKG/etc/init.d/amnezia-force-load"
 cp "$SRC/amnezia-autolearn.init"    "$PBR_PKG/etc/init.d/amnezia-autolearn"
 cp "$SRC/amnezia-dns.init"          "$PBR_PKG/etc/init.d/amnezia-dns"
+cp "$SRC/amnezia-dnsleak.init"      "$PBR_PKG/etc/init.d/amnezia-dnsleak"
 chmod 0755 \
 	"$PBR_PKG/etc/init.d/amnezia-failover" \
 	"$PBR_PKG/etc/init.d/amnezia-ru-load" \
 	"$PBR_PKG/etc/init.d/amnezia-force-load" \
 	"$PBR_PKG/etc/init.d/amnezia-autolearn" \
-	"$PBR_PKG/etc/init.d/amnezia-dns"
+	"$PBR_PKG/etc/init.d/amnezia-dns" \
+	"$PBR_PKG/etc/init.d/amnezia-dnsleak"
 
 # firewall hotplug: repopulate nft sets on every fw4 reload
 cp "$SRC/99-amnezia-ru-load.hotplug" \
@@ -124,10 +127,13 @@ cp "$SRC/99-amnezia-force-load.hotplug" \
    "$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-force-load"
 cp "$SRC/99-amnezia-dns.hotplug" \
    "$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dns"
+cp "$SRC/99-amnezia-dnsleak.hotplug" \
+   "$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dnsleak"
 chmod 0755 \
 	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-ru-load" \
 	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-force-load" \
-	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dns"
+	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dns" \
+	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dnsleak"
 
 # Reference data and config.
 cp "$SRC/seed-must-tunnel.list"    "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"

@@ -265,6 +265,28 @@ _amz_wire_force_engine() {
   fi
   /etc/init.d/amnezia-dns enable 2>/dev/null || true
 
+  # DNS-leak prevention CLI + init + hotplug (default-OFF; wired but not started).
+  _dnsleak_ctl=$(resolve_dep /usr/bin/amnezia-dnsleak-ctl amnezia-dnsleak-ctl.sh amnezia-dnsleak-ctl.sh) || true
+  if [ -n "$_dnsleak_ctl" ] && [ "$_dnsleak_ctl" != /usr/bin/amnezia-dnsleak-ctl ]; then
+    cp "$_dnsleak_ctl" /usr/bin/amnezia-dnsleak-ctl 2>/dev/null || true
+    chmod 0755 /usr/bin/amnezia-dnsleak-ctl 2>/dev/null || true
+  fi
+  if [ ! -f /etc/init.d/amnezia-dnsleak ]; then
+    _dnsleak_init=$(resolve_dep /etc/init.d/amnezia-dnsleak amnezia-dnsleak.init amnezia-dnsleak.init) || true
+    if [ -n "$_dnsleak_init" ]; then
+      cp "$_dnsleak_init" /etc/init.d/amnezia-dnsleak 2>/dev/null || true
+      chmod 0755 /etc/init.d/amnezia-dnsleak 2>/dev/null || true
+    fi
+  fi
+  if [ ! -f /etc/hotplug.d/firewall/99-amnezia-dnsleak ]; then
+    _dnsleak_hp=$(resolve_dep /etc/hotplug.d/firewall/99-amnezia-dnsleak 99-amnezia-dnsleak.hotplug 99-amnezia-dnsleak.hotplug) || true
+    if [ -n "$_dnsleak_hp" ]; then
+      cp "$_dnsleak_hp" /etc/hotplug.d/firewall/99-amnezia-dnsleak 2>/dev/null || true
+      chmod 0755 /etc/hotplug.d/firewall/99-amnezia-dnsleak 2>/dev/null || true
+    fi
+  fi
+  /etc/init.d/amnezia-dnsleak enable 2>/dev/null || true
+
   # Wire dnsmasq conf-dir so fresh installs pick up chunked nftset directives
   # even before the first amnezia-force-load run.  Idempotent: only set+commit
   # when the value is not already the expected path.
