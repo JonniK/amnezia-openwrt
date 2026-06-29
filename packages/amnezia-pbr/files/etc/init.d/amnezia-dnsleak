@@ -13,6 +13,9 @@ start_service() {
 }
 
 stop_service() {
-  # Set sentinel so cmd_disable does NOT call stop again (prevents recursion).
-  AMNEZIA_DNSLEAK_STOPPING=1 /usr/bin/amnezia-dnsleak-ctl disable >/dev/null 2>&1 || true
+  # procd terminates the respawned watchdog instance automatically.
+  # Do NOT call `disable` here — stopping the monitor must not tear down
+  # the persistent firewall block. Feature teardown is the explicit
+  # `amnezia-dnsleak-ctl disable` verb's job only.
+  return 0
 }

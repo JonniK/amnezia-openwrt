@@ -111,12 +111,13 @@ setup() {
   grep -q "amnezia-dnsleak-init stop" "$STUB_LOG"
 }
 
-@test "disable: sentinel prevents recursion (AMNEZIA_DNSLEAK_STOPPING skips stop)" {
+@test "disable: calls init stop to terminate the watchdog process" {
   export UCI_GET_amnezia_config_dnsleak_enabled=1
-  run sh -c "AMNEZIA_DNSLEAK_STOPPING=1 AMNEZIA_DNSLEAK_INIT=amnezia-dnsleak-init AMNEZIA_LIB='$AMNEZIA_LIB' sh '$CTL' disable"
+  run sh "$CTL" disable
   [ "$status" -eq 0 ]
-  # With sentinel set, init stop must NOT be logged.
-  run grep -q "amnezia-dnsleak-init stop" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # cmd_disable always stops the watchdog service; stop_service is a no-op there
+  # so there is no recursion risk.
+  grep -q "amnezia-dnsleak-init stop" "$STUB_LOG"
 }
 
 # ---------------------------------------------------------------------------
@@ -397,9 +398,33 @@ setup() {
   grep -q "procd_set_param command /usr/bin/amnezia-dnsleak-ctl watchdog" "$INIT"
 }
 
-@test "init: stop_service sets AMNEZIA_DNSLEAK_STOPPING sentinel (recursion guard)" {
+@test "init: stop_service is a no-op (does NOT execute disable or remove firewall rules)" {
   INIT="$HARNESS_DIR/../openwrt/amnezia-dnsleak.init"
-  grep -q "AMNEZIA_DNSLEAK_STOPPING=1" "$INIT"
+  # stop_service must NOT execute amnezia-dnsleak-ctl disable — stopping the
+  # watchdog monitor must never tear down the persistent firewall block.
+  # Check that no non-comment line in stop_service invokes 'disable'.
+  # Extract the stop_service body (lines after 'stop_service()' up to closing '}')
+  # then strip comment lines before testing.
+  _body=$(awk '/^stop_service\(\)/{found=1;next} found && /^\}/{exit} found{print}' "$INIT")
+  # Remove comment lines, then check no executable disable call remains.
+  _non_comment=$(printf '%s\n' "$_body" | grep -v '^\s*#')
+  ! echo "$_non_comment" | grep -q "amnezia-dnsleak-ctl disable"
+}
+
+@test "init stop does not delete firewall UCI sections or clear dnsleak_enabled" {
+  # Simulates what happens when procd stops the init service:
+  # stop_service should be a no-op — the firewall block must survive intact.
+  INIT="$HARNESS_DIR/../openwrt/amnezia-dnsleak.init"
+  export UCI_GET_amnezia_config_dnsleak_enabled=1
+  # Source just the stop_service function and call it directly.
+  run sh -c ". '$INIT'; stop_service"
+  [ "$status" -eq 0 ]
+  # No firewall sections should have been deleted.
+  run grep -q "delete firewall.amz_dns_intercept" "$STUB_LOG"; [ "$status" -ne 0 ]
+  run grep -q "delete firewall.amz_block_dot"     "$STUB_LOG"; [ "$status" -ne 0 ]
+  run grep -q "delete firewall.amz_block_doh"     "$STUB_LOG"; [ "$status" -ne 0 ]
+  # dnsleak_enabled must NOT have been set to 0.
+  run grep -q "set amnezia.config.dnsleak_enabled=0" "$STUB_LOG"; [ "$status" -ne 0 ]
 }
 
 @test "init: START >= 20 (runs after dnsmasq)" {

@@ -24,7 +24,7 @@
 #   AMNEZIA_DNSLEAK_WD_ONCE      — run one tick and exit (for tests)
 #   AMNEZIA_DNSLEAK_WD_TICKS     — run exactly N ticks and exit (for tests, no sleep)
 #   AMNEZIA_DNSMASQ_RESTART      — dnsmasq restart command (default /etc/init.d/dnsmasq restart)
-#   AMNEZIA_DNSLEAK_INIT         — init path (default /etc/init.d/amnezia-dnsleak)
+#   AMNEZIA_DNSLEAK_INIT         — watchdog init path (default /etc/init.d/amnezia-dnsleak)
 
 # shellcheck source=lib/amnezia-common.sh
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
@@ -112,8 +112,9 @@ cmd_enable() {
 # cmd_disable
 # ---------------------------------------------------------------------------
 cmd_disable() {
-  # Guard against re-entry from stop_service (sentinel prevents recursion).
-  [ -n "${AMNEZIA_DNSLEAK_STOPPING:-}" ] || "$AMNEZIA_DNSLEAK_INIT" stop 2>/dev/null || true
+  # Stop the watchdog procd service first (stop_service is a no-op there, so no
+  # recursion risk; procd simply kills the watchdog process).
+  "$AMNEZIA_DNSLEAK_INIT" stop 2>/dev/null || true
   uci set amnezia.config.dnsleak_enabled=0
   uci -q delete amnezia.config.dnsleak_failopen 2>/dev/null || true
   _delete_sections
