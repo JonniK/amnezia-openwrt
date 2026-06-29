@@ -51,9 +51,16 @@ function makeRecordingNode(id){
   n.getAttribute=function(){return null;};
   return n;
 }
-const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], createElement:()=>E('div') };
-// DATA: 12 elements — indices 10 (DoT status) and 11 (master_enabled) added for Phase 4.
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}];
+// querySelector returns a stub element with value:'as' so handleAppAdd reads a valid method.
+function makeQuerySelectorResult(selector) {
+  var n = makeRecordingNode('qs-result');
+  // For method radio querySelector, return value 'as' so handleAppAdd takes the 'as' branch.
+  if (selector && selector.indexOf('app-add-method') >= 0) { n.value = 'as'; }
+  return n;
+}
+const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
+// DATA: 13 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list).
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}, {stdout:'[]'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
@@ -91,6 +98,9 @@ if (mainTree) {
   const strip = findById(mainTree, 'amz-master-strip');
   if (!strip) { console.error('FAIL: #amz-master-strip not found in render tree'); process.exit(1); }
   if (!hasTag(strip, 'button')) { console.error('FAIL: #amz-master-strip is EMPTY in render tree (microtask/getElementById race — strip would be blank on the real router)'); process.exit(1); }
+  // Tooth: tunnel-apps-tbody must exist synchronously in the render tree (not via getElementById at render time).
+  const appsTbody = findById(mainTree, 'tunnel-apps-tbody');
+  if (!appsTbody) { console.error('FAIL: #tunnel-apps-tbody not found in render tree (apps table must be painted synchronously, not via getElementById)'); process.exit(1); }
 }
 // Execute every render() that exists → throws on undefined-symbol refs.
 const panels = [];
@@ -174,7 +184,11 @@ if (require.main === module) {
         handleDotSetEnabled: ['1'], handleDotProvider: [], handleDotTest: [],
         handleMasterToggle: ['1'],
         handleAutolearnVeto: ['ex.com'], handleAutolearnPromote: ['ex.com'],
-        handleProbe: ['ex.com'], handleSourceToggle: ['itdoginfo_inside']
+        handleProbe: ['ex.com'], handleSourceToggle: ['itdoginfo_inside'],
+        // Tunnel-apps handlers — extra args first, event last (LuCI convention).
+        handleAppToggle: ['appSENT'], handleAppRemove: ['appSENT'],
+        handleAppPreset: ['telegram'],
+        handleAppAdd: []   // NO extra arg — reads form fields from DOM in handler
       };
       const CHANGE_HANDLERS = Object.keys(WIRING);
       const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };

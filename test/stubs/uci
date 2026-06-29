@@ -80,6 +80,31 @@ case "$1 $2" in
         echo "amnezia.${_sname}.url='https://example.com/${_sname}.txt'"
         echo "amnezia.${_sname}.kind='domains'"
       done
+    fi
+    # UCI_FAKE_APPS: space-separated list of "name:enabled:kind" triples for tunnel-app sources.
+    # Supports kind=static (no url), kind=as (no url, has asn), kind=cidr (has url).
+    if [ -n "$UCI_FAKE_APPS" ]; then
+      for _a in $UCI_FAKE_APPS; do
+        _aname=$(printf '%s' "$_a" | cut -d: -f1)
+        _aenabled=$(printf '%s' "$_a" | cut -d: -f2)
+        _akind=$(printf '%s' "$_a" | cut -d: -f3)
+        _akind="${_akind:-cidr}"
+        echo "amnezia.${_aname}=force_source"
+        echo "amnezia.${_aname}.enabled='${_aenabled}'"
+        echo "amnezia.${_aname}.kind='${_akind}'"
+        case "$_akind" in
+          cidr)
+            _aurl_envk="UCI_GET_amnezia_${_aname}_url"
+            eval _aurl="\${${_aurl_envk}:-https://example.com/${_aname}.txt}"
+            echo "amnezia.${_aname}.url='${_aurl}'"
+            ;;
+          as)
+            _aasn_envk="UCI_GET_amnezia_${_aname}_asn"
+            eval _aasn="\${${_aasn_envk}:-0}"
+            echo "amnezia.${_aname}.asn='${_aasn}'"
+            ;;
+        esac
+      done
     fi ;;
   "get firewall.vpn.network")
     # Return space-separated members on one line (how real uci get behaves for lists).
@@ -125,6 +150,37 @@ case "$1 $2" in
                 enabled) echo "$_senabled"; exit 0 ;;
                 url)     echo "https://example.com/${_sname}.txt"; exit 0 ;;
                 kind)    echo "domains"; exit 0 ;;
+              esac
+            fi
+          done
+        fi
+        # UCI_FAKE_APPS: serve attributes for tunnel-app force_source sections.
+        if [ "$_pkg" = "amnezia" ] && [ -n "$UCI_FAKE_APPS" ]; then
+          for _a in $UCI_FAKE_APPS; do
+            _aname=$(printf '%s' "$_a" | cut -d: -f1)
+            _aenabled=$(printf '%s' "$_a" | cut -d: -f2)
+            _akind=$(printf '%s' "$_a" | cut -d: -f3)
+            _akind="${_akind:-cidr}"
+            if [ "$_aname" = "$_sec" ]; then
+              case "$_opt" in
+                enabled) echo "$_aenabled"; exit 0 ;;
+                kind)    echo "$_akind"; exit 0 ;;
+                url)
+                  # Return UCI_GET_amnezia_<name>_url if set, else default.
+                  _urlenv="UCI_GET_amnezia_${_aname}_url"
+                  eval _urlval="\${${_urlenv}:-https://example.com/${_aname}.txt}"
+                  echo "$_urlval"; exit 0 ;;
+                asn)
+                  # Return UCI_GET_amnezia_<name>_asn if set.
+                  _asnenv="UCI_GET_amnezia_${_aname}_asn"
+                  eval _asnval="\${${_asnenv}:-0}"
+                  echo "$_asnval"; exit 0 ;;
+                cidr)
+                  # Return UCI_GET_amnezia_<name>_cidr (space-separated list on one line).
+                  _cidrenv="UCI_GET_amnezia_${_aname}_cidr"
+                  eval _cidrval="\${${_cidrenv}:-}"
+                  if [ -n "$_cidrval" ]; then echo "$_cidrval"; exit 0; fi
+                  exit 1 ;;
               esac
             fi
           done
