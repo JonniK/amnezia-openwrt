@@ -45,7 +45,7 @@ URL="https://$domain/"
 CT=5     # connect timeout (seconds)
 MAX=10   # total timeout
 
-# Optional 2nd arg: a pinned IPv4 to fix resolution (autolearn SSRF guard).
+# Optional 2nd arg: a pinned IPv4 to fix resolution (SSRF-safe pinned probe).
 # When present, curl resolves <domain> to exactly this IP and follows NO
 # redirects (a block manifests at the handshake / first response).
 pinned_ip=${2:-}
@@ -61,7 +61,6 @@ if [ -n "$pinned_ip" ]; then
   esac
   case "$pinned_ip" in *[!0-9.]*) echo '{"verdict":"error","reason":"invalid pinned ip"}'; exit 2 ;; esac
   # SSRF guard: reject non-public (reserved/loopback/private/multicast) ranges.
-  # Mirrors the al_ip_is_public() logic in amnezia-autolearn-lib.sh.
   _o1="${pinned_ip%%.*}"; _rest="${pinned_ip#*.}"; _o2="${_rest%%.*}"
   _reject=0
   case "$_o1" in

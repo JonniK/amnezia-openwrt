@@ -155,9 +155,7 @@ case "$1" in
         _me=$(uci -q get amnezia.config.master_enabled 2>/dev/null || echo 1)
         if [ "$_me" != 0 ]; then
           _ds=$(uci -q get amnezia.config.dot_enabled 2>/dev/null || echo 0)
-          _as=$(uci -q get amnezia.config.autolearn_enabled 2>/dev/null || echo 0)
           uci set amnezia.config.dot_master_saved="$_ds"
-          uci set amnezia.config.autolearn_master_saved="$_as"
         fi
         uci set amnezia.config.master_enabled=0
         uci commit amnezia
@@ -167,9 +165,6 @@ case "$1" in
         rm -f "$STATE_FILE"
         if [ "$_ds" = 1 ]; then
           ${AMNEZIA_DNS_CTL:-amnezia-dns-ctl} disable 2>/dev/null || true
-        fi
-        if [ "$_as" = 1 ]; then
-          ${AMNEZIA_AL_CTL:-amnezia-autolearn-ctl} set-enabled 0 2>/dev/null || true
         fi
         # Explicitly flush pref-30900 (DoT ip rule) even if amnezia-dns-ctl disable
         # failed — prevents the rule from stranding against the flushed table 100.
@@ -190,15 +185,10 @@ case "$1" in
         uci commit amnezia
         ${AMNEZIA_FAILOVER_INIT:-/etc/init.d/amnezia-failover} start 2>/dev/null || true
         _ds=$(uci -q get amnezia.config.dot_master_saved 2>/dev/null || echo 0)
-        _as=$(uci -q get amnezia.config.autolearn_master_saved 2>/dev/null || echo 0)
         if [ "$_ds" = 1 ]; then
           ${AMNEZIA_DNS_CTL:-amnezia-dns-ctl} enable 2>/dev/null || true
         fi
-        if [ "$_as" = 1 ]; then
-          ${AMNEZIA_AL_CTL:-amnezia-autolearn-ctl} set-enabled 1 2>/dev/null || true
-        fi
         uci -q delete amnezia.config.dot_master_saved
-        uci -q delete amnezia.config.autolearn_master_saved
         uci commit amnezia
         # Cold-start verify: retry up to 3 times with 2s sleep to allow the daemon's
         # first poll + AWG handshake (~15s total) to complete before logging failure.

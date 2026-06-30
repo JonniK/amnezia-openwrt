@@ -1,4 +1,0 @@
-#!/bin/sh
-# Stub for amnezia-autolearn init — used by autolearn-ctl.bats HIGH-1 test.
-echo "init $*" >> "${STUB_LOG:-/dev/null}"
-exit 0

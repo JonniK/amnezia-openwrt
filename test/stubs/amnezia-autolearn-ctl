@@ -1,3 +1,0 @@
-#!/bin/sh
-echo "amnezia-autolearn-ctl $*" >> "${STUB_LOG:-/dev/null}"
-exit 0

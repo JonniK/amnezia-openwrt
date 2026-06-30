@@ -38,7 +38,7 @@ What you get on the router:
     it in the failover JSON as `exit_ip`/`exit_ip_age`. The LuCI table
     shows the IP + age; down tunnels show `—`.
   - **Master switch**: `amnezia-failover-ctl master off` fail-opens the
-    router (LAN → WAN direct, no tunnel, no DoT, no autolearn). `master
+    router (LAN → WAN direct, no tunnel, no DoT). `master
     on` restores all saved settings. State persists across reboot via
     `amnezia.config.master_enabled` (default `1`). LuCI shows a master
     strip above the accordion.
@@ -69,11 +69,6 @@ What you get on the router:
     source lists and are never overwritten by auto-update.
   - Domains resolve via dnsmasq into the `amnezia_force4` nft set; IP/
     CIDR entries are loaded directly into that set.
-- **Self-learning auto-bypass** (opt-in, `direct-default` mode only,
-  default **OFF**): watches the dnsmasq query log, probes candidates
-  via `zapret-probe` with a pinned IP (SSRF-safe), and auto-adds
-  confirmed-blocked domains to the force-tunnel list. Manage from the
-  LuCI panel or via `amnezia-autolearn-ctl`.
 - **Add/remove tunnels at runtime** from the LuCI panel (paste a `.conf`
   or an Amnezia `vpn://` share link — decoded in the browser before
   submission) or via `amnezia-tunnel-ctl add/remove`.
@@ -208,10 +203,6 @@ anything — idempotent.
 | `/etc/amnezia/force-tunnel.list` | Manual allowlist entries (domains/IPs); never overwritten by auto-update |
 | `/etc/amnezia/force.d/` | Auto-update cache: one `.list` file per enabled source, written by `amnezia-force-update` |
 | `/etc/amnezia/force-update.json` | Stamp of last force-list update (per-source counts + status) |
-| `/etc/amnezia/force.d/auto.list` | Auto-learned domains (written by `amnezia-autolearn`; managed via `amnezia-autolearn-ctl`) |
-| `/etc/amnezia/autolearn/candidates.tsv` | 7-column TSV: domain, verdict, count, clients, first_seen, last_probe, reason |
-| `/etc/amnezia/autolearn/deny.list` | Vetoed domains (never re-added by autolearn; suffix-aware exclusion also applied in `amnezia-force-load`) |
-| `/tmp/dnsmasq-queries.log` | DNS query log (tmpfs; present only while autolearn is enabled; lost on reboot) |
 | `/tmp/amnezia-fo/exitip.<awgN>.ip` | Cached exit IP for each tunnel (written by daemon background probe; cleared on down→up or tunnel remove) |
 | `/tmp/amnezia-fo/exitip.<awgN>.ts` | Unix timestamp of the last exit-IP probe for `<awgN>` (TTL 300 s) |
 | `/usr/lib/amnezia/amnezia-dns-lib.sh` | Encrypted-DNS helpers: provider profiles, stubby/https-dns-proxy UCI render, dnsmasq server management, ip rule helpers |
@@ -279,7 +270,7 @@ amnezia-failover-ctl make-default awg2       # renumber metrics so awg2 wins nex
 amnezia-failover-ctl force-pin awg2          # route entire pool through awg2 (fail-closed if down)
 amnezia-failover-ctl force-unpin             # restore normal metric-based pool selection
 amnezia-failover-ctl restart awg2            # ifdown awg2; sleep 1; ifup awg2
-amnezia-failover-ctl master off              # fail-open: disable all VPN routing + DoT + autolearn
+amnezia-failover-ctl master off              # fail-open: disable all VPN routing + DoT
 amnezia-failover-ctl master on               # restore stack from saved settings
 amnezia-failover-ctl set-routing-mode direct-default   # switch to allowlist mode
 amnezia-failover-ctl set-routing-mode tunnel-default   # switch back to tunnel-by-default
@@ -372,75 +363,6 @@ amnezia-force-load            # merge + apply already-cached lists only
 Manual entries in `/etc/amnezia/force-tunnel.list` are always merged in and
 are never overwritten by `amnezia-force-update`.
 
-### Auto-learning (self-learning bypass)
-
-Available in `direct-default` mode only. Disabled by default.
-
-**What it does:** a cron pass harvests visited domains from the dnsmasq
-query log, probes each candidate via `zapret-probe` with a pinned IP
-(SSRF-safe — curl `--resolve`, no redirects, public-IP gate), and
-auto-adds confirmed-blocked domains to `/etc/amnezia/force.d/auto.list`,
-which feeds `amnezia_force4` via the normal `amnezia-force-load` path.
-Classification thresholds: geoblock confirmed at **2 verdicts**, DPI at
-**3**. A domain is eligible only if **≥2 distinct client IPs** resolved
-it in the harvest window. Domains that later pass direct probing are
-dropped (revalidation). The LRU eviction cap (`autolearn_max_entries`,
-default 500) keeps flash use bounded.
-
-The probe egresses direct (router-origin bypasses the prerouting
-classifier), which is what makes revalidation-drop sound: if a domain
-returns `direct_ok` from the router's own network path, it no longer
-needs the tunnel.
-
-**Enabling:**
-
-```sh
-# Via CLI:
-amnezia-autolearn-ctl set-enabled 1
-
-# Or via UCI directly:
-uci set amnezia.config.autolearn_enabled=1
-uci commit amnezia
-/etc/init.d/amnezia-autolearn enable
-```
-
-The init script wires reversible dnsmasq query logging (options
-`logqueries`, `logfacility=/tmp/dnsmasq-queries.log`, `log-async=5`) and
-adds a cron entry. Disabling reverses both: the dnsmasq options are
-removed and the log file is deleted. The init guards against clobbering
-a pre-existing user `logfacility` — it only removes options it set.
-
-**Privacy note:** while enabled, DNS query logs (domain + client LAN IP)
-are written to `/tmp/dnsmasq-queries.log` (tmpfs, lost on reboot).
-`candidates.tsv` on flash retains domain + client IPs up to
-`autolearn_candidate_retention_days` (default 30 days).
-
-**Managing the auto-list:**
-
-```sh
-amnezia-autolearn-ctl status           # {"enabled":0|1,"count":N}
-amnezia-autolearn-ctl list             # JSON array of auto-added domains
-amnezia-autolearn-ctl veto example.com # remove + add to deny.list (never re-added)
-amnezia-autolearn-ctl promote example.com # move to force-tunnel.list (permanent)
-amnezia-autolearn-ctl purge            # clear auto.list + candidates.tsv
-amnezia-autolearn-ctl set-enabled 0|1  # toggle with dnsmasq + cron side-effects
-```
-
-From the LuCI panel: the auto-learning section has a master toggle and a
-table showing auto-added domains with **Remove** (veto), **Promote**, and
-a **Purge all** button.
-
-**UCI knobs** (all under `amnezia.config`):
-
-| Option | Default | Description |
-|---|---|---|
-| `autolearn_enabled` | `0` | Master enable; wires logging + cron when set to `1` |
-| `autolearn_interval_min` | `30` | Cron interval in minutes |
-| `autolearn_max_probes` | `20` | Maximum domains probed per cron pass |
-| `autolearn_max_per_client` | `5` | Per-client IP fairness cap (harvest window) |
-| `autolearn_revalidate_days` | `14` | Days between re-probing auto-list entries |
-| `autolearn_max_entries` | `500` | LRU cap on `/etc/amnezia/force.d/auto.list` |
-| `autolearn_candidate_retention_days` | `30` | Days to keep candidates.tsv rows |
 ### Encrypted DNS (DoT)
 
 The encrypted-DNS stack is **default OFF** — existing DNS behaviour is
@@ -599,13 +521,9 @@ openwrt/
   amnezia-failover.init             procd init script for amnezia-failover (installs fwmark rules)
   amnezia-tunnel-ctl.sh             Add / remove tunnels (add, remove, list-free)
   amnezia-force-load.sh             Merge force.d/ + manual list -> amnezia_force4 set + dnsmasq
-                                      (also applies suffix-aware deny.list exclusion for autolearn vetos)
   amnezia-force-update.sh           Fetch enabled force_source lists, cache, call force-load
   amnezia-force-load.init           Boot init (START=96) to repopulate amnezia_force4
   99-amnezia-force-load.hotplug     Firewall hotplug: repopulate amnezia_force4 after fw4 reload
-  amnezia-autolearn.sh              Auto-learning cron pass (harvest → probe → confirm → revalidate)
-  amnezia-autolearn-ctl.sh          CLI: status/list/veto/promote/purge/set-enabled
-  amnezia-autolearn.init            Enable/disable reversible dnsmasq query logging + cron (START=97)
   amnezia-ru-cidr.sh                Populate @amnezia_ru4 nftset from persist / fetch
   amnezia-ru-load.init              Boot + hotplug loader for amnezia_ru4
   amnezia-status.sh                 Status summary script
@@ -618,7 +536,6 @@ openwrt/
   lib/amnezia-common.sh             Shared constants + helpers (MAX_TUNNELS=5, RULE_PREF_DOT=30900)
   lib/amnezia-routing.sh            iproute2 / nft / firewall helpers (routing_emit_classifier)
   lib/amnezia-tunnel-lib.sh         .conf parser + UCI generator used by amnezia-tunnel-ctl
-  lib/amnezia-autolearn-lib.sh      Pure helpers for the autolearn pass (see above)
   lib/amnezia-dns-lib.sh            Encrypted-DNS helpers: provider profiles, stubby/DoH UCI render,
                                       dnsmasq server list management, ip rule set/clear/flush
   amnezia-dns-ctl.sh                Encrypted-DNS CLI (enable, disable, apply, set-provider, status, watchdog)

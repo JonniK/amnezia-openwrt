@@ -195,26 +195,3 @@ setup() {
   [ "${_count}" -eq 0 ] || { echo "expected 0 nftset lines for IP-only input, got ${_count}"; false; }
 }
 
-@test "force-load deny.list suppresses a domain (and subdomains) from any source" {
-  printf 'example.com\nkeep.com\n' > "$FORCE_DIR/force.d/itdoginfo_inside.list"
-  printf 'www.example.com\n' >> "$FORCE_DIR/force.d/itdoginfo_inside.list"
-  mkdir -p "$FORCE_DIR/autolearn"; printf 'example.com\n' > "$FORCE_DIR/autolearn/deny.list"
-  export AMZ_DENY_LIST="$FORCE_DIR/autolearn/deny.list"
-  run sh "$SCRIPT"
-  [ "$status" -eq 0 ]
-  # NOTE: bats 1.13 does not fail on bare `! cmd` (! negation is swallowed).
-  # Use run+status idiom for meaningful negative assertions.
-  run grep -q 'example\.com' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
-  [ "$status" -ne 0 ] || { echo "FAIL: example.com was not denied"; false; }
-  run grep -q 'www\.example\.com' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
-  [ "$status" -ne 0 ] || { echo "FAIL: www.example.com was not denied"; false; }
-  grep -q 'keep\.com' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
-}
-@test "force-load never blanks the set when deny.list is missing/empty" {
-  printf 'a.com\nb.com\n' > "$FORCE_DIR/force.d/itdoginfo_inside.list"
-  export AMZ_DENY_LIST="$FORCE_DIR/autolearn/deny.list"   # file absent
-  run sh "$SCRIPT"
-  [ "$status" -eq 0 ]
-  grep -q 'a\.com' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
-  grep -q 'b\.com' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf"
-}

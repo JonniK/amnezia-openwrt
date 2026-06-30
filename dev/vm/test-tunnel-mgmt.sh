@@ -438,7 +438,7 @@ log "asserting force domain (${FORCE_DOMAIN}) materializes into dnsmasq conf-dir
 vm_run "amnezia-force-load 2>/dev/null || true; sleep 1" >/dev/null 2>&1 || true
 
 # Primary check: the dnsmasq conf-dir (/etc/amnezia/dnsmasq.d/) contains an nftset
-# line for FORCE_DOMAIN (the chunked-conf-dir path; mirrors T4-2 in test-autolearn.sh).
+# line for FORCE_DOMAIN (the chunked-conf-dir path).
 _dnsmasq_d_match=$(vm_run "grep -r '${FORCE_DOMAIN}' /etc/amnezia/dnsmasq.d/ 2>/dev/null | head -3 || true" 2>/dev/null || true)
 # Fallback: the assembled running dnsmasq config references the amnezia_force4 nftset.
 _dnsmasq_conf=$(vm_run "cat /var/etc/dnsmasq.conf* 2>/dev/null || true" 2>/dev/null || true)

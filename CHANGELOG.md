@@ -2,6 +2,14 @@
 
 ## [unreleased]
 
+### Remove autolearn
+
+The auto-learning feature (`amnezia-autolearn`, `amnezia-autolearn-ctl`, `amnezia-autolearn-lib.sh`, `amnezia-autolearn.init`) has been removed entirely. The implementation never worked correctly — broken verdict parsing meant no domains were ever learned — and the cron job correlated with an intermittent kernel hang on the AX3000T (hard reset every 30 min aligned with autolearn's cron interval). All associated UCI options (`autolearn_*`), the deny.list exclusion in `amnezia-force-load`, the LuCI `autolearn.js` panel, and the ACL entry for `amnezia-autolearn-ctl` are removed. The `master on|off` verbs no longer snapshot or restore `autolearn_enabled`. `zapret-probe`'s pinned-IP second argument is retained as a general SSRF-safe probe option.
+
+---
+
+
+
 ### Tunnel control, DoT fixes, exit-IP & master switch
 
 Six capabilities added across daemon, ctl, init, and LuCI UI:

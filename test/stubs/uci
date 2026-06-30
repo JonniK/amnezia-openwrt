@@ -13,7 +13,7 @@ case "$_verb" in
 esac
 
 # UCI_DNSMASQ_<opt> override: handles dhcp.@dnsmasq[0].<opt> keys via the
-# autolearn-test convention (export UCI_DNSMASQ_<opt>='value'). When the override
+# test convention (export UCI_DNSMASQ_<opt>='value'). When the override
 # is unset, FALL THROUGH to the generic UCI_GET_* block below so the DoT-test
 # convention (UCI_GET_dhcp__dnsmasq_0__<opt>) can resolve the same key.
 if [ "$1" = get ]; then

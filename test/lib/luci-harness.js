@@ -65,10 +65,10 @@ const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', ''
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
   const src = fs.readFileSync(file,'utf8');
-  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns','autolearn'];
+  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns'];
   const fn = new Function(...names, src);
   return fn(baseclass, ui, fsStub, poll, view, E, _, L, documentStub,
-           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns, deps.autolearn); }
+           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns); }
 
 // Default loader (succeeding fs stubs).
 function load(rel, deps){ return loadWith(rel, deps, fsApi); }
@@ -78,7 +78,6 @@ d.util      = load('amnezia/util.js', d);
 d.routing   = load('amnezia/section/routing.js', d);
 d.zapret    = load('amnezia/section/zapret.js', d);
 d.dns       = load('amnezia/section/dns.js', d);
-d.autolearn = load('amnezia/section/autolearn.js', d);
 d.failover  = load('amnezia/section/failover.js', d);
 const main  = load('view/main.js', d);
 // FIX: use call(main, DATA) so this=main and data=DATA (LuCI single-arg render signature).
@@ -104,7 +103,7 @@ if (mainTree) {
 }
 // Execute every render() that exists → throws on undefined-symbol refs.
 const panels = [];
-for (const k of ['failover','routing','zapret','dns','autolearn']) {
+for (const k of ['failover','routing','zapret','dns']) {
   if (d[k] && typeof d[k].render === 'function') { const node = d[k].render({}, DATA); panels.push([k,node]); } }
 function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[]).forEach(c=>walk(c,fn)); }
 
@@ -114,7 +113,7 @@ function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[])
 // assert it textually across every shipped JS file. (Convention proven on-device: every
 // dotted require — tools.firewall as fwtool, tools.widgets as widgets — carries ` as `.)
 function lintRequires(){
-  const files = ['view/main.js','amnezia/util.js','amnezia/section/failover.js','amnezia/section/routing.js','amnezia/section/zapret.js','amnezia/section/dns.js','amnezia/section/autolearn.js'];
+  const files = ['view/main.js','amnezia/util.js','amnezia/section/failover.js','amnezia/section/routing.js','amnezia/section/zapret.js','amnezia/section/dns.js'];
   const bad = [];
   files.forEach(function(rel){
     const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return;
@@ -149,11 +148,10 @@ if (require.main === module) {
   dr.routing   = loadWith('amnezia/section/routing.js', dr, fsRej);
   dr.zapret    = loadWith('amnezia/section/zapret.js', dr, fsRej);
   dr.dns       = loadWith('amnezia/section/dns.js', dr, fsRej);
-  dr.autolearn = loadWith('amnezia/section/autolearn.js', dr, fsRej);
   dr.failover  = loadWith('amnezia/section/failover.js', dr, fsRej);
   const viewStub = {};
   const refreshPromises = [];
-  for (const k of ['failover','routing','zapret','dns','autolearn']) {
+  for (const k of ['failover','routing','zapret','dns']) {
     if (dr[k] && typeof dr[k].refresh === 'function') {
       // Wrap in Promise.resolve().then() so synchronous throws are also captured as rejections.
       refreshPromises.push([k, Promise.resolve().then(function(){ return dr[k].refresh(viewStub); })]);
@@ -183,7 +181,6 @@ if (require.main === module) {
         handleForcePin: [], handleForceUnpin: [],
         handleDotSetEnabled: ['1'], handleDotProvider: [], handleDotTest: [],
         handleMasterToggle: ['1'],
-        handleAutolearnVeto: ['ex.com'], handleAutolearnPromote: ['ex.com'],
         handleProbe: ['ex.com'], handleSourceToggle: ['itdoginfo_inside'],
         // Tunnel-apps handlers — extra args first, event last (LuCI convention).
         handleAppToggle: ['appSENT'], handleAppRemove: ['appSENT'],
@@ -199,7 +196,6 @@ if (require.main === module) {
         dv.routing   = loadWith('amnezia/section/routing.js', dv, fsStub);
         dv.zapret    = loadWith('amnezia/section/zapret.js', dv, fsStub);
         dv.dns       = loadWith('amnezia/section/dns.js', dv, fsStub);
-        dv.autolearn = loadWith('amnezia/section/autolearn.js', dv, fsStub);
         dv.failover  = loadWith('amnezia/section/failover.js', dv, fsStub);
         const mv = loadWith('view/main.js', dv, fsStub);
         // Assemble exactly as LuCI does via view.extend(Object.assign(...)).
@@ -207,8 +203,7 @@ if (require.main === module) {
           (dv.failover && dv.failover.handlers) || {},
           (dv.routing  && dv.routing.handlers)  || {},
           (dv.zapret   && dv.zapret.handlers)   || {},
-          (dv.dns      && dv.dns.handlers)       || {},
-          (dv.autolearn && dv.autolearn.handlers) || {}
+          (dv.dns      && dv.dns.handlers)       || {}
         );
         // Bind util for handlers that call util.uiConfirm.
         assembled.__util = dv.util;
@@ -280,7 +275,7 @@ if (require.main === module) {
           // This pass ensures paintMasterStrip is called with the correct `self` context.
           var repaintView = buildView(fsApi);
           // Run main.render first so the module-level state (domSeen, pollFn) is seeded.
-          var mr = loadWith('view/main.js', (function(){ var dv2={}; dv2.util=loadWith('amnezia/util.js',dv2,fsApi); dv2.routing=loadWith('amnezia/section/routing.js',dv2,fsApi); dv2.zapret=loadWith('amnezia/section/zapret.js',dv2,fsApi); dv2.dns=loadWith('amnezia/section/dns.js',dv2,fsApi); dv2.autolearn=loadWith('amnezia/section/autolearn.js',dv2,fsApi); dv2.failover=loadWith('amnezia/section/failover.js',dv2,fsApi); return dv2; }()), fsApi);
+          var mr = loadWith('view/main.js', (function(){ var dv2={}; dv2.util=loadWith('amnezia/util.js',dv2,fsApi); dv2.routing=loadWith('amnezia/section/routing.js',dv2,fsApi); dv2.zapret=loadWith('amnezia/section/zapret.js',dv2,fsApi); dv2.dns=loadWith('amnezia/section/dns.js',dv2,fsApi); dv2.failover=loadWith('amnezia/section/failover.js',dv2,fsApi); return dv2; }()), fsApi);
           if (mr && typeof mr.render === 'function') { try { mr.render.call(mr, DATA); } catch(e2) { /* ignore render errors in this sub-env */ } }
           // Override uiConfirm to resolve TRUE so the toggle actually executes the repaint path.
           if (repaintView.__util) repaintView.__util.uiConfirm = function() { return Promise.resolve(true); };

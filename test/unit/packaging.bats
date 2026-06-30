@@ -7,12 +7,12 @@ A="$HARNESS_DIR/../packages/amnezia-pbr/Makefile"
   grep -q "conntrack-tools" "$A"
   grep -q "PKG_RELEASE:=4" "$A"
 }
-@test "autolearn files are staged into the package tree" {
+@test "autolearn files are NOT staged into the package tree (feature removed)" {
   ROOT="$HARNESS_DIR/.."
   for f in usr/sbin/amnezia-autolearn usr/bin/amnezia-autolearn-ctl \
            etc/init.d/amnezia-autolearn usr/lib/amnezia/amnezia-autolearn-lib.sh; do
     run find "$ROOT/packages" -path "*/$f"
     [ "$status" -eq 0 ]
-    [ -n "$output" ] || { echo "missing $f"; return 1; }
+    [ -z "$output" ] || { echo "unexpected file still present: $f"; return 1; }
   done
 }

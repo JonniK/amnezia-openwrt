@@ -13,13 +13,7 @@ load '../lib/harness.bash'
   grep -q "config amnezia 'config'" "$f"
   grep -q "option routing_mode" "$f"
 }
-@test "config ships autolearn_* defaults with learning OFF" {
+@test "config does NOT ship autolearn_* options (feature removed)" {
   CFG="$HARNESS_DIR/../openwrt/config/amnezia"
-  grep -q "option autolearn_enabled '0'" "$CFG"
-  grep -q "option autolearn_interval_min '30'" "$CFG"
-  grep -q "option autolearn_max_probes '20'" "$CFG"
-  grep -q "option autolearn_max_per_client '5'" "$CFG"
-  grep -q "option autolearn_revalidate_days '14'" "$CFG"
-  grep -q "option autolearn_max_entries '500'" "$CFG"
-  grep -q "option autolearn_candidate_retention_days '30'" "$CFG"
+  ! grep -q "autolearn" "$CFG"
 }
