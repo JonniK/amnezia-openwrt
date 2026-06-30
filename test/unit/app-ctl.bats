@@ -196,10 +196,10 @@ setup() {
   echo "$output" | grep -q 'meta'
 }
 
-@test "preset list: includes all 8 preset ids" {
+@test "preset list: includes all 9 preset ids" {
   run sh "$SCRIPT" preset list
   [ "$status" -eq 0 ]
-  for id in telegram meta x discord tiktok viber linkedin netflix; do
+  for id in telegram meta x discord tiktok viber linkedin netflix google; do
     echo "$output" | grep -q "$id" \
       || { echo "missing preset id: $id; output: $output"; false; }
   done

@@ -16,7 +16,7 @@ FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
 # ---------------------------------------------------------------------------
 # Preset definitions
 # ---------------------------------------------------------------------------
-PRESET_IDS="telegram meta x discord tiktok viber linkedin netflix"
+PRESET_IDS="telegram meta x discord tiktok viber linkedin netflix google"
 
 _preset_expand() {
   _pid="$1"
@@ -68,6 +68,14 @@ _preset_expand() {
       PRESET_METHOD="as"
       PRESET_TITLE="Netflix"
       PRESET_DATA="2906"
+      ;;
+    google)
+      # Google (Meet / media) — AS15169. Tunnels all Google; needed because
+      # Meet's WebRTC media/STUN/TURN servers (74.125.x, 142.250.x, 172.217.x)
+      # are RU-throttled on the direct path.
+      PRESET_METHOD="as"
+      PRESET_TITLE="Google (Meet/media, AS15169)"
+      PRESET_DATA="15169"
       ;;
     *)
       echo "app-ctl: unknown preset '$_pid'" >&2
