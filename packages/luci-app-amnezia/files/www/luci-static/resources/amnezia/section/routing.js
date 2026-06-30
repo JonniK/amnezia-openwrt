@@ -296,7 +296,8 @@ return baseclass.extend({
 				tiktok: 'TikTok',
 				viber: 'Viber',
 				linkedin: 'LinkedIn',
-				netflix: 'Netflix'
+				netflix: 'Netflix',
+				google: 'Google (Meet/media, AS15169)'
 			};
 			var title = titles[presetId] || presetId;
 			var self = this;
@@ -669,9 +670,14 @@ return baseclass.extend({
 					}, _('Add LinkedIn')),
 					E('button', {
 						'class': 'btn cbi-button-action',
-						'style': 'margin-bottom:6px;',
+						'style': 'margin-right:8px;margin-bottom:6px;',
 						'click': ui.createHandlerFn(view, 'handleAppPreset', 'netflix')
-					}, _('Add Netflix'))
+					}, _('Add Netflix')),
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'margin-bottom:6px;',
+						'click': ui.createHandlerFn(view, 'handleAppPreset', 'google')
+					}, _('Add Google'))
 				]),
 
 				// Add-app form — collapsed action panel.
