@@ -14,7 +14,7 @@ define Package/luci-app-amnezia
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=LuCI app for amnezia-pbr (AmneziaWG failover + tunnel mgmt + DoT + autolearn)
+  TITLE:=LuCI app for amnezia-pbr (AmneziaWG failover + tunnel mgmt + DoT)
   URL:=https://github.com/JonniK/amnezia-openwrt
   PKGARCH:=all
   DEPENDS:= \
@@ -33,7 +33,6 @@ define Package/luci-app-amnezia/description
    - Verify list (run probe across N domains in one go)
    - Blockcheck runner with live log and apply/revert of nfqws strategies
    - Encrypted DNS toggle (DoT/DoH via stubby + https-dns-proxy, opt-in)
-   - Auto-learning bypass: harvest visited domains, probe, auto-add to force list
  Reachable at Network -> Amnezia.
 endef
 

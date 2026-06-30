@@ -84,7 +84,6 @@ start_remote_deploy() {
             openwrt/luci-app-amnezia/amnezia/section/routing.js \
             openwrt/luci-app-amnezia/amnezia/section/zapret.js \
             openwrt/luci-app-amnezia/amnezia/section/dns.js \
-            openwrt/luci-app-amnezia/amnezia/section/autolearn.js \
             openwrt/luci-app-amnezia/view/main.js; do
     _rel=${_f#openwrt/luci-app-amnezia/}
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"

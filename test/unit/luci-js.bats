@@ -131,17 +131,9 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "failover-tunnel-table" "$F"
 }
 
-# ── Phase 8 additions (autolearn) ───────────────────────────────────────────
-
-@test "autolearn.js wires the autolearn toggle and list" {
-  A="$AMZ/amnezia/section/autolearn.js"
-  grep -q 'autolearn' "$A"
-  grep -q 'amnezia-autolearn-ctl' "$A"
-  grep -q 'set-enabled' "$A"
-}
-@test "acl grants exec on amnezia-autolearn-ctl" {
+@test "acl does NOT grant exec on amnezia-autolearn-ctl (feature removed)" {
   ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
-  grep -q 'amnezia-autolearn-ctl' "$ACL"
+  ! grep -q 'amnezia-autolearn-ctl' "$ACL"
 }
 
 # ── Phase 4: dns.js ──────────────────────────────────────────────────────────
@@ -201,13 +193,6 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   for s in handleProbe handleVerify handleBlockcheckRun handleApply handleRevert applyInFlight candidatesSig paintApply; do grep -q "$s" "$Z"; done
 }
 
-# ── Phase 5: autolearn.js ─────────────────────────────────────────────────────
-
-@test "autolearn.js wires toggle/list + row handlers" {
-  A="$AMZ/amnezia/section/autolearn.js"; node --check "$A"
-  for s in amnezia-autolearn-ctl set-enabled handleAutolearnVeto handleAutolearnPromote handleAutolearnPurge; do grep -q "$s" "$A"; done
-}
-
 # ── Phase 6: failover.js ──────────────────────────────────────────────────────
 
 @test "failover.js owns tunnel table, add-tunnel, set-mode/set-sticky, sentinel; direct handshake_age" {
@@ -219,12 +204,12 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
 
 # ── Phase 7: accordion chrome + structural tests ──────────────────────────────
 
-@test "accordion: 5 family panels with correct default-open set (harness)" {
+@test "accordion: 4 family panels with correct default-open set (harness)" {
   run node -e '
     const h=require("./test/lib/luci-harness.js");
     const fams={}; h.panels.forEach(([k,n])=>h.walk(n,x=>{ if(x.tag==="details" && (x.attrs.class||"").includes("amnezia-panel")){
       fams[k]=Object.prototype.hasOwnProperty.call(x.attrs,"open") && x.attrs.open!=null; }}));
-    const want={failover:true,routing:true,dns:true,autolearn:true,zapret:false};
+    const want={failover:true,routing:true,dns:true,zapret:false};
     for(const k of Object.keys(want)){ if(fams[k]!==want[k]){ console.error("open mismatch "+k+": "+fams[k]); process.exit(1);} }
     process.exit(0);'
   [ "$status" -eq 0 ]
@@ -235,23 +220,24 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "amnezia-accordion" "$AMZ/view/main.js"
 }
 @test "main.js require-graph resolves to existing files" {
-  for m in util section/failover section/routing section/zapret section/dns section/autolearn; do
+  for m in util section/failover section/routing section/zapret section/dns; do
     grep -q "require amnezia.${m//\//.}" "$AMZ/view/main.js"
     [ -f "$AMZ/amnezia/$m.js" ]
   done
   ! grep -q "require.*decode-vpn" "$AMZ/view/main.js"
+  ! grep -q "require.*autolearn" "$AMZ/view/main.js"
 }
 
 # ── Phase 8: delivery wiring — packages mirror carries the amnezia module tree ──
 
-@test "packages mirror carries the amnezia module tree (6 files)" {
+@test "packages mirror carries the amnezia module tree (5 files, no autolearn)" {
   PKG="$HARNESS_DIR/../packages/luci-app-amnezia/files/www/luci-static/resources/amnezia"
   [ -f "$PKG/util.js" ]
   [ -f "$PKG/section/failover.js" ]
   [ -f "$PKG/section/routing.js" ]
   [ -f "$PKG/section/zapret.js" ]
   [ -f "$PKG/section/dns.js" ]
-  [ -f "$PKG/section/autolearn.js" ]
+  [ ! -f "$PKG/section/autolearn.js" ]
 }
 
 @test "no dotted require without 'as' alias (LuCI binding footgun)" {

@@ -8,7 +8,6 @@
 'require amnezia.section.routing as routing';
 'require amnezia.section.zapret as zapret';
 'require amnezia.section.dns as dns';
-'require amnezia.section.autolearn as autolearn';
 
 // Module-level handle for the poll callback. LuCI has no teardown hook for
 // views, so the poller self-unregisters when its DOM anchor disappears
@@ -58,7 +57,7 @@ function paintMasterStrip(view, masterEnabled) {
 	}
 }
 
-return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, autolearn.handlers, {
+return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, {
 
 	handleRefresh: function(ev) {
 		var btn = document.getElementById('manual-refresh-btn');
@@ -75,8 +74,8 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 	handleMasterToggle: function(currentState, ev) {
 		var turningOff = (currentState === '1' || currentState === 1);
 		var msg = turningOff
-			? _('Turn OFF the master switch?\n\nThis disables all policy routing — LAN traffic goes direct to WAN.\nDoT (if enabled) reverts to plaintext. Auto-learn pauses.\nSettings are saved and restored when you turn it back ON.\nThis persists across reboot.')
-			: _('Turn ON the master switch?\n\nRestores all saved routing, DoT, and auto-learn settings.');
+			? _('Turn OFF the master switch?\n\nThis disables all policy routing — LAN traffic goes direct to WAN.\nDoT (if enabled) reverts to plaintext.\nSettings are saved and restored when you turn it back ON.\nThis persists across reboot.')
+			: _('Turn ON the master switch?\n\nRestores all saved routing and DoT settings.');
 		var self = this;
 		return util.uiConfirm(msg).then(L.bind(function(ok) {
 			if (!ok) return Promise.resolve();
@@ -151,8 +150,7 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				failover.render(this, data),
 				routing.render(this, data),
 				zapret.render(this, data),
-				dns.render(this, data),
-				autolearn.render(this, data)
+				dns.render(this, data)
 			]),
 
 			E('div', { 'class': 'cbi-section' }, [
@@ -196,8 +194,7 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			failover.refresh(self),
 			routing.refresh(self),
 			zapret.refresh(self),
-			dns.refresh(self),
-			autolearn.refresh(self)
+			dns.refresh(self)
 		]);
 	},
 

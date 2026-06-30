@@ -48,11 +48,6 @@
     источниками и никогда не перезаписываются авто-обновлением.
   - Домены попадают в nft-сет `amnezia_force4` через dnsmasq; IP/CIDR
     грузятся напрямую.
-- **Самообучающийся авто-обход** (opt-in, только в режиме `direct-default`,
-  по умолчанию **выключен**): следит за dnsmasq-логом запросов, пробивает
-  кандидатов через `zapret-probe` с pinned IP (SSRF-safe) и автоматически
-  добавляет заблокированные домены в force-tunnel список. Управляется из
-  LuCI-панели или через `amnezia-autolearn-ctl`.
 - **Добавление/удаление туннелей** в рантайме из LuCI-панели (вставить
   `.conf` или ссылку Amnezia `vpn://` — декодируется в браузере) или через
   `amnezia-tunnel-ctl add/remove`.
@@ -168,10 +163,6 @@ UCI-конфиг (`/etc/config/amnezia`) и `/etc/amnezia/awg*.conf` помеч�
 | `/etc/amnezia/force-tunnel.list` | Ручные записи allowlist (домены/IP); авто-обновление никогда не перезаписывает |
 | `/etc/amnezia/force.d/` | Кеш авто-обновления: по одному `.list`-файлу на каждый включённый источник |
 | `/etc/amnezia/force-update.json` | Стамп последнего обновления force-списка (счётчики по источникам + статус) |
-| `/etc/amnezia/force.d/auto.list` | Авто-добавленные домены (пишет `amnezia-autolearn`; управляет `amnezia-autolearn-ctl`) |
-| `/etc/amnezia/autolearn/candidates.tsv` | 7-колоночный TSV: domain, verdict, count, clients, first_seen, last_probe, reason |
-| `/etc/amnezia/autolearn/deny.list` | Заблокированные домены (veto; не добавляются повторно; suffix-aware исключение в `amnezia-force-load`) |
-| `/tmp/dnsmasq-queries.log` | DNS-лог запросов (tmpfs; есть только пока autolearn включён; теряется при перезагрузке) |
 
 ### Настройка нескольких туннелей
 
@@ -308,73 +299,6 @@ amnezia-force-load     # слить + применить уже скачанны
 Ручные записи в `/etc/amnezia/force-tunnel.list` всегда сливаются и
 никогда не перезаписываются `amnezia-force-update`.
 
-### Самообучение (авто-обход)
-
-Доступно только в режиме `direct-default`. По умолчанию **выключено**.
-
-**Что делает:** cron-проход собирает посещённые домены из dnsmasq-лога
-запросов, пробивает каждого кандидата через `zapret-probe` с pinned IP
-(SSRF-safe: curl `--resolve`, без редиректов, только публичные IP),
-и автоматически добавляет подтверждённо заблокированные домены в
-`/etc/amnezia/force.d/auto.list`, который через `amnezia-force-load`
-попадает в `amnezia_force4`. Пороги: geoblock подтверждается при
-**2 вердиктах**, DPI — при **3**. Домен становится кандидатом только
-если его запросили **≥2 разных клиентских IP**. Домены, которые
-впоследствии проходят прямой проб, удаляются (ревалидация). LRU-eviction
-при достижении лимита `autolearn_max_entries` (по умолч. 500).
-
-Проб идёт напрямую (router-origin, минуя prerouting classifier) — это
-делает ревалидацию достоверной.
-
-**Включение:**
-
-```sh
-# Через CLI:
-amnezia-autolearn-ctl set-enabled 1
-
-# Или через UCI напрямую:
-uci set amnezia.config.autolearn_enabled=1
-uci commit amnezia
-/etc/init.d/amnezia-autolearn enable
-```
-
-Init-скрипт подключает обратимое логирование запросов dnsmasq (опции
-`logqueries`, `logfacility=/tmp/dnsmasq-queries.log`, `log-async=5`) и
-добавляет cron-задачу. При выключении всё отменяется: UCI-опции удаляются,
-лог-файл стирается. Init не трогает уже существующий пользовательский
-`logfacility` — удаляет только те опции, которые сам установил.
-
-**Приватность:** пока включено, DNS-запросы (домен + LAN IP клиента)
-пишутся в `/tmp/dnsmasq-queries.log` (tmpfs, теряется при перезагрузке).
-Файл `candidates.tsv` на flash хранит домены + IP клиентов до
-`autolearn_candidate_retention_days` дней (по умолч. 30).
-
-**Управление авто-списком:**
-
-```sh
-amnezia-autolearn-ctl status           # {"enabled":0|1,"count":N}
-amnezia-autolearn-ctl list             # JSON-массив добавленных доменов
-amnezia-autolearn-ctl veto example.com # удалить + добавить в deny.list (не добавится снова)
-amnezia-autolearn-ctl promote example.com # перенести в force-tunnel.list (постоянно)
-amnezia-autolearn-ctl purge            # очистить auto.list + candidates.tsv
-amnezia-autolearn-ctl set-enabled 0|1  # переключить с side-effects на dnsmasq + cron
-```
-
-Из LuCI-панели: в секции авто-обучения есть мастер-переключатель и таблица
-авто-добавленных доменов с кнопками **Remove** (veto), **Promote** и **Purge all**.
-
-**UCI-настройки** (все в `amnezia.config`):
-
-| Опция | Умолч. | Описание |
-|---|---|---|
-| `autolearn_enabled` | `0` | Мастер-включение; при `1` подключает логирование + cron |
-| `autolearn_interval_min` | `30` | Интервал cron в минутах |
-| `autolearn_max_probes` | `20` | Максимум доменов для проба за один cron-проход |
-| `autolearn_max_per_client` | `5` | Лимит на клиентский IP (окно сбора) |
-| `autolearn_revalidate_days` | `14` | Дней между ревалидацией записей авто-списка |
-| `autolearn_max_entries` | `500` | LRU-лимит на `/etc/amnezia/force.d/auto.list` |
-| `autolearn_candidate_retention_days` | `30` | Дней хранения строк в candidates.tsv |
-
 ### Поддерживаемое железо
 
 Протестировано на **aarch64 mediatek/filogic** (Xiaomi AX3000T, Banana Pi
@@ -457,13 +381,9 @@ openwrt/
   amnezia-failover.init             procd init script для amnezia-failover (ставит fwmark rules)
   amnezia-tunnel-ctl.sh             Добавление / удаление туннелей (add, remove, list-free)
   amnezia-force-load.sh             Слияние force.d/ + ручной список -> amnezia_force4 + dnsmasq
-                                      (также применяет suffix-aware исключение из deny.list для veto)
   amnezia-force-update.sh           Скачивает включённые force_source списки, кеширует, вызывает force-load
   amnezia-force-load.init           Boot init (START=96) для заполнения amnezia_force4
   99-amnezia-force-load.hotplug     Firewall hotplug: заполнить amnezia_force4 после fw4 reload
-  amnezia-autolearn.sh              Cron-проход авто-обучения (сбор → проб → подтверждение → ревалидация)
-  amnezia-autolearn-ctl.sh          CLI: status/list/veto/promote/purge/set-enabled
-  amnezia-autolearn.init            Включение/выключение dnsmasq-логирования + cron (START=97)
   amnezia-ru-cidr.sh                Заполнение @amnezia_ru4 nftset из persist / fetch
   amnezia-ru-load.init              Boot + hotplug loader для amnezia_ru4
   amnezia-status.sh                 Status summary
@@ -476,7 +396,6 @@ openwrt/
   lib/amnezia-common.sh             Общие константы + helpers (MAX_TUNNELS=5)
   lib/amnezia-routing.sh            iproute2 / nft / firewall helpers (routing_emit_classifier)
   lib/amnezia-tunnel-lib.sh         Парсер .conf + UCI-генератор для amnezia-tunnel-ctl
-  lib/amnezia-autolearn-lib.sh      Чистые хелперы для autolearn-прохода
   install-zapret.sh                 zapret package + wrappers + ncat-full
   install-luci-app-amnezia.sh       LuCI menu/acl/view + cron
   awg-{toggle,status,ru-update}.sh  AWG обёртки

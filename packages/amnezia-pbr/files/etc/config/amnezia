@@ -31,17 +31,6 @@ config amnezia 'config'
 	option doh_bootstrap ''
 	option dns_active_tier 'off'
 
-	# --- Auto-learning (amnezia-autolearn) ---------------------------------
-	# Opt-in self-learning of blocked domains in direct-default mode. OFF by
-	# default; enabling also turns on reversible dnsmasq query logging to tmpfs.
-	option autolearn_enabled '0'
-	option autolearn_interval_min '30'
-	option autolearn_max_probes '20'
-	option autolearn_max_per_client '5'
-	option autolearn_revalidate_days '14'
-	option autolearn_max_entries '500'
-	option autolearn_candidate_retention_days '30'
-
 config globals 'globals'
 	option mode 'failover'
 	option sticky_target 'awg1'

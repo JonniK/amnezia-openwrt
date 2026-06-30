@@ -26,7 +26,6 @@ CRON_MARK='# amnezia-ru-update'
 [ -f "$SRC/amnezia/section/routing.js" ]       || { echo "missing $SRC/amnezia/section/routing.js"; exit 1; }
 [ -f "$SRC/amnezia/section/zapret.js" ]        || { echo "missing $SRC/amnezia/section/zapret.js"; exit 1; }
 [ -f "$SRC/amnezia/section/dns.js" ]           || { echo "missing $SRC/amnezia/section/dns.js"; exit 1; }
-[ -f "$SRC/amnezia/section/autolearn.js" ]     || { echo "missing $SRC/amnezia/section/autolearn.js"; exit 1; }
 
 # Required helper scripts must already exist (installed by install-luci-toggle.sh).
 [ -x /usr/bin/awg-toggle ] || { echo "missing /usr/bin/awg-toggle — run install-luci-toggle.sh first"; exit 1; }
