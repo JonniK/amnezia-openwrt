@@ -32,6 +32,7 @@ mkdir -p \
 	"$PBR_PKG/etc/iproute2/rt_tables.d" \
 	"$PBR_PKG/etc/init.d" \
 	"$PBR_PKG/etc/hotplug.d/firewall" \
+	"$PBR_PKG/etc/sysctl.d" \
 	"$PBR_PKG/etc/uci-defaults" \
 	"$LUCI_PKG/usr/share/luci/menu.d" \
 	"$LUCI_PKG/usr/share/rpcd/acl.d" \
@@ -128,6 +129,10 @@ chmod 0755 \
 	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-force-load" \
 	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dns" \
 	"$PBR_PKG/etc/hotplug.d/firewall/99-amnezia-dnsleak"
+
+# Kernel resilience: auto-reboot on a hung/oopsed kernel instead of dead-hanging.
+cp "$SRC/sysctl.d/99-amnezia-resilience.conf" \
+   "$PBR_PKG/etc/sysctl.d/99-amnezia-resilience.conf"
 
 # Reference data and config.
 cp "$SRC/seed-must-tunnel.list"    "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"

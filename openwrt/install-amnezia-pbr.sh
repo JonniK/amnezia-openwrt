@@ -287,6 +287,17 @@ _amz_wire_force_engine() {
   fi
   /etc/init.d/amnezia-dnsleak enable 2>/dev/null || true
 
+  # Kernel resilience: auto-reboot on a hung/oopsed kernel instead of dead-hanging
+  # (procd keeps the hw watchdog fed during a subsystem lockup, so a hung kernel
+  # can otherwise sit dead for hours). Place + apply the sysctl drop-in.
+  _amz_sysctl=$(resolve_dep /etc/sysctl.d/99-amnezia-resilience.conf \
+    sysctl.d/99-amnezia-resilience.conf 99-amnezia-resilience.conf) || true
+  if [ -n "$_amz_sysctl" ]; then
+    mkdir -p /etc/sysctl.d
+    cp "$_amz_sysctl" /etc/sysctl.d/99-amnezia-resilience.conf 2>/dev/null || true
+    sysctl -p /etc/sysctl.d/99-amnezia-resilience.conf >/dev/null 2>&1 || true
+  fi
+
   # Wire dnsmasq conf-dir so fresh installs pick up chunked nftset directives
   # even before the first amnezia-force-load run.  Idempotent: only set+commit
   # when the value is not already the expected path.
