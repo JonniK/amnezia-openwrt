@@ -11,6 +11,9 @@ setup() {
   printf '{"all_down":false}\n' > "$AL_STATE"
   export UCI_GET_amnezia_config_routing_mode="direct-default"
   export UCI_GET_amnezia_config_autolearn_enabled="1"
+  # Skip the nice/ionice re-exec by default so tests are deterministic and not
+  # affected by the host's scheduler tools. The re-exec path has its own test.
+  export AL_NICE=0
 }
 
 @test "gate: tunnel-default mode -> no-op (no probe, no force-load)" {
@@ -215,4 +218,80 @@ setup() {
   # After pass 2: count reaches 2 -> geo2.com must be in auto.list.
   grep -qx 'geo2.com' "$AL_DIR/force.d/auto.list"
   grep -q 'amnezia-force-load' "$STUB_LOG"
+}
+
+# --- Crash-hardening: bounded harvest, candidate cap, CPU/IO yield -----------
+
+# Harvest is bounded to the most-recent AUTOLEARN_HARVEST_MAX_BYTES window so a
+# huge query log (the DNS-leak block logs every query) can never make one pass
+# do unbounded work. Old bytes beyond the window are skipped: a domain that
+# appears only in the old region is NOT probed; one in the recent window is.
+# "oldsite"/"newsite" are equal-length so the byte math is exact: each block is
+# 2 lines x 38 bytes = 76 B; total 152 B; maxbytes 80 -> offset 72. The window
+# [72..152] covers the whole new block (bytes 76..152). Offset 72 lands 4 bytes
+# INSIDE oldsite line 2 ("1.3\n"), but that partial fragment doesn't start with
+# "query[" so the awk regex discards it -> oldsite tallies 0 clients, excluded.
+@test "harvest bound: only the recent byte-window is harvested, older bytes skipped" {
+  export AUTOLEARN_HARVEST_MAX_BYTES=80
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  rm -f "$AL_DIR/autolearn/.dnsmasq-log.offset"   # start at offset 0
+  printf 'query[A] oldsite.com from 192.168.1.2\nquery[A] oldsite.com from 192.168.1.3\nquery[A] newsite.com from 192.168.1.2\nquery[A] newsite.com from 192.168.1.3\n' > "$AL_QUERYLOG"
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # Recent-window domain was probed; old-region domain was not.
+  grep -q 'zapret-probe newsite.com' "$STUB_LOG"
+  run grep -q 'zapret-probe oldsite.com' "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+# Candidate set is capped at autolearn_max_candidates and ranked by query
+# frequency, so even with many eligible domains the probe phase walks a small,
+# bounded set — the highest-frequency domains win the slots.
+@test "candidate cap: only the top-N most-frequent eligible domains are probed" {
+  export UCI_GET_amnezia_config_autolearn_max_candidates="1"
+  export UCI_GET_amnezia_config_autolearn_max_probes="20"
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  # aaa.com: 6 queries (2 clients x3 -> freq 6); bbb.com: 2 queries (freq 2).
+  {
+    printf 'query[A] aaa.com from 192.168.1.2\nquery[A] aaa.com from 192.168.1.2\nquery[A] aaa.com from 192.168.1.2\n'
+    printf 'query[A] aaa.com from 192.168.1.3\nquery[A] aaa.com from 192.168.1.3\nquery[A] aaa.com from 192.168.1.3\n'
+    printf 'query[A] bbb.com from 192.168.1.2\nquery[A] bbb.com from 192.168.1.3\n'
+  } > "$AL_QUERYLOG"
+  run sh "$SCRIPT"; [ "$status" -eq 0 ]
+  # Cap=1 -> only the most-frequent (aaa.com) is probed; bbb.com is dropped.
+  grep -q 'zapret-probe aaa.com' "$STUB_LOG"
+  run grep -q 'zapret-probe bbb.com' "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+# The pass re-execs itself once under nice(+ionice) so it can never starve the
+# kernel watchdog. With AL_NICE=1 and nice/ionice shims on PATH, the shim must
+# be invoked and the pass must still run to completion (probe fired).
+@test "cpu yield: pass re-execs under nice and still completes" {
+  export NSLOOKUP_ADDR="93.184.216.34"
+  export ZP_VERDICT_DEFAULT="direct_geoblocked"
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cat > "$BATS_TEST_TMPDIR/bin/nice" <<EOF
+#!/bin/sh
+echo "nice \$*" >> "$STUB_LOG"
+[ "\$1" = "-n" ] && shift 2
+exec "\$@"
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/ionice" <<EOF
+#!/bin/sh
+echo "ionice \$*" >> "$STUB_LOG"
+case "\$1" in -c*) shift ;; esac
+exec "\$@"
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/bin/nice" "$BATS_TEST_TMPDIR/bin/ionice"
+  printf 'query[A] niced.com from 192.168.1.2\nquery[A] niced.com from 192.168.1.3\n' > "$AL_QUERYLOG"
+  export AL_NICE=1
+  export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # Assert the EXACT priority + IO-class flags, not just that nice ran: a
+  # regression to `nice sh ...` (no -n 19) or a wrong ionice class is the silent
+  # failure mode that would re-open the watchdog-starvation hole.
+  grep -q 'nice -n 19 ' "$STUB_LOG"       # lowest scheduling priority
+  grep -q 'ionice -c3 ' "$STUB_LOG"       # idle IO class
+  grep -q 'zapret-probe niced.com' "$STUB_LOG"   # and the pass still ran
 }

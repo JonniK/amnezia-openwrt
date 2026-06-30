@@ -37,6 +37,9 @@ config amnezia 'config'
 	option autolearn_enabled '0'
 	option autolearn_interval_min '30'
 	option autolearn_max_probes '20'
+	# Crash-hardening: cap the eligible-domain set each pass walks (ranked by
+	# query frequency) so harvest work stays bounded under a huge query log.
+	option autolearn_max_candidates '40'
 	option autolearn_max_per_client '5'
 	option autolearn_revalidate_days '14'
 	option autolearn_max_entries '500'

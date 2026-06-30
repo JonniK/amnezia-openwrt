@@ -18,6 +18,12 @@ DENY="$AL_DIR/autolearn/deny.list"
 OFFSET_F="$AL_DIR/autolearn/.dnsmasq-log.offset"
 AUTOLEARN_STATE_MAX_AGE="${AUTOLEARN_STATE_MAX_AGE:-120}"
 AUTOLEARN_LOG_MAX_BYTES="${AUTOLEARN_LOG_MAX_BYTES:-2097152}"
+# Hard cap on how many bytes of NEW query-log data one pass harvests. Under the
+# DNS-leak block dnsmasq logs every client query, so the log can balloon to
+# hundreds of KB; reading + tallying the whole thing is what pegged the CPU and
+# tripped the hardware watchdog (-> hard reset). Bound the slice so the harvest
+# cost is constant regardless of how big the log grew between passes.
+AUTOLEARN_HARVEST_MAX_BYTES="${AUTOLEARN_HARVEST_MAX_BYTES:-262144}"
 AMNEZIA_FORCE_LOAD="${AMNEZIA_FORCE_LOAD:-amnezia-force-load}"
 # `kill` is a shell builtin — a PATH stub is never reached. Route the signal
 # through this indirection so tests can inject a logging shim via AL_KILL.
@@ -26,6 +32,22 @@ AL_KILL="${AL_KILL:-kill}"
 _uci() { uci -q get "$1" 2>/dev/null; }
 _now() { date +%s 2>/dev/null || echo 0; }
 _dbg() { [ "${AL_DEBUG:-0}" = 1 ] && echo "[autolearn-dbg] $*" >&2 || true; }
+
+# --- CPU/IO yield -----------------------------------------------------------
+# Re-exec the whole pass ONCE at the lowest scheduling + IO priority. A pass
+# that can't preempt the kernel's watchdog thread can never trip the hardware
+# watchdog into a hard reset, no matter how busy it gets. This is the primary
+# guard; the input bound + the fork-storm removal below keep the busy window
+# small as well. Tests set AL_NICE=0 to skip the re-exec (deterministic).
+if [ "${AL_NICE:-1}" = 1 ] && [ "${AL_RENICED:-0}" != 1 ]; then
+  AL_RENICED=1; export AL_RENICED
+  if command -v ionice >/dev/null 2>&1; then
+    exec nice -n 19 ionice -c3 sh "$0" "$@"
+  elif command -v nice >/dev/null 2>&1; then
+    exec nice -n 19 sh "$0" "$@"
+  fi
+  # No nice/ionice available: fall through and run at normal priority.
+fi
 
 # --- Gate -------------------------------------------------------------------
 [ "$(_uci amnezia.config.routing_mode)" = "direct-default" ] || exit 0
@@ -173,57 +195,86 @@ _al_rotate_log() {
 _changed=0                          # declared BEFORE revalidation so a drop counts
 _al_revalidate && _changed=1        # drop stale recovered entries
 
-# --- Harvest pairs since offset --------------------------------------------
+# --- Harvest pairs since offset (bounded) ----------------------------------
 _off=0; [ -f "$OFFSET_F" ] && _off=$(cat "$OFFSET_F" 2>/dev/null || echo 0)
 case "$_off" in *[!0-9]*) _off=0 ;; esac
 _size=$(wc -c < "$AL_QUERYLOG" 2>/dev/null || echo 0)
 _size=$(printf '%s' "$_size" | tr -d ' \t')
+case "$_size" in *[!0-9]*|'') _size=0 ;; esac
+[ "$_off" -gt "$_size" ] 2>/dev/null && _off=0          # log shrank/rotated
+# Bound the slice: if more than AUTOLEARN_HARVEST_MAX_BYTES of new data piled up
+# since the last pass (DNS-leak block logs every query), skip the older bytes
+# and harvest only the most recent window. A partial first line is simply not
+# matched by al_querylog_pairs' query[ regex.
+if [ $(( _size - _off )) -gt "$AUTOLEARN_HARVEST_MAX_BYTES" ] 2>/dev/null; then
+  _off=$(( _size - AUTOLEARN_HARVEST_MAX_BYTES ))
+fi
 _pairs=$(al_querylog_pairs "$AL_QUERYLOG" "$_off")
 _dbg "harvest: offset=$_off size=$_size pairs=$(printf '%s' "$_pairs" | grep -c .)"
 printf '%s\n' "$_size" > "$OFFSET_F"
 
-# Tally (domain, client) pairs this pass. Skip RU/.ru and denied up front.
-# NOTE: write to the tmp file inside the loop's OWN process (here-string, not a
-# pipe) so it is not lost to a pipeline subshell.
-_cand_tmp=$(mktemp 2>/dev/null || echo "/tmp/al-cand.$$"); : > "$_cand_tmp"
-printf '%s\n' "$_pairs" > "${_cand_tmp}.raw"
-while read -r _dom _ip; do
-  [ -n "$_dom" ] || continue
-  case "$_dom" in *.ru) continue ;; esac
-  al_name_is_probeable "$_dom" || continue
-  al_deny_match "$_dom" "$DENY" && continue
-  grep -Fqx "$_dom" "$AUTO_LIST" 2>/dev/null && continue
-  printf '%s\t%s\n' "$_dom" "$_ip" >> "$_cand_tmp"
-done < "${_cand_tmp}.raw"
-rm -f "${_cand_tmp}.raw"
-
-# Per-client fairness cap + distinct-client (>=2) eligibility, in one awk.
-# - drop pairs beyond autolearn_max_per_client for any single client IP
-# - a domain is eligible iff >=2 DISTINCT client IPs resolved it
-# Also emit, for each eligible domain, its distinct-client CSV for candidates.tsv.
+# --- Candidate selection (ONE awk; replaces a per-line grep/awk fork storm) --
+# The former shell loop forked a grep + an awk PER query-log line; under the
+# DNS-leak block's huge log that meant tens of thousands of short-lived
+# processes per pass -> CPU pegged -> hardware watchdog reset. This single awk
+# loads auto.list + deny.list once and does ALL of it inline: probeability,
+# RU-skip, suffix-aware deny, per-client fairness cap, >=2-distinct-client
+# eligibility, and query-frequency tally. It emits "freq<TAB>domain<TAB>csv"
+# per eligible domain; we rank by frequency and keep the top
+# autolearn_max_candidates so the probe phase walks a small, bounded set.
 _maxpc=$(_uci amnezia.config.autolearn_max_per_client); _maxpc=${_maxpc:-5}
-_eligible=$(awk -F'\t' -v maxpc="$_maxpc" '
+_maxcand=$(_uci amnezia.config.autolearn_max_candidates); _maxcand=${_maxcand:-40}
+case "$_maxcand" in *[!0-9]*|'') _maxcand=40 ;; esac
+_sel_tmp=$(mktemp 2>/dev/null || echo "/tmp/al-sel.$$")
+printf '%s\n' "$_pairs" | awk -v autof="$AUTO_LIST" -v denyf="$DENY" -v maxpc="$_maxpc" '
+  BEGIN {
+    while ((getline l < autof) > 0) { sub(/[ \t\r]+$/,"",l); if (l!="") auto[l]=1 }
+    while ((getline l < denyf) > 0) { gsub(/[ \t\r]/,"",l); if (l!="") deny[l]=1 }
+  }
+  function probeable(d) {
+    if (length(d) < 2 || length(d) > 253) return 0
+    if (d ~ /[^A-Za-z0-9._-]/) return 0           # charset (mirror zapret-probe)
+    if (d !~ /\./) return 0                        # must have a dot
+    if (d !~ /[A-Za-z]/) return 0                  # IP-literal has no letter
+    if (d ~ /\.(lan|local|internal|localdomain|home\.arpa|arpa)$/) return 0
+    if (d ~ /\.ru$/) return 0                      # RU/.ru -> direct, never probe
+    return 1
+  }
+  function denied(d,   s,i) {                       # suffix-aware (mirror dnsmasq nftset)
+    if (d in deny) return 1
+    s=d
+    while ((i=index(s,".")) > 0) { s=substr(s,i+1); if (s in deny) return 1 }
+    return 0
+  }
   { dom=$1; ip=$2
-    if (++perclient[ip] > maxpc) next            # fairness cap per client IP
-    if (!(dom SUBSEP ip in seenpair)) { seenpair[dom SUBSEP ip]=1; dcnt[dom]++ } }
-  END { for (d in dcnt) if (dcnt[d] >= 2) print d }' "$_cand_tmp")
-# clients CSV per domain (for the TSV record).
-_clients_for() {
-  awk -F'\t' -v d="$1" '$1==d{ if(!(d SUBSEP $2 in s)){s[d SUBSEP $2]=1; c=c (c?",":"") $2} } END{print c}' "$_cand_tmp"
-}
+    if (dom=="" || ip=="") next
+    if (dom in auto) next                           # already pinned
+    if (!probeable(dom)) next
+    if (denied(dom)) next
+    if (++perclient[ip] > maxpc) next               # per-client fairness cap
+    freq[dom]++
+    if (!(dom SUBSEP ip in seenpair)) {
+      seenpair[dom SUBSEP ip]=1
+      dcnt[dom]++
+      csv[dom] = csv[dom] (csv[dom] ? "," : "") ip
+    } }
+  END { for (d in dcnt) if (dcnt[d] >= 2) print freq[d] "\t" d "\t" csv[d] }
+' | sort -rn | head -n "$_maxcand" > "$_sel_tmp"
 
-_dbg "eligible domains: $(printf '%s' "$_eligible" | grep -c .)"
+_dbg "eligible domains: $(awk 'END{print NR+0}' "$_sel_tmp" 2>/dev/null)"
 _max_probes=$(_uci amnezia.config.autolearn_max_probes); _max_probes=${_max_probes:-20}
 _n=0
-for _dom in $_eligible; do
+# while-read via REDIRECT (not a pipe) so _changed/_n survive in this shell.
+while IFS="$(printf '\t')" read -r _freq _dom _clients; do
+  [ -n "$_dom" ] || continue
   [ "$_n" -lt "$_max_probes" ] || break
   _n=$((_n+1))
   _pin=$(al_resolve_public "$_dom"); [ -n "$_pin" ] || { _dbg "probe $_dom pin=EMPTY (SSRF gate)"; continue; }   # SSRF gate
   _verdict=$(zapret-probe "$_dom" "$_pin" | grep -o '"verdict":"[^"]*"' | sed 's/.*:"//;s/"//')
   _dbg "probe $_dom pin=$_pin -> $_verdict"
-  if _al_record "$_dom" "$_verdict" "$(_clients_for "$_dom")"; then _changed=1; fi
-done
-rm -f "$_cand_tmp"
+  if _al_record "$_dom" "$_verdict" "$_clients"; then _changed=1; fi
+done < "$_sel_tmp"
+rm -f "$_sel_tmp"
 
 _al_rotate_log                                   # bound the tmpfs log
 _al_prune_candidates                             # retention
