@@ -324,3 +324,77 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "force-pin" "$FV"
   grep -q "force-unpin" "$FV"
 }
+
+# ── Tunnel apps (feat/tunnel-apps-ui) ────────────────────────────────────────
+
+@test "routing.js has tunnel-apps handlers (handleAppToggle/Remove/Preset/Add)" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleAppToggle"  "$R"
+  grep -q "handleAppRemove"  "$R"
+  grep -q "handleAppPreset"  "$R"
+  grep -q "handleAppAdd"     "$R"
+}
+
+@test "routing.js calls amnezia-app-ctl for remove/preset/add" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "amnezia-app-ctl" "$R"
+}
+
+@test "routing.js render builds tunnel-apps-tbody synchronously in tree" {
+  # The apps table must be present in the render tree and the harness tooth confirms
+  # it is painted synchronously (not via getElementById at render time).
+  # getElementById IS used in paintAppsTable (refresh-path only) — that is correct.
+  # The tooth in luci-harness.js asserts the tbody exists in the render tree.
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "tunnel-apps-tbody" "$R"
+  # The id must appear in an E() call (build path), not ONLY in getElementById.
+  grep -qE "'id'.*tunnel-apps-tbody|\"id\".*tunnel-apps-tbody" "$R" \
+    || { echo "tunnel-apps-tbody not built via E() in render tree"; false; }
+}
+
+@test "harness asserts tunnel-apps-tbody in render tree (synchronous paint tooth)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "routing.js refresh calls amnezia-app-ctl list (keeps table live)" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "amnezia-app-ctl.*list\|list.*amnezia-app-ctl" "$R"
+}
+
+@test "main.js load() has index 12 = amnezia-app-ctl list" {
+  grep -q "amnezia-app-ctl.*list\|list.*amnezia-app-ctl" "$F"
+}
+
+@test "routing.js has AS number help text with bgp.he.net / ipinfo.io" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "bgp.he.net" "$R"
+  grep -q "ipinfo.io" "$R"
+}
+
+@test "routing.js has preset buttons for Telegram and Meta" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "telegram" "$R"
+  grep -q "meta" "$R"
+  grep -q "handleAppPreset" "$R"
+}
+
+@test "acl grants exec on amnezia-app-ctl" {
+  ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
+  grep -q "amnezia-app-ctl" "$ACL"
+}
+
+@test "handler arg-order: tunnel-app handlers pass no event as backend arg (harness)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "handler-argorder ok"
+}
+
+@test "routing.js has app-add-name and app-add-btn form elements" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "app-add-name" "$R"
+  grep -q "app-add-btn"  "$R"
+  grep -q "app-add-asn"  "$R"
+  grep -q "app-add-cidrs" "$R"
+  grep -q "app-add-url"  "$R"
+}

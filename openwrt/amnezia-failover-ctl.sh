@@ -95,10 +95,19 @@ case "$1" in
       conntrack -D -m "$STICKY_MARK/$MARK_MASK" 2>/dev/null ) &
     ;;
   set-source)
-    case "$2" in
-      itdoginfo_inside|itdoginfo_services|refilter_domains|refilter_ip|antifilter) ;;
-      *) amz_log "ctl: unknown source '$2'"; exit 1 ;;
-    esac
+    # Accept any force_source section (built-in or user-added via amnezia-app-ctl).
+    # Check the UCI section type; also accept the five well-known built-in source names
+    # before they exist as UCI sections (installer may pre-seed them from config template).
+    _src_type=$(uci -q get "amnezia.$2" 2>/dev/null || echo "")
+    _src_ok=0
+    [ "$_src_type" = "force_source" ] && _src_ok=1
+    if [ "$_src_ok" = 0 ]; then
+      case "$2" in
+        itdoginfo_inside|itdoginfo_services|refilter_domains|refilter_ip|antifilter)
+          _src_ok=1 ;;
+      esac
+    fi
+    [ "$_src_ok" = 1 ] || { amz_log "ctl: unknown source '$2' (not a force_source section)"; exit 1; }
     case "$3" in
       0|1) ;;
       *) amz_log "ctl: enabled must be 0 or 1"; exit 1 ;;

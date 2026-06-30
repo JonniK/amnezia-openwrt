@@ -63,7 +63,7 @@ start_remote_deploy() {
   echo "=== Upload installer + AWG config + payload ==="
   # Flat scripts and configs land directly in /tmp/ via basename. The
   # installer (install-amnezia-pbr.sh) reads them from there.
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh openwrt/install-amnezia-pbr.sh; do
+  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh openwrt/install-amnezia-pbr.sh openwrt/amnezia-app-ctl.sh; do
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   # UCI scaffold has a slash-free filename (`amnezia`), so basename loop

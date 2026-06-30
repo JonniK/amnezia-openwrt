@@ -47,7 +47,7 @@ for src in \
 	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh \
 	amnezia-tunnel-ctl.sh amnezia-force-load.sh amnezia-force-update.sh \
 	amnezia-autolearn-ctl.sh amnezia-dns-ctl.sh \
-	amnezia-dnsleak-ctl.sh
+	amnezia-dnsleak-ctl.sh amnezia-app-ctl.sh
 do
 	cp "$SRC/$src" "$PBR_PKG/usr/bin/${src%.sh}"
 	chmod 0755 "$PBR_PKG/usr/bin/${src%.sh}"

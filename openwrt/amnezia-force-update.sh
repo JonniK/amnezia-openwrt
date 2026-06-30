@@ -47,9 +47,6 @@ mkdir -p "$FORCE_DIR/force.d"
     _enabled=$(uci -q get "amnezia.${_name}.enabled")
     [ "$_enabled" = "1" ] || continue
 
-    _url=$(uci -q get "amnezia.${_name}.url")
-    [ -n "$_url" ] || continue
-
     _kind=$(uci -q get "amnezia.${_name}.kind")
     # Default to 'domains' if kind is unset.
     _kind="${_kind:-domains}"
@@ -61,33 +58,95 @@ mkdir -p "$FORCE_DIR/force.d"
 
     # M3: wrap the fetch chain in an explicit if/then for clarity.
     _fetch_ok=0
-    if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ]; then
-      if cp "$AMZ_FETCH" "$_tmp"; then
-        _fetch_ok=1
-      fi
-    else
-      # Router-origin fetches are NOT marked by the prerouting classifier, so by
-      # default they egress WAN *directly* — exactly where RKN throttling stalls
-      # GitHub-raw / antifilter, the fetch hangs, and the synchronous rpcd call
-      # outlives the LuCI XHR timeout ("XHR request timed out"). Bind the fetch to
-      # the active tunnel device (SO_BINDTODEVICE) so it egresses the tunnel
-      # regardless of destination IP — immune to GitHub/Fastly CDN IP-rotation,
-      # with no routing/firewall state to install or tear down. Bounded timeouts
-      # turn a dead path into a fast, clean failure (cache kept) instead of a hang.
-      _tdev=$(amz_tunnel_dev)
-      if [ -n "$_tdev" ] && command -v curl >/dev/null 2>&1 \
-          && curl --interface "if!$_tdev" -fsSL --connect-timeout 10 --max-time 120 \
-                  -o "$_tmp" "$_url" 2>/dev/null; then
-        _fetch_ok=1
-      # Direct-egress fallbacks (bounded). Reached only when no tunnel is up or the
-      # tunneled fetch failed; for RKN-blocked sources these usually fail too, but
-      # they fail fast and the prior cache is preserved.
-      elif uclient-fetch -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
-          || wget -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
-          || curl -fsSL --connect-timeout 10 --max-time 120 -o "$_tmp" "$_url" 2>/dev/null; then
-        _fetch_ok=1
-      fi
-    fi
+
+    case "$_kind" in
+      # ----------------------------------------------------------------
+      # static: materialize from inline UCI list option (no URL fetch).
+      # ----------------------------------------------------------------
+      static)
+        # uci -q get for a list returns all values space-separated on one line.
+        _cidrs=$(uci -q get "amnezia.${_name}.cidr" 2>/dev/null || echo "")
+        if [ -n "$_cidrs" ]; then
+          # Write each CIDR on its own line into the temp file.
+          for _c in $_cidrs; do
+            printf '%s\n' "$_c"
+          done > "$_tmp"
+          _fetch_ok=1
+        else
+          amz_log "force-update: static source $_name has no cidr entries"
+        fi
+        ;;
+      # ----------------------------------------------------------------
+      # as: fetch IPv4 prefixes from RIPEstat announced-prefixes API.
+      # ----------------------------------------------------------------
+      as)
+        _asn=$(uci -q get "amnezia.${_name}.asn" 2>/dev/null || echo "")
+        if [ -z "$_asn" ]; then
+          amz_log "force-update: as source $_name has no asn option"
+        else
+          _ripe_url="https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS${_asn}"
+          _tdev=$(amz_tunnel_dev)
+          _ripe_tmp=$(mktemp "$FORCE_DIR/force.d/.amz-ripe-${_name}.XXXXXX" 2>/dev/null \
+            || echo "$FORCE_DIR/force.d/amz-ripe-${_name}.$$")
+          _ripe_ok=0
+          if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ]; then
+            if cp "$AMZ_FETCH" "$_ripe_tmp"; then _ripe_ok=1; fi
+          elif [ -n "$_tdev" ] && command -v curl >/dev/null 2>&1 \
+              && curl --interface "if!$_tdev" -fsSL --connect-timeout 10 --max-time 60 \
+                      -o "$_ripe_tmp" "$_ripe_url" 2>/dev/null; then
+            _ripe_ok=1
+          elif curl -fsSL --connect-timeout 10 --max-time 60 \
+                    -o "$_ripe_tmp" "$_ripe_url" 2>/dev/null; then
+            _ripe_ok=1
+          fi
+          if [ "$_ripe_ok" = 1 ] && [ -s "$_ripe_tmp" ]; then
+            # Extract IPv4 prefixes from the JSON (field by field, no jq required).
+            tr '{},"' '\n' < "$_ripe_tmp" \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' \
+              | sort -u > "$_tmp"
+            _fetch_ok=1
+          fi
+          rm -f "$_ripe_tmp"
+        fi
+        ;;
+      # ----------------------------------------------------------------
+      # url-based kinds (domains / cidr): original fetch logic.
+      # ----------------------------------------------------------------
+      *)
+        _url=$(uci -q get "amnezia.${_name}.url" 2>/dev/null || echo "")
+        if [ -z "$_url" ]; then
+          amz_log "force-update: source $_name (kind=$_kind) has no url, skipping"
+        else
+          if [ -n "${AMZ_FETCH:-}" ] && [ -f "$AMZ_FETCH" ]; then
+            if cp "$AMZ_FETCH" "$_tmp"; then
+              _fetch_ok=1
+            fi
+          else
+            # Router-origin fetches are NOT marked by the prerouting classifier, so by
+            # default they egress WAN *directly* — exactly where RKN throttling stalls
+            # GitHub-raw / antifilter, the fetch hangs, and the synchronous rpcd call
+            # outlives the LuCI XHR timeout ("XHR request timed out"). Bind the fetch to
+            # the active tunnel device (SO_BINDTODEVICE) so it egresses the tunnel
+            # regardless of destination IP — immune to GitHub/Fastly CDN IP-rotation,
+            # with no routing/firewall state to install or tear down. Bounded timeouts
+            # turn a dead path into a fast, clean failure (cache kept) instead of a hang.
+            _tdev=$(amz_tunnel_dev)
+            if [ -n "$_tdev" ] && command -v curl >/dev/null 2>&1 \
+                && curl --interface "if!$_tdev" -fsSL --connect-timeout 10 --max-time 120 \
+                        -o "$_tmp" "$_url" 2>/dev/null; then
+              _fetch_ok=1
+            # Direct-egress fallbacks (bounded). Reached only when no tunnel is up or the
+            # tunneled fetch failed; for RKN-blocked sources these usually fail too, but
+            # they fail fast and the prior cache is preserved.
+            elif uclient-fetch -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
+                || wget -T 20 -qO "$_tmp" "$_url" 2>/dev/null \
+                || curl -fsSL --connect-timeout 10 --max-time 120 -o "$_tmp" "$_url" 2>/dev/null; then
+              _fetch_ok=1
+            fi
+          fi
+        fi
+        ;;
+    esac
 
     # H1: per-kind content validation.
     # After a successful fetch we validate the payload shape.
@@ -111,7 +170,7 @@ mkdir -p "$FORCE_DIR/force.d"
             [ "$_majority" = "ok" ] || _valid=0
           fi
           ;;
-        cidr)
+        cidr|static|as)
           # All non-comment/non-blank lines must be dotted-quad[/len].
           _total=$(grep -v '^[[:space:]]*$' "$_tmp" | grep -v '^[[:space:]]*#' \
             | awk 'END{print NR}')
@@ -142,7 +201,7 @@ mkdir -p "$FORCE_DIR/force.d"
       _count=$(awk 'END{print NR}' "$_cache" 2>/dev/null || echo 0)
       _status="failed"
       _any_failed=1
-      amz_log "force-update: fetch failed for $_name ($_url), keeping cache"
+      amz_log "force-update: fetch/materialize failed for $_name (kind=$_kind), keeping cache"
     fi
 
     # Accumulate JSON entry for this source.
