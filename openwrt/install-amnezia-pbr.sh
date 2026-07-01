@@ -179,7 +179,7 @@ _amz_wire_force_engine() {
   fi
 
   # Install the three allowlist helpers to /usr/bin.
-  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update amnezia-app-ctl; do
+  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update amnezia-force-warm amnezia-app-ctl amnezia-autotunnel; do
     if [ -f "/usr/bin/${_afe_helper}" ]; then
       amz_log "${_afe_helper} already present (/usr/bin)"
     else
@@ -339,9 +339,16 @@ _amz_wire_force_engine() {
   sed -i '/# amnezia-force-update/d' "$_afe_cron" 2>/dev/null || true
   echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
     >> "$_afe_cron" 2>/dev/null || true
+  amz_log "amnezia-force-update cron installed (daily 03:15)"
+
+  # Install the every-2-min force-warm cron entry (dedup, idempotent).
+  sed -i '/# amnezia-force-warm/d' "$_afe_cron" 2>/dev/null || true
+  echo '*/2 * * * * /usr/bin/amnezia-force-warm >/dev/null 2>&1 # amnezia-force-warm' \
+    >> "$_afe_cron" 2>/dev/null || true
+  amz_log "amnezia-force-warm cron installed (every 2 min)"
+
   /etc/init.d/cron enable 2>/dev/null || true
   /etc/init.d/cron reload 2>/dev/null || true
-  amz_log "amnezia-force-update cron installed (daily 03:15)"
 
   # Run amnezia-force-update once on install (best-effort, backgrounded).
   if [ -x /usr/bin/amnezia-force-update ]; then
@@ -349,6 +356,11 @@ _amz_wire_force_engine() {
     amz_log "amnezia-force-update: initial run triggered (background)"
   else
     amz_log "WARN: amnezia-force-update not installed; skipping initial run"
+  fi
+
+  # Run amnezia-force-warm once on install (best-effort, backgrounded).
+  if [ -x /usr/bin/amnezia-force-warm ]; then
+    ( /usr/bin/amnezia-force-warm >/dev/null 2>&1 ) &
   fi
 }
 

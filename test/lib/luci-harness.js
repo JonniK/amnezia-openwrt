@@ -59,8 +59,9 @@ function makeQuerySelectorResult(selector) {
   return n;
 }
 const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
-// DATA: 13 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list).
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}, {stdout:'[]'}];
+// DATA: 14 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list),
+// 13 (autotunnel worker status).
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}, {stdout:'[]'}, {stdout:'{"enabled":0,"routing_mode":"direct-default","loadavg":0.1,"added_count":0,"added":[],"verdict_count":0,"hour_count":0}'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
@@ -185,7 +186,11 @@ if (require.main === module) {
         // Tunnel-apps handlers — extra args first, event last (LuCI convention).
         handleAppToggle: ['appSENT'], handleAppRemove: ['appSENT'],
         handleAppPreset: ['telegram'],
-        handleAppAdd: []   // NO extra arg — reads form fields from DOM in handler
+        handleAppAdd: [],   // NO extra arg — reads form fields from DOM in handler
+        handleAutotunnelAdd: [],  // NO extra arg — reads domain from DOM input in handler
+        // Autotunnel worker handlers.
+        handleAutotunnelToggle: [],          // NO extra arg — reads state from DOM
+        handleAutotunnelRemove: ['ex.com']   // extra arg = domain (FIRST), event last
       };
       const CHANGE_HANDLERS = Object.keys(WIRING);
       const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };

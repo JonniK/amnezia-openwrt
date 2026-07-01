@@ -1,1 +1,17 @@
+# Manual force-tunnel domains (fresh-install seed).
+# Merged into the amnezia_force4 nft set via dnsmasq nftset directives, so
+# every resolved IP (incl. rotating CDN IPs) is routed through the tunnel in
+# direct-default mode. One domain per line; a bare apex also matches all
+# subdomains (dnsmasq suffix match). Lines starting with # are comments.
+#
+# This seed is copied to /etc/amnezia/force-tunnel.list only if that file is
+# absent (first install); an existing device keeps its own runtime list.
 
+# Google Meet page + media (media servers are RU-throttled on the direct path)
+meet.google.com
+
+# Cursor / WorkOS auth chain — the SPA's XHRs to api.workos.com are
+# RU-throttled direct; tunneling the whole chain fixes the blank login page.
+# (cursor.sh also covers Cursor's api2 AI backend.)
+workos.com
+cursor.sh

@@ -9,6 +9,7 @@ var routingModeInFlight = false;
 var forceUpdateInFlight = false;
 var saveManualInFlight = false;
 var appAddInFlight = false;
+var autotunnelToggleInFlight = false;
 
 function parseRuStamp(text) {
 	if (!text) return null;
@@ -117,6 +118,86 @@ function paintAppsTable(view, apps) {
 			tbody.appendChild(row);
 		})(apps[i]);
 	}
+}
+
+// ── Autotunnel worker helpers ─────────────────────────────────────────────────
+
+function parseAutotunnelStatus(stdout) {
+	if (!stdout) return null;
+	try { return JSON.parse(stdout); } catch (e) { return null; }
+}
+
+// Repaint the autotunnel worker sub-panel from live status JSON.
+// Called from refresh (safe to use getElementById).
+function paintAutotunnelPanel(view, st) {
+	var enabledEl   = document.getElementById('amz-at-enabled');
+	var countEl     = document.getElementById('amz-at-count');
+	var hcEl        = document.getElementById('amz-at-hourcount');
+	var modeEl      = document.getElementById('amz-at-mode');
+	var btnEl       = document.getElementById('amz-at-toggle-btn');
+	var tbodyEl     = document.getElementById('amz-at-domains-tbody');
+
+	if (!st) return;
+
+	var on = st.enabled === 1 || st.enabled === '1';
+	if (enabledEl) {
+		enabledEl.textContent = on ? _('Enabled') : _('Disabled');
+		if (enabledEl.dataset) enabledEl.dataset.enabled = on ? '1' : '0';
+	}
+	if (btnEl) btnEl.textContent = on ? _('Disable') : _('Enable');
+	if (modeEl) modeEl.textContent = st.routing_mode || '';
+	if (countEl) countEl.textContent = String(st.added_count || 0);
+	if (hcEl) hcEl.textContent = String(st.hour_count || 0);
+
+	if (!tbodyEl) return;
+	tbodyEl.innerHTML = '';
+	var domains = st.added || [];
+	if (!domains || domains.length === 0) {
+		tbodyEl.appendChild(E('tr', {}, [
+			E('td', { 'colspan': '2', 'style': 'color:#888;font-style:italic;' }, _('No auto-added domains.'))
+		]));
+		return;
+	}
+	for (var i = 0; i < domains.length; i++) {
+		(function(d) {
+			tbodyEl.appendChild(E('tr', {}, [
+				E('td', {}, d),
+				E('td', {}, [
+					E('button', {
+						'class': 'btn cbi-button-negative',
+						'style': 'padding:2px 8px;',
+						'click': ui.createHandlerFn(view, 'handleAutotunnelRemove', d)
+					}, _('Remove'))
+				])
+			]));
+		})(domains[i]);
+	}
+}
+
+// Build autotunnel domains table rows synchronously for first-paint.
+function renderAutotunnelRows(view, st) {
+	var domains = (st && st.added) || [];
+	if (!domains || domains.length === 0) {
+		return [E('tr', {}, [
+			E('td', { 'colspan': '2', 'style': 'color:#888;font-style:italic;' }, _('No auto-added domains.'))
+		])];
+	}
+	var rows = [];
+	for (var i = 0; i < domains.length; i++) {
+		(function(d) {
+			rows.push(E('tr', {}, [
+				E('td', {}, d),
+				E('td', {}, [
+					E('button', {
+						'class': 'btn cbi-button-negative',
+						'style': 'padding:2px 8px;',
+						'click': ui.createHandlerFn(view, 'handleAutotunnelRemove', d)
+					}, _('Remove'))
+				])
+			]));
+		})(domains[i]);
+	}
+	return rows;
 }
 
 return baseclass.extend({
@@ -311,6 +392,77 @@ return baseclass.extend({
 			});
 		},
 
+		// handleAutotunnelAdd(ev) — NO extra arg; reads domain from DOM input.
+		// Domain is read inside the handler so no extra arg is needed, avoiding
+		// the createHandlerFn event-LAST arg-order trap.
+		handleAutotunnelAdd: function(ev) {
+			var el = document.getElementById('amz-autotunnel-domain');
+			var d = (el && el.value || '').trim();
+			if (!d) {
+				ui.addNotification(null, E('p', {}, _('Enter a domain')));
+				return Promise.resolve();
+			}
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-autotunnel', ['add', d]).then(L.bind(function(res) {
+				var out = (res && res.stdout) || '';
+				var parsed = null;
+				try { parsed = JSON.parse(out); } catch (e) { parsed = null; }
+				var msg = '';
+				if (parsed && parsed.error) {
+					msg = _('Error: ') + parsed.error;
+				} else if (parsed && parsed.result) {
+					msg = _('Result: ') + parsed.result;
+					if (parsed.verdict) msg += ' (verdict: ' + parsed.verdict + ')';
+				} else {
+					msg = out || (res && res.stderr) || _('done');
+				}
+				ui.addNotification(null, E('p', {}, msg),
+					(res && res.code === 0) ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('autotunnel add failed: ') + err), 'danger');
+			});
+		},
+
+		// handleAutotunnelToggle(ev) — NO extra arg; reads current state from DOM.
+		// Calls `amnezia-autotunnel enable` or `disable` depending on current state.
+		handleAutotunnelToggle: function(ev) {
+			if (autotunnelToggleInFlight) return Promise.resolve();
+			var enabledEl = document.getElementById('amz-at-enabled');
+			var currentlyEnabled = enabledEl && enabledEl.dataset && enabledEl.dataset.enabled === '1';
+			autotunnelToggleInFlight = true;
+			var verb = currentlyEnabled ? 'disable' : 'enable';
+			return fs.exec('/usr/bin/amnezia-autotunnel', [verb]).then(L.bind(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				autotunnelToggleInFlight = false;
+				return this.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('autotunnel toggle failed: ') + err), 'danger');
+				autotunnelToggleInFlight = false;
+			});
+		},
+
+		// handleAutotunnelRemove(domain, ev) — domain from createHandlerFn extra arg (FIRST).
+		// LuCI createHandlerFn convention: extra args FIRST, event LAST.
+		// Defined as function(domain, ev) — domain arrives first, event last.
+		// Getting the order backwards would send the event object to the backend — silent no-op.
+		handleAutotunnelRemove: function(domain, ev) {
+			var self = this;
+			return util.uiConfirm(_('Remove auto-tunnel entry "') + domain + '"?').then(L.bind(function(ok) {
+				if (!ok) return Promise.resolve();
+				return fs.exec('/usr/bin/amnezia-autotunnel', ['remove', domain]).then(L.bind(function(res) {
+					ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+						(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+						res.code === 0 ? 'info' : 'warning');
+					return self.refresh();
+				}, this)).catch(function(err) {
+					ui.addNotification(null, E('p', {}, _('Remove failed: ') + err), 'danger');
+				});
+			}, this));
+		},
+
 		// handleAppAdd(ev) — NO extra arg; reads form fields in the handler (DOM exists here).
 		handleAppAdd: function(ev) {
 			if (appAddInFlight) {
@@ -402,6 +554,13 @@ return baseclass.extend({
 		}
 	},
 
+	// ── renderAutotunnelRows: build <tr> nodes from autotunnel status (synchronous, no getElementById) ──
+	// Delegates to the module-level helper so the same logic is shared
+	// between first-paint (render) and refresh (paintAutotunnelPanel).
+	renderAutotunnelRows: function(view, st) {
+		return renderAutotunnelRows(view, st);
+	},
+
 	// ── renderAppsRows: build <tr> nodes from an apps array (synchronous, no getElementById) ──
 	renderAppsRows: function(view, apps) {
 		if (!apps || apps.length === 0) {
@@ -442,6 +601,7 @@ return baseclass.extend({
 		// data[8] → forceTunnelList prefill
 		// data[9] → parseRuStamp + forceStamp/forceWhen/forceTotal/forceFailed block
 		// data[12] → amnezia-app-ctl list JSON for first-paint tunnel apps table
+		// data[13] → amnezia-autotunnel status JSON for first-paint worker panel
 		var stamp = parseRuStamp(data && data[0]);
 		var forceTunnelList = (data && data[8]) || '';
 		var forceStamp = parseRuStamp(data && data[9]);
@@ -449,6 +609,11 @@ return baseclass.extend({
 		var appsData12 = data && data[12];
 		var appsStdout = appsData12 && typeof appsData12 === 'object' ? (appsData12.stdout || '[]') : (appsData12 || '[]');
 		var initialApps = parseApps(appsStdout);
+		// Parse index 13: autotunnel worker status for first-paint.
+		var atData13 = data && data[13];
+		var atStdout = atData13 && typeof atData13 === 'object' ? (atData13.stdout || '') : (atData13 || '');
+		var initialAtStatus = parseAutotunnelStatus(atStdout);
+		var atEnabled = initialAtStatus && (initialAtStatus.enabled === 1 || initialAtStatus.enabled === '1');
 		var forceWhen = forceStamp ? util.fmtAge(forceStamp.ts) : _('never updated');
 		var forceTotal = 0, forceFailed = false;
 		if (forceStamp && forceStamp.sources) {
@@ -599,6 +764,92 @@ return baseclass.extend({
 									'class': 'btn cbi-button-positive',
 									'click': ui.createHandlerFn(view, 'handleSaveManual')
 								}, _('Save & apply'))
+							])
+						])
+					])
+				])
+			]),
+
+			// ── Autotunnel: probe & add action — collapsed sub-panel ─────────
+			E('details', { 'class': 'amnezia-action' }, [
+				E('summary', {}, _('Tunnel a site (auto-probe)')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Domain')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'amz-autotunnel-domain',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:260px;',
+								'placeholder': 'example.com'
+							})
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Action')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('button', {
+								'id': 'amz-autotunnel-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(view, 'handleAutotunnelAdd')
+							}, _('Probe & add'))
+						])
+					])
+				])
+			]),
+
+			// ── Auto-tunnel worker section — collapsed ───────────────────────
+			E('details', { 'class': 'amnezia-action' }, [
+				E('summary', {}, _('Auto-tunnel throttled sites (background)')),
+				E('div', { 'class': 'cbi-section' }, [
+					E('div', { 'class': 'cbi-map-descr' },
+						_('Background worker that monitors DNS queries and auto-adds throttled sites to the force-tunnel list. Default OFF. Only effective in direct-default mode.')),
+					E('div', { 'class': 'cbi-section-node' }, [
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('State')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('strong', {
+									'id': 'amz-at-enabled',
+									'data-enabled': atEnabled ? '1' : '0'
+								}, atEnabled ? _('Enabled') : _('Disabled')),
+								E('button', {
+									'id': 'amz-at-toggle-btn',
+									'class': 'btn ' + (atEnabled ? 'cbi-button-negative' : 'cbi-button-positive'),
+									'style': 'margin-left:12px;',
+									'click': ui.createHandlerFn(view, 'handleAutotunnelToggle')
+								}, atEnabled ? _('Disable') : _('Enable'))
+							])
+						]),
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Routing mode')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('span', { 'id': 'amz-at-mode' }, initialAtStatus ? (initialAtStatus.routing_mode || '') : '')
+							])
+						]),
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Auto-added')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('span', { 'id': 'amz-at-count' }, String((initialAtStatus && initialAtStatus.added_count) || 0)),
+								E('span', { 'style': 'margin-left:12px;color:#666;' }, _('added this hour: ')),
+								E('span', { 'id': 'amz-at-hourcount' }, String((initialAtStatus && initialAtStatus.hour_count) || 0))
+							])
+						]),
+						// Auto-added domains table — built synchronously on first paint.
+						E('div', { 'class': 'cbi-value' }, [
+							E('label', { 'class': 'cbi-value-title' }, _('Auto-added domains')),
+							E('div', { 'class': 'cbi-value-field' }, [
+								E('table', { 'style': 'width:100%;border-collapse:collapse;' }, [
+									E('thead', {}, [
+										E('tr', {}, [
+											E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Domain')),
+											E('th', { 'style': 'text-align:left;padding:4px 6px;border-bottom:1px solid #ccc;' }, _('Actions'))
+										])
+									]),
+									E('tbody', { 'id': 'amz-at-domains-tbody' }, (function(self2, v, st2) {
+										return self2.renderAutotunnelRows(v, st2);
+									})(this, view, initialAtStatus))
+								])
 							])
 						])
 					])
@@ -842,6 +1093,11 @@ return baseclass.extend({
 			try { apps = JSON.parse((res && res.stdout) ? res.stdout : (res || '[]')); } catch (e) { apps = []; }
 			paintAppsTable(view, apps);
 		});
-		return Promise.all([p1, p6, pApps]);
+		// Refresh the autotunnel worker status panel.
+		var pAt = L.resolveDefault(fs.exec('/usr/bin/amnezia-autotunnel', ['status']), { stdout: '' }).then(function(res) {
+			var st = parseAutotunnelStatus((res && res.stdout) || '');
+			paintAutotunnelPanel(view, st);
+		});
+		return Promise.all([p1, p6, pApps, pAt]);
 	}
 });

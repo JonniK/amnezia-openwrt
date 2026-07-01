@@ -384,3 +384,64 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "app-add-cidrs" "$R"
   grep -q "app-add-url"  "$R"
 }
+
+# ── Auto-tunnel worker (feat/autotunnel) ────────────────────────────────────
+
+@test "routing.js has handleAutotunnelToggle and handleAutotunnelRemove handlers" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleAutotunnelToggle" "$R"
+  grep -q "handleAutotunnelRemove" "$R"
+}
+
+@test "routing.js handleAutotunnelRemove is declared function(domain, ev) — extra arg first" {
+  R="$AMZ/amnezia/section/routing.js"
+  # The handler MUST be declared with the domain arg first (LuCI convention: extra args first,
+  # event last).  Getting it backwards sends the event object to the backend.
+  grep -qE "handleAutotunnelRemove\s*:\s*function\s*\(\s*domain" "$R"
+}
+
+@test "routing.js autotunnel panel is collapsed (amnezia-action, no open attribute)" {
+  # The autotunnel worker panel must NOT have open by default.
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+}
+
+@test "routing.js has amz-at-domains-tbody built in render tree (synchronous paint)" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -qE "'id'.*amz-at-domains-tbody|\"id\".*amz-at-domains-tbody" "$R"
+}
+
+@test "routing.js handleAutotunnelRemove calls amnezia-autotunnel remove" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "amnezia-autotunnel" "$R"
+  grep -q "remove" "$R"
+}
+
+@test "routing.js has handleAutotunnelToggle calling amnezia-autotunnel enable/disable" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "handleAutotunnelToggle" "$R"
+  grep -qE "'enable'|\"enable\"|'disable'|\"disable\"" "$R"
+}
+
+@test "main.js load() has index 13 = amnezia-autotunnel status" {
+  grep -q "amnezia-autotunnel.*status\|status.*amnezia-autotunnel" "$F"
+}
+
+@test "harness DATA has 14 elements (index 13 = autotunnel status)" {
+  run node -e '
+    const h=require("./test/lib/luci-harness.js");
+    if(h.DATA.length !== 14){ console.error("DATA.length="+h.DATA.length+", want 14"); process.exit(1); }
+    process.exit(0);'
+  [ "$status" -eq 0 ]
+}
+
+@test "handler arg-order: handleAutotunnelRemove passes no event as backend arg (harness)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "handler-argorder ok"
+}
+
+@test "routing.js refresh calls amnezia-autotunnel status (keeps panel live)" {
+  R="$AMZ/amnezia/section/routing.js"
+  grep -q "amnezia-autotunnel.*status\|status.*amnezia-autotunnel" "$R"
+}

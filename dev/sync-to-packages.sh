@@ -47,6 +47,7 @@ for src in \
 	zapret-apply.sh zapret-probe.sh zapret-verify.sh \
 	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh \
 	amnezia-tunnel-ctl.sh amnezia-force-load.sh amnezia-force-update.sh \
+	amnezia-force-warm.sh amnezia-autotunnel.sh \
 	amnezia-dns-ctl.sh \
 	amnezia-dnsleak-ctl.sh amnezia-app-ctl.sh
 do
