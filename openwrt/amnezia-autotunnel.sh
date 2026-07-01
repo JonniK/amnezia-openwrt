@@ -22,6 +22,7 @@ FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
 RESOLVER="${RESOLVER:-127.0.0.1}"
 CURL="${CURL:-curl}"
 NSLOOKUP="${NSLOOKUP:-nslookup}"
+NFT="${NFT:-nft}"
 PROBE_MAXTIME="${PROBE_MAXTIME:-8}"
 DNSMASQ_HUP="${DNSMASQ_HUP:-1}"
 
@@ -106,6 +107,39 @@ _resolve_domain() {
   done <<EOF
 $_ns_out
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# _inject_ips <domain>
+# Resolve ALL IPv4 A-records and add them immediately to the amnezia_force4
+# nft set for instant tunneling (no dnsmasq restart needed).
+# Non-fatal: errors are silently suppressed.
+# ---------------------------------------------------------------------------
+_inject_ips() {
+  _ii_domain="$1"
+  _ii_ips=""
+  _ii_ns_out=$("$NSLOOKUP" "$_ii_domain" "$RESOLVER" 2>/dev/null)
+  while IFS= read -r _ii_line; do
+    case "$_ii_line" in
+      Address:*)
+        _ii_ip=$(printf '%s' "$_ii_line" | sed 's/Address:[ ]*//' | sed 's/#.*//' | tr -d ' \t\r')
+        case "$_ii_ip" in
+          127.*) continue ;;
+          [0-9]*.[0-9]*.[0-9]*.[0-9]*)
+            if [ -z "$_ii_ips" ]; then
+              _ii_ips="$_ii_ip"
+            else
+              _ii_ips="${_ii_ips}, ${_ii_ip}"
+            fi
+            ;;
+        esac
+        ;;
+    esac
+  done <<IEOF
+$_ii_ns_out
+IEOF
+  [ -n "$_ii_ips" ] || return 0
+  "$NFT" add element inet fw4 amnezia_force4 "{ ${_ii_ips} }" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -450,6 +484,12 @@ cmd_enable() {
   uci set amnezia.config.autotunnel_enabled=1
   uci commit amnezia
 
+  # Initialize last_apply so the initial learning burst is also coalesced
+  # (IPs are injected immediately; only the directive load is deferred).
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  date +%s 2>/dev/null > "$STATE_DIR/last_apply" || printf '0\n' > "$STATE_DIR/last_apply"
+  rm -f "$STATE_DIR/pending" 2>/dev/null || true
+
   mkdir -p "$(dirname "$CRON_FILE")" 2>/dev/null || true
   touch "$CRON_FILE" 2>/dev/null || true
   sed -i "/${_CRON_MARKER}/d" "$CRON_FILE" 2>/dev/null || true
@@ -541,10 +581,16 @@ cmd_status() {
     fi
   fi
 
-  printf '{"enabled":%s,"routing_mode":"%s","loadavg":%s,"added_count":%d,"added":[%s],"verdict_count":%d,"hour_count":%d}\n' \
+  # Coalesce apply state.
+  _apply_interval=$(uci -q get amnezia.config.autotunnel_apply_interval 2>/dev/null || printf '1800')
+  _pending=0
+  [ -f "$STATE_DIR/pending" ] && _pending=1
+
+  printf '{"enabled":%s,"routing_mode":"%s","loadavg":%s,"added_count":%d,"added":[%s],"verdict_count":%d,"hour_count":%d,"apply_interval":%s,"pending":%d}\n' \
     "$_enabled" "$_rmode" "$_loadavg" \
     "$_added_count" "$_added_list" \
-    "$_verdict_count" "$_hour_count"
+    "$_verdict_count" "$_hour_count" \
+    "$_apply_interval" "$_pending"
   exit 0
 }
 
@@ -649,7 +695,7 @@ cmd_auto() {
     _resolved_ip=""
     _resolve_domain "$_candidate"
     if [ -n "$_resolved_ip" ]; then
-      _in_ru=$(nft list set inet fw4 amnezia_ru4 2>/dev/null \
+      _in_ru=$("$NFT" list set inet fw4 amnezia_ru4 2>/dev/null \
         | grep -F "$_resolved_ip" | head -1 || true)
       [ -n "$_in_ru" ] && _ru_skip=1
     fi
@@ -714,7 +760,15 @@ cmd_auto() {
       done < "$_list_file"
     fi
     _new_content="${_new_content}${_candidate}"
-    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} save-manual "$_new_content"
+    # Write the list directly (atomic temp+mv) — NO dnsmasq restart here.
+    mkdir -p "$(dirname "$_list_file")" 2>/dev/null || true
+    printf '%s\n' "$_new_content" > "${_list_file}.tmp" 2>/dev/null \
+      && mv "${_list_file}.tmp" "$_list_file" 2>/dev/null || true
+    # Immediate tunneling: inject the domain's current IPs into force4 (no restart).
+    _inject_ips "$_candidate"
+    # Mark a coalesced dnsmasq directive-refresh as pending.
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    : > "$STATE_DIR/pending"
     _list_size=$((_list_size + 1))
 
     # Record in added marker (domain + timestamp).
@@ -725,6 +779,27 @@ cmd_auto() {
     amz_log "autotunnel auto: added $_candidate (throttled)"
     _tick_count=$((_tick_count + 1))
   done
+
+  # Coalesced dnsmasq directive refresh — at most once per apply-interval.
+  # Detected domains were written to the list + their IPs injected into force4
+  # immediately (no per-detection restart).  Here we load the new nftset=
+  # directives with a SINGLE dnsmasq restart, throttled so active browsing is
+  # not disrupted by frequent restarts.  A bare amnezia-force-load hash-guards
+  # its own restart, so this is a no-op restart-wise if nothing changed.
+  if [ -f "$STATE_DIR/pending" ]; then
+    _apply_interval=$(uci -q get amnezia.config.autotunnel_apply_interval 2>/dev/null || printf '1800')
+    _now=$(date +%s 2>/dev/null || printf '0')
+    _last_apply=0
+    [ -f "$STATE_DIR/last_apply" ] && _last_apply=$(cat "$STATE_DIR/last_apply" 2>/dev/null || printf '0')
+    _elapsed=$(( _now - _last_apply ))
+    if [ "$_elapsed" -ge "$_apply_interval" ] 2>/dev/null; then
+      ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} >/dev/null 2>&1 || true
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      printf '%s\n' "$_now" > "$STATE_DIR/last_apply"
+      rm -f "$STATE_DIR/pending"
+      amz_log "autotunnel auto: coalesced dnsmasq apply (interval=${_apply_interval}s)"
+    fi
+  fi
 
   # 10. Persist hourcount.
   if [ "$_tick_count" -gt "0" ]; then

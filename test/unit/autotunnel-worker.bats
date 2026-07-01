@@ -533,3 +533,200 @@ CURLSTUB
     ! grep -q "secondhour.com" "$FORCE_DIR/force-tunnel.list" || true
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Helper: build a dedicated NFT stub that records all calls to a log file.
+# Sets NFT env to point at it.
+# ---------------------------------------------------------------------------
+_make_nft_stub() {
+  _nft_tag="$1"
+  _nft_log="$BATS_TEST_TMPDIR/nft-${_nft_tag}.log"
+  _nft_dir="$BATS_TEST_TMPDIR/nft-${_nft_tag}"
+  mkdir -p "$_nft_dir"
+  cat > "$_nft_dir/nft" <<NFTSTUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "${_nft_log}"
+exit 0
+NFTSTUB
+  chmod +x "$_nft_dir/nft"
+  export NFT="$_nft_dir/nft"
+  export NFT_LOG="$_nft_log"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: build an amnezia-force-load stub that records bare (no-arg) calls.
+# Replaces the setup() stub so we can count invocations separately.
+# ---------------------------------------------------------------------------
+_make_fl_counting_stub() {
+  _fl_tag="$1"
+  _fl_log="$BATS_TEST_TMPDIR/fl-${_fl_tag}.log"
+  _fl_dir="$BATS_TEST_TMPDIR/fl-${_fl_tag}"
+  mkdir -p "$_fl_dir"
+  cat > "$_fl_dir/amnezia-force-load" <<FLSTUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "${_fl_log}"
+if [ "\$1" = "save-manual" ]; then
+  printf '%s' "\$2" > "${FORCE_DIR}/force-tunnel.list"
+fi
+exit 0
+FLSTUB
+  chmod +x "$_fl_dir/amnezia-force-load"
+  export AMNEZIA_FORCE_LOAD="$_fl_dir/amnezia-force-load"
+  export FL_LOG="$_fl_log"
+  export PATH="$_fl_dir:$PATH"
+}
+
+# ---------------------------------------------------------------------------
+# coalesce C3: no force-load restart when last_apply is fresh (within interval)
+# ---------------------------------------------------------------------------
+@test "coalesce: no force-load on detect when last_apply is recent" {
+  # Set last_apply to now so elapsed < interval.
+  _now=$(date +%s 2>/dev/null || printf '0')
+  printf '%s\n' "$_now" > "$STATE_DIR/last_apply"
+  export UCI_GET_amnezia_config_autotunnel_apply_interval=1800
+
+  _make_throttled_curl coalesce1
+  _make_nft_stub coalesce1
+  _make_fl_counting_stub coalesce1
+  export NSLOOKUP_ADDR="10.0.0.1"
+  _sf="$BATS_TEST_TMPDIR/failover-c1.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+
+  _make_logread_stub coalesce1 \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] newsite.com from 192.168.1.2"
+
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+
+  # Domain must appear in force-tunnel.list (direct write, no save-manual).
+  [ -f "$FORCE_DIR/force-tunnel.list" ]
+  grep -q "newsite.com" "$FORCE_DIR/force-tunnel.list"
+
+  # NFT add element for force4 must have been called.
+  [ -f "$NFT_LOG" ]
+  grep -q "add element inet fw4 amnezia_force4" "$NFT_LOG" \
+    || { echo "nft add element was not called"; false; }
+
+  # force-load must NOT have been invoked (interval not elapsed yet).
+  if [ -f "$FL_LOG" ]; then
+    # Only save-manual calls are acceptable; a bare invocation (the coalesce apply)
+    # must not appear.
+    ! grep -qE '^$' "$FL_LOG" \
+      || { echo "force-load was called with no args (coalesce fired prematurely)"; false; }
+  fi
+
+  # pending file must exist (coalesce deferred).
+  [ -f "$STATE_DIR/pending" ] \
+    || { echo "STATE_DIR/pending was not set after detect"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# coalesce C4: force-load invoked exactly once when interval has elapsed
+# ---------------------------------------------------------------------------
+@test "coalesce: force-load invoked once when interval has elapsed" {
+  # Set last_apply to epoch 0 so elapsed > any reasonable interval.
+  printf '0\n' > "$STATE_DIR/last_apply"
+  # Also pre-set the pending flag to simulate a prior detect.
+  : > "$STATE_DIR/pending"
+  export UCI_GET_amnezia_config_autotunnel_apply_interval=1800
+
+  _make_throttled_curl coalesce2
+  _make_nft_stub coalesce2
+  _make_fl_counting_stub coalesce2
+  export NSLOOKUP_ADDR="10.0.0.2"
+  _sf="$BATS_TEST_TMPDIR/failover-c2.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+
+  _make_logread_stub coalesce2 \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] delayed.com from 192.168.1.2"
+
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+
+  # force-load must have been invoked exactly once with no args (bare call).
+  [ -f "$FL_LOG" ] || { echo "FL_LOG not created — force-load was never called"; false; }
+  _bare_count=$(grep -c '^$' "$FL_LOG" 2>/dev/null || printf '0')
+  [ "$_bare_count" -eq 1 ] \
+    || { echo "expected exactly 1 bare force-load call, got $_bare_count"; false; }
+
+  # pending file must be gone after a successful apply.
+  [ ! -f "$STATE_DIR/pending" ] \
+    || { echo "STATE_DIR/pending was not removed after apply"; false; }
+
+  # last_apply must have been updated to a recent epoch.
+  [ -f "$STATE_DIR/last_apply" ]
+  _la=$(cat "$STATE_DIR/last_apply" 2>/dev/null || printf '0')
+  _now=$(date +%s 2>/dev/null || printf '1')
+  [ "$_la" -gt 1000 ] \
+    || { echo "last_apply not updated (got $_la)"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# coalesce C4: batch — multiple candidates trigger at most ONE force-load call
+# ---------------------------------------------------------------------------
+@test "coalesce: multiple throttled candidates -> force-load called at most once" {
+  export UCI_GET_amnezia_config_autotunnel_max_per_tick=3
+  # Stale last_apply so the coalesced apply fires.
+  printf '0\n' > "$STATE_DIR/last_apply"
+  export UCI_GET_amnezia_config_autotunnel_apply_interval=1800
+
+  _make_throttled_curl coalesce3
+  _make_nft_stub coalesce3
+  _make_fl_counting_stub coalesce3
+  export NSLOOKUP_ADDR="10.0.0.3"
+  _sf="$BATS_TEST_TMPDIR/failover-c3.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+
+  _make_logread_stub coalesce3 "$(printf '%s\n%s\n%s' \
+    'Jul  1 12:00:01 router dnsmasq[1]: query[A] batch1.com from 192.168.1.2' \
+    'Jul  1 12:00:02 router dnsmasq[1]: query[A] batch2.com from 192.168.1.2' \
+    'Jul  1 12:00:03 router dnsmasq[1]: query[A] batch3.com from 192.168.1.2')"
+
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+
+  # All three domains must be in the list.
+  grep -q "batch1.com" "$FORCE_DIR/force-tunnel.list" \
+    || { echo "batch1.com missing from list"; false; }
+  grep -q "batch2.com" "$FORCE_DIR/force-tunnel.list" \
+    || { echo "batch2.com missing from list"; false; }
+  grep -q "batch3.com" "$FORCE_DIR/force-tunnel.list" \
+    || { echo "batch3.com missing from list"; false; }
+
+  # force-load invoked AT MOST once (not once per domain).
+  _bare_count=0
+  if [ -f "$FL_LOG" ]; then
+    _bare_count=$(grep -c '^$' "$FL_LOG" 2>/dev/null || printf '0')
+  fi
+  [ "$_bare_count" -le 1 ] \
+    || { echo "force-load was called $_bare_count times — expected at most 1"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# status: exposes pending and apply_interval fields
+# ---------------------------------------------------------------------------
+@test "status: exposes pending=1 and apply_interval after a detect" {
+  export UCI_GET_amnezia_config_autotunnel_apply_interval=900
+  # Simulate a pending state.
+  : > "$STATE_DIR/pending"
+
+  run sh "$SCRIPT" status
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"pending":1' \
+    || { echo "pending field missing or not 1 in: $output"; false; }
+  echo "$output" | grep -q '"apply_interval":' \
+    || { echo "apply_interval field missing in: $output"; false; }
+  echo "$output" | grep -q '"apply_interval":900' \
+    || { echo "apply_interval not 900 in: $output"; false; }
+}
+
+@test "status: pending=0 when no pending file" {
+  rm -f "$STATE_DIR/pending"
+  run sh "$SCRIPT" status
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"pending":0' \
+    || { echo "pending not 0 in: $output"; false; }
+}
