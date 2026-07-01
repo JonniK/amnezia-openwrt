@@ -97,7 +97,8 @@ for _f in install-dnsmasq-full.sh configure-dnsmasq-amnezia.sh \
           amnezia-ru-cidr.sh amnezia-status.sh \
           amnezia-failover amnezia-failover.init amnezia-failover-ctl.sh \
           amnezia-ru-load.init 99-amnezia-ru-load.hotplug \
-          iproute2-amnezia-rt_tables.conf amnezia-app-ctl.sh; do
+          iproute2-amnezia-rt_tables.conf amnezia-app-ctl.sh \
+          amnezia-force-warm.sh amnezia-autotunnel.sh; do
 	[ -f "$SRC/$_f" ] && cp "$SRC/$_f" "/tmp/$(basename "$_f")" || \
 		err "WARN: $_f missing from payload; some functionality may degrade"
 done

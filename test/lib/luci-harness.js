@@ -185,7 +185,8 @@ if (require.main === module) {
         // Tunnel-apps handlers — extra args first, event last (LuCI convention).
         handleAppToggle: ['appSENT'], handleAppRemove: ['appSENT'],
         handleAppPreset: ['telegram'],
-        handleAppAdd: []   // NO extra arg — reads form fields from DOM in handler
+        handleAppAdd: [],   // NO extra arg — reads form fields from DOM in handler
+        handleAutotunnelAdd: []  // NO extra arg — reads domain from DOM input in handler
       };
       const CHANGE_HANDLERS = Object.keys(WIRING);
       const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };

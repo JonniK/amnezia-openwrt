@@ -311,6 +311,38 @@ return baseclass.extend({
 			});
 		},
 
+		// handleAutotunnelAdd(ev) — NO extra arg; reads domain from DOM input.
+		// Domain is read inside the handler so no extra arg is needed, avoiding
+		// the createHandlerFn event-LAST arg-order trap.
+		handleAutotunnelAdd: function(ev) {
+			var el = document.getElementById('amz-autotunnel-domain');
+			var d = (el && el.value || '').trim();
+			if (!d) {
+				ui.addNotification(null, E('p', {}, _('Enter a domain')));
+				return Promise.resolve();
+			}
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-autotunnel', ['add', d]).then(L.bind(function(res) {
+				var out = (res && res.stdout) || '';
+				var parsed = null;
+				try { parsed = JSON.parse(out); } catch (e) { parsed = null; }
+				var msg = '';
+				if (parsed && parsed.error) {
+					msg = _('Error: ') + parsed.error;
+				} else if (parsed && parsed.result) {
+					msg = _('Result: ') + parsed.result;
+					if (parsed.verdict) msg += ' (verdict: ' + parsed.verdict + ')';
+				} else {
+					msg = out || (res && res.stderr) || _('done');
+				}
+				ui.addNotification(null, E('p', {}, msg),
+					(res && res.code === 0) ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('autotunnel add failed: ') + err), 'danger');
+			});
+		},
+
 		// handleAppAdd(ev) — NO extra arg; reads form fields in the handler (DOM exists here).
 		handleAppAdd: function(ev) {
 			if (appAddInFlight) {
@@ -600,6 +632,35 @@ return baseclass.extend({
 									'click': ui.createHandlerFn(view, 'handleSaveManual')
 								}, _('Save & apply'))
 							])
+						])
+					])
+				])
+			]),
+
+			// ── Autotunnel: probe & add action — collapsed sub-panel ─────────
+			E('details', { 'class': 'amnezia-action' }, [
+				E('summary', {}, _('Tunnel a site (auto-probe)')),
+				E('div', { 'class': 'cbi-section-node' }, [
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Domain')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('input', {
+								'id': 'amz-autotunnel-domain',
+								'type': 'text',
+								'class': 'cbi-input-text',
+								'style': 'width:260px;',
+								'placeholder': 'example.com'
+							})
+						])
+					]),
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Action')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('button', {
+								'id': 'amz-autotunnel-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(view, 'handleAutotunnelAdd')
+							}, _('Probe & add'))
 						])
 					])
 				])

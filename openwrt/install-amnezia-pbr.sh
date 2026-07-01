@@ -179,7 +179,7 @@ _amz_wire_force_engine() {
   fi
 
   # Install the three allowlist helpers to /usr/bin.
-  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update amnezia-force-warm amnezia-app-ctl; do
+  for _afe_helper in amnezia-tunnel-ctl amnezia-force-load amnezia-force-update amnezia-force-warm amnezia-app-ctl amnezia-autotunnel; do
     if [ -f "/usr/bin/${_afe_helper}" ]; then
       amz_log "${_afe_helper} already present (/usr/bin)"
     else
