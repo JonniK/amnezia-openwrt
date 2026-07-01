@@ -1,8 +1,13 @@
 #!/bin/sh
 # amnezia-autotunnel: probe a domain and optionally add it to the manual
 # force-tunnel list when it appears throttled on the direct path.
-# Usage: amnezia-autotunnel probe <domain>
-#        amnezia-autotunnel add   <domain> [--force]
+# Usage: amnezia-autotunnel probe  <domain>
+#        amnezia-autotunnel add    <domain> [--force]
+#        amnezia-autotunnel remove <domain>
+#        amnezia-autotunnel auto          (one worker tick, run by cron)
+#        amnezia-autotunnel enable        (install cron + dnsmasq snippet)
+#        amnezia-autotunnel disable       (remove cron + snippet, keep added domains)
+#        amnezia-autotunnel status        (JSON status one-liner)
 # shellcheck source=lib/amnezia-common.sh
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
@@ -19,6 +24,28 @@ CURL="${CURL:-curl}"
 NSLOOKUP="${NSLOOKUP:-nslookup}"
 PROBE_MAXTIME="${PROBE_MAXTIME:-8}"
 DNSMASQ_HUP="${DNSMASQ_HUP:-1}"
+
+# ---------------------------------------------------------------------------
+# Auto-worker configuration — all paths/commands are overridable for tests.
+# ---------------------------------------------------------------------------
+STATE_DIR="${STATE_DIR:-/tmp/amnezia-autotunnel}"
+ADDED_FILE="${ADDED_FILE:-/etc/amnezia/autotunnel.d/added}"
+LOADAVG_FILE="${LOADAVG_FILE:-/proc/loadavg}"
+CRON_FILE="${CRON_FILE:-/etc/crontabs/root}"
+DNSMASQ_CONFDIR="${DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
+AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
+# logread is injectable so tests can stub it.
+LOGREAD="${LOGREAD:-logread}"
+# nslookup / pgrep are injectable for the health-check in cmd_enable.
+PGREP="${PGREP:-pgrep}"
+# Health-check retry count (injectable).
+AUTOTUNNEL_HEALTHCHECK_TRIES="${AUTOTUNNEL_HEALTHCHECK_TRIES:-3}"
+# Set to any non-empty value to skip the live dnsmasq health check in tests.
+AUTOTUNNEL_SKIP_HEALTHCHECK="${AUTOTUNNEL_SKIP_HEALTHCHECK:-}"
+# Marker comment used to dedup the cron line.
+_CRON_MARKER="amnezia-autotunnel"
+# dnsmasq confdir snippet filename.
+_AUTOTUNNEL_LOG_CONF="${DNSMASQ_CONFDIR}/amnezia-autotunnel-log.conf"
 
 # ---------------------------------------------------------------------------
 # _validate_domain <domain>
@@ -313,6 +340,403 @@ cmd_add() {
 }
 
 # ---------------------------------------------------------------------------
+# cmd_remove <domain>
+# Strip a domain from force-tunnel.list and from the autotunnel added marker.
+# ---------------------------------------------------------------------------
+cmd_remove() {
+  _domain="$1"
+  _validate_domain "$_domain"
+
+  _list_file="$FORCE_DIR/force-tunnel.list"
+  _new_content=""
+  _found=0
+  if [ -f "$_list_file" ]; then
+    while IFS= read -r _line; do
+      _entry="${_line%%#*}"
+      _entry=$(printf '%s' "$_entry" | tr -d ' \t\r')
+      if [ "$_entry" = "$_domain" ]; then
+        _found=1
+        continue
+      fi
+      _new_content="${_new_content}${_line}
+"
+    done < "$_list_file"
+  fi
+  if [ "$_found" = "1" ]; then
+    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} save-manual "$_new_content"
+    if [ "${DNSMASQ_HUP:-1}" = "1" ]; then
+      _dmpid=$("$PGREP" dnsmasq 2>/dev/null | head -1 || true)
+      [ -n "$_dmpid" ] && kill -HUP "$_dmpid" 2>/dev/null || true
+    fi
+  fi
+
+  # Strip from added marker.
+  if [ -f "$ADDED_FILE" ]; then
+    _new_added=""
+    while IFS= read -r _aline; do
+      _ad="${_aline%% *}"
+      [ "$_ad" = "$_domain" ] && continue
+      _new_added="${_new_added}${_aline}
+"
+    done < "$ADDED_FILE"
+    printf '%s' "$_new_added" > "$ADDED_FILE"
+  fi
+
+  amz_log "autotunnel: removed $_domain"
+  printf '{"domain":"%s","result":"removed","was-in-list":%s}\n' \
+    "$_domain" "$([ "$_found" = "1" ] && printf 'true' || printf 'false')"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# _dnsmasq_healthcheck
+# Returns 0 (healthy) or 1 (unhealthy).
+# Retries up to $AUTOTUNNEL_HEALTHCHECK_TRIES times with 1s sleep between.
+# Skipped entirely when $AUTOTUNNEL_SKIP_HEALTHCHECK is non-empty.
+# ---------------------------------------------------------------------------
+_dnsmasq_healthcheck() {
+  if [ -n "$AUTOTUNNEL_SKIP_HEALTHCHECK" ]; then
+    return 0
+  fi
+  _hc_try=0
+  while [ "$_hc_try" -lt "$AUTOTUNNEL_HEALTHCHECK_TRIES" ]; do
+    _hc_try=$((_hc_try + 1))
+    if "$PGREP" dnsmasq >/dev/null 2>&1 && \
+       "$NSLOOKUP" openwrt.org "$RESOLVER" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$_hc_try" -lt "$AUTOTUNNEL_HEALTHCHECK_TRIES" ] && sleep 1
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# cmd_enable
+# Write dnsmasq confdir snippet (log-queries only — syslog, works in ujail),
+# restart dnsmasq, verify it's healthy, install cron.  Auto-rollback on
+# dnsmasq failure: remove snippet + re-restart, set enabled=0, exit 5.
+# ---------------------------------------------------------------------------
+cmd_enable() {
+  # 1. Ensure state dir exists (used for verdicts, hourcount — NOT for log).
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+  # 2. Write the snippet.  log-queries only: dnsmasq sends query logs to
+  # syslog, which works inside its ujail sandbox.  A log-facility=file path
+  # would point outside the jail and cause dnsmasq to exit on reload.
+  mkdir -p "$DNSMASQ_CONFDIR" 2>/dev/null || true
+  printf 'log-queries\n' > "$_AUTOTUNNEL_LOG_CONF"
+
+  # 3. Restart dnsmasq to pick up the snippet.
+  if [ -x "$AMNEZIA_DNSMASQ_INIT" ]; then
+    "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+  fi
+
+  # 4. Health check — verify dnsmasq came back up.
+  if ! _dnsmasq_healthcheck; then
+    # ROLLBACK: remove snippet, re-restart, leave enabled=0.
+    rm -f "$_AUTOTUNNEL_LOG_CONF" 2>/dev/null || true
+    if [ -x "$AMNEZIA_DNSMASQ_INIT" ]; then
+      "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+    fi
+    "$PGREP" dnsmasq >/dev/null 2>&1 || true  # best-effort re-verify
+    uci set amnezia.config.autotunnel_enabled=0
+    uci commit amnezia
+    amz_log "autotunnel: enable ROLLED BACK (dnsmasq unhealthy)"
+    printf '{"result":"rollback","error":"dnsmasq-unhealthy"}\n'
+    exit 5
+  fi
+
+  # 5. HEALTHY: persist enabled=1 and install cron.
+  uci set amnezia.config.autotunnel_enabled=1
+  uci commit amnezia
+
+  mkdir -p "$(dirname "$CRON_FILE")" 2>/dev/null || true
+  touch "$CRON_FILE" 2>/dev/null || true
+  sed -i "/${_CRON_MARKER}/d" "$CRON_FILE" 2>/dev/null || true
+  printf '* * * * * /usr/bin/amnezia-autotunnel auto >/dev/null 2>&1 # %s\n' \
+    "$_CRON_MARKER" >> "$CRON_FILE"
+  /etc/init.d/cron enable 2>/dev/null || true
+  /etc/init.d/cron reload 2>/dev/null || true
+
+  amz_log "autotunnel: enabled"
+  printf '{"result":"enabled"}\n'
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# cmd_disable
+# Remove cron line and dnsmasq snippet; restart dnsmasq; set UCI off.
+# Already-added domains are kept (they are legit tunnel entries).
+# Disable always succeeds — never fails the disable path.
+# ---------------------------------------------------------------------------
+cmd_disable() {
+  # Remove dnsmasq snippet and reload to restore default logging.
+  rm -f "$_AUTOTUNNEL_LOG_CONF" 2>/dev/null || true
+  if [ -x "$AMNEZIA_DNSMASQ_INIT" ]; then
+    "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
+  fi
+
+  # Best-effort verify dnsmasq is back.
+  if "$PGREP" dnsmasq >/dev/null 2>&1; then
+    amz_log "autotunnel: dnsmasq healthy after disable"
+  else
+    amz_log "autotunnel: dnsmasq not running after disable (non-fatal)"
+  fi
+
+  # Remove the cron entry.
+  sed -i "/${_CRON_MARKER}/d" "$CRON_FILE" 2>/dev/null || true
+  /etc/init.d/cron reload 2>/dev/null || true
+
+  uci set amnezia.config.autotunnel_enabled=0
+  uci commit amnezia
+
+  amz_log "autotunnel: disabled"
+  printf '{"result":"disabled"}\n'
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# cmd_status
+# JSON one-liner: enabled, routing_mode, loadavg, added_count, added[],
+# verdict_count, hour_count.
+# ---------------------------------------------------------------------------
+cmd_status() {
+  _enabled=$(uci -q get amnezia.config.autotunnel_enabled 2>/dev/null || printf '0')
+  _rmode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || printf '')
+  _loadavg=$(awk '{print $1}' "$LOADAVG_FILE" 2>/dev/null || printf '0')
+
+  # Count and list auto-added domains from the persistent marker.
+  _added_list=""
+  _added_count=0
+  if [ -f "$ADDED_FILE" ]; then
+    while IFS= read -r _aline; do
+      # Marker line is "<domain> <epoch>"; take the first field as the domain.
+      # (Do NOT tr -d spaces first — that would glue the epoch onto the domain.)
+      _ad=$(printf '%s' "$_aline" | awk '{print $1}')
+      [ -n "$_ad" ] || continue
+      _added_count=$((_added_count + 1))
+      if [ -n "$_added_list" ]; then
+        _added_list="${_added_list},\"${_ad}\""
+      else
+        _added_list="\"${_ad}\""
+      fi
+    done < "$ADDED_FILE"
+  fi
+
+  # Count cached verdicts.
+  _verdict_count=0
+  if [ -f "$STATE_DIR/verdicts" ]; then
+    _verdict_count=$(grep -c . "$STATE_DIR/verdicts" 2>/dev/null || printf '0')
+  fi
+
+  # Hour count.
+  _hour_count=0
+  if [ -f "$STATE_DIR/hourcount" ]; then
+    _cur_hour=$(date +%s 2>/dev/null | awk '{printf "%d", $1/3600}')
+    _hc_line=$(cat "$STATE_DIR/hourcount" 2>/dev/null || true)
+    _hc_window=$(printf '%s' "$_hc_line" | awk '{print $1}')
+    _hc_count=$(printf '%s' "$_hc_line" | awk '{print $2}')
+    if [ "$_hc_window" = "$_cur_hour" ] && [ -n "$_hc_count" ]; then
+      _hour_count="$_hc_count"
+    fi
+  fi
+
+  printf '{"enabled":%s,"routing_mode":"%s","loadavg":%s,"added_count":%d,"added":[%s],"verdict_count":%d,"hour_count":%d}\n' \
+    "$_enabled" "$_rmode" "$_loadavg" \
+    "$_added_count" "$_added_list" \
+    "$_verdict_count" "$_hour_count"
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# cmd_auto — ONE background worker tick (cron-driven).
+# Reads new DNS query candidates from syslog via logread (injectable: $LOGREAD).
+# Safety order: guard gates first, then read candidates from logread, filter,
+# probe at most max_per_tick, add throttled ones.
+# ---------------------------------------------------------------------------
+cmd_auto() {
+  # 1. Kill-switch.
+  _enabled=$(uci -q get amnezia.config.autotunnel_enabled 2>/dev/null || printf '0')
+  [ "$_enabled" = "1" ] || exit 0
+
+  # 2a. Master gate.
+  if command -v amz_master_enabled >/dev/null 2>&1; then
+    amz_master_enabled || exit 0
+  fi
+
+  # 2b. Routing mode must be direct-default for the force list to be active.
+  _rmode=$(uci -q get amnezia.config.routing_mode 2>/dev/null || printf '')
+  if [ "$_rmode" != "direct-default" ]; then
+    amz_log "autotunnel auto: skip (routing_mode=${_rmode}, need direct-default)"
+    exit 0
+  fi
+
+  # 3. Non-blocking flock: skip overlapping ticks.
+  if command -v flock >/dev/null 2>&1; then
+    exec 6>/var/lock/amnezia-autotunnel.lock
+    flock -n 6 2>/dev/null || exit 0
+  fi
+
+  # 4. Read config options.
+  _max_per_tick=$(uci -q get amnezia.config.autotunnel_max_per_tick 2>/dev/null || printf '1')
+  _max_per_hour=$(uci -q get amnezia.config.autotunnel_max_per_hour 2>/dev/null || printf '10')
+  _loadavg_max=$(uci -q get amnezia.config.autotunnel_loadavg_max 2>/dev/null || printf '2.0')
+  _list_cap=$(uci -q get amnezia.config.autotunnel_list_cap 2>/dev/null || printf '200')
+
+  # 5. Loadavg gate.
+  _loadavg=$(awk '{print $1}' "$LOADAVG_FILE" 2>/dev/null || printf '0')
+  _overload=$(awk -v la="$_loadavg" -v mx="$_loadavg_max" \
+    'BEGIN{if(la+0 > mx+0) print "1"; else print "0"}')
+  if [ "$_overload" = "1" ]; then
+    amz_log "autotunnel auto: skip (loadavg=${_loadavg} > ${_loadavg_max})"
+    exit 0
+  fi
+
+  # 6. Hourly cap check.
+  _cur_hour=$(date +%s 2>/dev/null | awk '{printf "%d", $1/3600}')
+  _hour_count=0
+  if [ -f "$STATE_DIR/hourcount" ]; then
+    _hc_line=$(cat "$STATE_DIR/hourcount" 2>/dev/null || true)
+    _hc_window=$(printf '%s' "$_hc_line" | awk '{print $1}')
+    _hc_count=$(printf '%s' "$_hc_line" | awk '{print $2}')
+    if [ "$_hc_window" = "$_cur_hour" ] && [ -n "$_hc_count" ]; then
+      _hour_count="$_hc_count"
+    fi
+  fi
+  if [ "$_hour_count" -ge "$_max_per_hour" ] 2>/dev/null; then
+    amz_log "autotunnel auto: hourly cap reached ($_hour_count/$_max_per_hour)"
+    exit 0
+  fi
+
+  # 7. Read new candidates from syslog via logread.
+  # dnsmasq logs queries to syslog when log-queries is set (no log-facility= file
+  # needed — works inside its ujail sandbox).  Reprocessing all syslog lines on
+  # every tick is harmless: verdict cache and already-in-list checks dedup.
+  _candidates=$("$LOGREAD" 2>/dev/null \
+    | grep -E 'dnsmasq.*query\[A' \
+    | sed -n 's/.*query\[A[^]]*\] \([^ ]*\) .*/\1/p' \
+    | grep '\.' \
+    | grep -v -E '\.arpa$|\.lan$|\.local$|in-addr\.arpa|ip6\.arpa' \
+    | sort -u)
+
+  # 8. Count current list size.
+  _list_file="$FORCE_DIR/force-tunnel.list"
+  _list_size=0
+  if [ -f "$_list_file" ]; then
+    _list_size=$(grep -c . "$_list_file" 2>/dev/null || printf '0')
+  fi
+
+  # 9. Process candidates.
+  _tick_count=0
+  for _candidate in $_candidates; do
+    # Per-tick cap.
+    if [ "$_tick_count" -ge "$_max_per_tick" ] 2>/dev/null; then
+      break
+    fi
+
+    # Hourly cap (re-check in loop since we may add during this tick).
+    if [ "$((_hour_count + _tick_count))" -ge "$_max_per_hour" ] 2>/dev/null; then
+      break
+    fi
+
+    # Skip .ru TLD.
+    case "$_candidate" in
+      *.ru) continue ;;
+    esac
+
+    # Skip if in ru4 nft set (RU IP range).
+    _ru_skip=0
+    _resolved_ip=""
+    _resolve_domain "$_candidate"
+    if [ -n "$_resolved_ip" ]; then
+      _in_ru=$(nft list set inet fw4 amnezia_ru4 2>/dev/null \
+        | grep -F "$_resolved_ip" | head -1 || true)
+      [ -n "$_in_ru" ] && _ru_skip=1
+    fi
+    [ "$_ru_skip" = "1" ] && continue
+
+    # Skip if already in force-tunnel.list.
+    _already=0
+    if [ -f "$_list_file" ]; then
+      while IFS= read -r _ll; do
+        _le="${_ll%%#*}"
+        _le=$(printf '%s' "$_le" | tr -d ' \t\r')
+        if [ "$_le" = "$_candidate" ]; then _already=1; break; fi
+      done < "$_list_file"
+    fi
+    [ "$_already" = "1" ] && continue
+
+    # Skip if verdict is cached.
+    _cached=""
+    if [ -f "$STATE_DIR/verdicts" ]; then
+      _cached=$(grep "^${_candidate} " "$STATE_DIR/verdicts" 2>/dev/null | head -1 || true)
+    fi
+    if [ -n "$_cached" ]; then
+      _cached_verdict=$(printf '%s' "$_cached" | awk '{print $2}')
+      [ "$_cached_verdict" = "throttled" ] || continue
+      # cached throttled: still try to add if list not capped.
+    fi
+
+    if [ -z "$_cached" ]; then
+      # Probe the domain.
+      _do_probe "$_candidate"
+      # Cache verdict.
+      mkdir -p "$STATE_DIR" 2>/dev/null || true
+      # Remove old entry for this domain then append fresh one.
+      _new_verts=""
+      if [ -f "$STATE_DIR/verdicts" ]; then
+        while IFS= read -r _vl; do
+          _vd="${_vl%% *}"
+          [ "$_vd" = "$_candidate" ] && continue
+          _new_verts="${_new_verts}${_vl}
+"
+        done < "$STATE_DIR/verdicts"
+      fi
+      printf '%s%s %s\n' "$_new_verts" "$_candidate" "$_verdict" > "$STATE_DIR/verdicts"
+      [ "$_verdict" = "throttled" ] || continue
+    fi
+
+    # List cap check.
+    if [ "$_list_size" -ge "$_list_cap" ] 2>/dev/null; then
+      amz_log "autotunnel auto: list cap reached ($_list_size/$_list_cap), not adding $_candidate"
+      continue
+    fi
+
+    # Add to force-tunnel.list.
+    _new_content=""
+    if [ -f "$_list_file" ]; then
+      while IFS= read -r _ll; do
+        _le="${_ll%%#*}"
+        _le=$(printf '%s' "$_le" | tr -d ' \t\r')
+        [ "$_le" = "$_candidate" ] && continue
+        _new_content="${_new_content}${_ll}
+"
+      done < "$_list_file"
+    fi
+    _new_content="${_new_content}${_candidate}"
+    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} save-manual "$_new_content"
+    _list_size=$((_list_size + 1))
+
+    # Record in added marker (domain + timestamp).
+    mkdir -p "$(dirname "$ADDED_FILE")" 2>/dev/null || true
+    _ts=$(date +%s 2>/dev/null || printf '0')
+    printf '%s %s\n' "$_candidate" "$_ts" >> "$ADDED_FILE"
+
+    amz_log "autotunnel auto: added $_candidate (throttled)"
+    _tick_count=$((_tick_count + 1))
+  done
+
+  # 10. Persist hourcount.
+  if [ "$_tick_count" -gt "0" ]; then
+    _new_total=$((_hour_count + _tick_count))
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    printf '%s %d\n' "$_cur_hour" "$_new_total" > "$STATE_DIR/hourcount"
+  fi
+
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 case "${1:-}" in
@@ -324,8 +748,24 @@ case "${1:-}" in
     [ $# -ge 2 ] || { printf 'Usage: %s add <domain> [--force]\n' "$0" >&2; exit 1; }
     cmd_add "$2" "${3:-}"
     ;;
+  remove)
+    [ $# -ge 2 ] || { printf 'Usage: %s remove <domain>\n' "$0" >&2; exit 1; }
+    cmd_remove "$2"
+    ;;
+  auto)
+    cmd_auto
+    ;;
+  enable)
+    cmd_enable
+    ;;
+  disable)
+    cmd_disable
+    ;;
+  status)
+    cmd_status
+    ;;
   *)
-    printf 'Usage: %s {probe <domain>|add <domain> [--force]}\n' "$0" >&2
+    printf 'Usage: %s {probe <domain>|add <domain> [--force]|remove <domain>|auto|enable|disable|status}\n' "$0" >&2
     exit 1
     ;;
 esac

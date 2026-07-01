@@ -117,7 +117,9 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			// index 11: master_enabled flag — default '1' (enabled) if uci key absent.
 			L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }),
 			// index 12: tunnel apps list for first-paint (routing section).
-			L.resolveDefault(fs.exec('/usr/bin/amnezia-app-ctl', ['list']), { stdout: '[]' })
+			L.resolveDefault(fs.exec('/usr/bin/amnezia-app-ctl', ['list']), { stdout: '[]' }),
+			// index 13: autotunnel worker status for first-paint (routing section).
+			L.resolveDefault(fs.exec('/usr/bin/amnezia-autotunnel', ['status']), { stdout: '' })
 		]);
 	},
 

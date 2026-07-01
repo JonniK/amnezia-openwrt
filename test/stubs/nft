@@ -1,5 +1,17 @@
 #!/bin/sh
 echo "nft $*" >> "${STUB_LOG:-/dev/null}"
+# get element: return exit 1 by default (element not found) so auto-worker
+# candidates are not silently dropped as "in RU set".
+# NFT_RU4_MEMBER can be set to a specific IP to simulate membership.
+case "$1 $2 $3 $4 $5" in
+  "get element inet fw4 amnezia_ru4")
+    # Check if the queried IP matches NFT_RU4_MEMBER.
+    _qip=$(printf '%s' "$*" | sed 's/.*{ *\(.*\) *}.*/\1/' | tr -d ' ')
+    if [ -n "${NFT_RU4_MEMBER:-}" ] && [ "$_qip" = "$NFT_RU4_MEMBER" ]; then
+      exit 0
+    fi
+    exit 1 ;;
+esac
 case "$*" in
   "list set inet fw4 amnezia_ru4")
     # NFT_FAKE_RU4_COUNT: number of elements to emit (0 = empty set).
