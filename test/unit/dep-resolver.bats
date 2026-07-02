@@ -124,21 +124,32 @@ setup_staging() {
 
 # ---------------------------------------------------------------------------
 # #2: install.sh stages all wiring deps into /tmp/.
+# install.sh now uses globs (*.sh / *.init / *.hotplug / lib/*.sh /
+# nftables.d/*.nft) so specific filenames no longer appear in install.sh
+# itself — coverage is guaranteed by the source file existing in openwrt/.
+# The comprehensive per-dep assertions live in test/unit/install-staging.bats.
+# These tests verify the source file is present (glob will pick it up) and
+# that install.sh uses the correct glob patterns.
 # ---------------------------------------------------------------------------
 @test "install.sh stages amnezia-ru-cidr.sh for Path A" {
-  grep -q "amnezia-ru-cidr.sh" "$HARNESS_DIR/../install.sh"
+  # Glob *.sh covers it; verify source exists.
+  [ -f "$HARNESS_DIR/../openwrt/amnezia-ru-cidr.sh" ]
+  grep -q '"\$SRC"/\*\.sh' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages lib/amnezia-common.sh for Path A" {
-  grep -q "amnezia-common.sh" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/lib/amnezia-common.sh" ]
+  grep -q '"\$SRC"/lib/\*\.sh' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages lib/amnezia-routing.sh for Path A" {
-  grep -q "amnezia-routing.sh" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/lib/amnezia-routing.sh" ]
+  grep -q '"\$SRC"/lib/\*\.sh' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages 30-amnezia-classify.nft for Path A" {
-  grep -q "30-amnezia-classify.nft" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/nftables.d/30-amnezia-classify.nft" ]
+  grep -q '"\$SRC"/nftables\.d/\*\.nft' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages iproute2-amnezia-rt_tables.conf for Path A" {
@@ -146,11 +157,13 @@ setup_staging() {
 }
 
 @test "install.sh stages amnezia-ru-load.init for Path A" {
-  grep -q "amnezia-ru-load.init" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/amnezia-ru-load.init" ]
+  grep -q '"\$SRC"/\*\.init' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages 99-amnezia-ru-load.hotplug for Path A" {
-  grep -q "99-amnezia-ru-load.hotplug" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/99-amnezia-ru-load.hotplug" ]
+  grep -q '"\$SRC"/\*\.hotplug' "$HARNESS_DIR/../install.sh"
 }
 
 @test "install.sh stages amnezia-failover for Path A" {
@@ -158,5 +171,6 @@ setup_staging() {
 }
 
 @test "install.sh stages amnezia-failover.init for Path A" {
-  grep -q "amnezia-failover.init" "$HARNESS_DIR/../install.sh"
+  [ -f "$HARNESS_DIR/../openwrt/amnezia-failover.init" ]
+  grep -q '"\$SRC"/\*\.init' "$HARNESS_DIR/../install.sh"
 }
