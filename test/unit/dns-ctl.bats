@@ -202,7 +202,7 @@ setup() {
   grep -q "procd_set_param command /usr/bin/amnezia-dns-ctl watchdog" "$INIT"
   grep -q 'dot_enabled' "$INIT"
   grep -q 'ACTION.*=.*reload' "$HP" || grep -q '"$ACTION" = reload' "$HP"
-  grep -q "amnezia-dns-ctl apply" "$HP"
+  grep -q "amnezia-dns-ctl assert-rule" "$HP"
 }
 
 @test "status: disabled reports active_tier:off regardless of stale UCI value (LOW)" {

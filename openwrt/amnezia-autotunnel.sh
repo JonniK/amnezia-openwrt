@@ -792,6 +792,9 @@ cmd_auto() {
     _last_apply=0
     [ -f "$STATE_DIR/last_apply" ] && _last_apply=$(cat "$STATE_DIR/last_apply" 2>/dev/null || printf '0')
     _elapsed=$(( _now - _last_apply ))
+    # Clock stepped backward (RTC-less router): treat as interval elapsed so
+    # a skewed last_apply never permanently suppresses the coalesced apply.
+    [ "$_elapsed" -ge 0 ] || _elapsed="$_apply_interval"
     if [ "$_elapsed" -ge "$_apply_interval" ] 2>/dev/null; then
       ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} >/dev/null 2>&1 || true
       mkdir -p "$STATE_DIR" 2>/dev/null || true

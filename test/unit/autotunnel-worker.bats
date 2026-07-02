@@ -730,3 +730,32 @@ FLSTUB
   echo "$output" | grep -q '"pending":0' \
     || { echo "pending not 0 in: $output"; false; }
 }
+
+# ---------------------------------------------------------------------------
+# coalesce C5: clock skew — last_apply seeded in the future -> apply fires
+# ---------------------------------------------------------------------------
+@test "coalesce: last_apply in the future (clock skew) -> apply fires, pending cleared" {
+  # Simulate an RTC-less router whose clock stepped backward: last_apply is far
+  # in the future relative to the current epoch, so _elapsed would be negative
+  # without the clamp.  The clamp sets _elapsed=_apply_interval so the apply fires.
+  printf '9999999999\n' > "$STATE_DIR/last_apply"
+  : > "$STATE_DIR/pending"
+  export UCI_GET_amnezia_config_autotunnel_apply_interval=1800
+
+  _make_nft_stub skew
+  _make_fl_counting_stub skew
+
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+
+  # force-load must have been invoked (coalesced apply fired).
+  [ -f "$FL_LOG" ] \
+    || { echo "FL_LOG not created — force-load was never called (clock-skew clamp missing)"; false; }
+  _bare_count=$(grep -c '^$' "$FL_LOG" 2>/dev/null || printf '0')
+  [ "$_bare_count" -ge 1 ] \
+    || { echo "expected >=1 bare force-load call, got $_bare_count"; false; }
+
+  # pending file must be gone after the apply.
+  [ ! -f "$STATE_DIR/pending" ] \
+    || { echo "STATE_DIR/pending not cleared after clock-skew coalesced apply"; false; }
+}

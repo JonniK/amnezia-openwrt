@@ -208,6 +208,18 @@ cmd_status() {
     "$([ "$_en" = 1 ] && echo true || echo false)" "$_pr" "$_tier" "$_enc" "$_hl"
 }
 
+cmd_assert_rule() {
+  # Re-assert the pref-30900 ip rule for the current DoT provider without
+  # touching dnsmasq, stubby, or https-dns-proxy.  Called by the firewall
+  # hotplug to re-insert the rule after fw4 flushes it on reload.
+  _prov=$(uci -q get amnezia.config.dns_provider || echo quad9)
+  if ! dns_profile "$_prov"; then
+    amz_log "dns: assert-rule: bad profile $_prov"; return 1
+  fi
+  dns_iprule_flush
+  dns_iprule_set "$DNS_DOT_IP"
+}
+
 case "${1:-}" in
   apply) cmd_apply ;;
   enable) cmd_enable ;;
@@ -215,5 +227,6 @@ case "${1:-}" in
   set-provider) cmd_set_provider "${2:?provider}" ;;
   watchdog) cmd_watchdog ;;
   status) cmd_status ;;
-  *) echo "usage: amnezia-dns-ctl {apply|enable|disable|set-provider|status|watchdog}" >&2; exit 2 ;;
+  assert-rule) cmd_assert_rule ;;
+  *) echo "usage: amnezia-dns-ctl {apply|enable|disable|set-provider|status|watchdog|assert-rule}" >&2; exit 2 ;;
 esac
