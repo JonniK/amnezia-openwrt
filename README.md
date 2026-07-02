@@ -438,6 +438,58 @@ custom in the LuCI dropdown.
 enable` prints an install hint and `amnezia-dns-ctl apply` degrades
 to plain provider DNS rather than leaving DNS broken.
 
+### DNS-leak prevention
+
+`amnezia-dnsleak-ctl` installs three firewall rules to stop clients from
+bypassing the router's DNS resolver:
+
+1. **Port-53 intercept** — DNAT all LAN UDP/TCP port 53 to the router's
+   dnsmasq, so clients cannot reach external resolvers directly.
+2. **DoT block** — REJECT LAN→WAN TCP port 853 (prevents direct DoT by
+   clients).
+3. **DoH block** — REJECT LAN→WAN TCP port 443 to a fixed list of known
+   DoH provider IPs (Cloudflare, Google, Quad9).
+
+The feature is **installed at setup time** (init enabled for boot) but
+**off by default** (`dnsleak_enabled=0`). A procd watchdog monitors
+dnsmasq health every 10 seconds; if dnsmasq becomes unrecoverable it
+**fails open** (removes the interception rules from the live nft table so
+clients can still reach DNS over the tunnel) and restores them once
+dnsmasq is healthy again.
+
+```sh
+amnezia-dnsleak-ctl enable      # add UCI rules, fw4 reload, start watchdog
+amnezia-dnsleak-ctl disable     # remove rules, fw4 reload, stop watchdog
+amnezia-dnsleak-ctl status      # enabled=, failopen=, resolver_ok=
+```
+
+UCI options (under `amnezia.config`): `dnsleak_enabled` (0/1),
+`dnsleak_failopen` (runtime, 1 when fail-open is active).
+
+### Auto-tunnel (domain auto-learning, opt-in)
+
+`amnezia-autotunnel` monitors dnsmasq query logs and can automatically add
+throttled or geo-blocked domains to the force-tunnel list. It is **opt-in
+and off by default**.
+
+`enable` writes a `log-queries` dnsmasq confdir snippet, restarts dnsmasq
+(with health-check and auto-rollback on failure), sets
+`amnezia.config.autotunnel_enabled=1`, and installs a per-minute cron job
+that runs `amnezia-autotunnel auto`. The auto worker reads the dnsmasq
+syslog, probes domains that appear in queries, and adds them to the
+force-tunnel list when they are detected as throttled on direct WAN.
+Added domains persist after `disable` — `disable` only removes the cron
+and the log snippet.
+
+```sh
+amnezia-autotunnel enable          # install cron + dnsmasq log snippet
+amnezia-autotunnel disable         # remove cron + snippet; added domains kept
+amnezia-autotunnel status          # JSON: enabled, cron present, added count
+amnezia-autotunnel add example.com [--force]   # add manually
+amnezia-autotunnel remove example.com          # remove from force-tunnel list
+amnezia-autotunnel probe example.com           # classify one domain
+```
+
 ### Supported hardware
 
 Tested on **aarch64 mediatek/filogic** (Xiaomi AX3000T, Banana Pi BPI-R4,

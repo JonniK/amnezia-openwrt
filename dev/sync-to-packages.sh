@@ -42,7 +42,7 @@ mkdir -p \
 # -- amnezia-pbr -------------------------------------------------------------
 # Runtime CLI wrappers go to /usr/bin/ (no .sh -- OpenWrt convention).
 for src in \
-	awg-toggle.sh awg-ru-update.sh \
+	awg-ru-update.sh \
 	zapret-toggle.sh zapret-status.sh zapret-blockcheck.sh \
 	zapret-apply.sh zapret-probe.sh zapret-verify.sh \
 	amnezia-ru-cidr.sh amnezia-status.sh amnezia-failover-ctl.sh \

@@ -1098,32 +1098,6 @@ find_helper() {
   return 1
 }
 
-# Locate PBR templates (99-lan-vpn-*.sh). install.sh stages them under /tmp/
-# unmodified; the .ipk ships them under /usr/share/amnezia-pbr/pbr.d/.
-#
-# Templates MUST NOT live in /etc/pbr.d/ -- the pbr service globs that
-# directory and would execute them with the literal __LAN__ placeholder,
-# triggering "Could not resolve hostname" in the generated nft file. The
-# resolved file is written to /etc/pbr.d/99-lan-vpn.sh by the install steps
-# below.
-find_template() {
-  _name=$1
-  if [ -f "/tmp/${_name}" ]; then
-    echo "/tmp/${_name}"
-    return 0
-  fi
-  if [ -f "/usr/share/amnezia-pbr/pbr.d/${_name}" ]; then
-    echo "/usr/share/amnezia-pbr/pbr.d/${_name}"
-    return 0
-  fi
-  return 1
-}
-
-# Legacy cleanup: 0.2.0 shipped templates with a .template suffix in
-# /etc/pbr.d/, which pbr globbed and tried to execute. Remove them on any
-# re-run so a routine `amnezia-pbr-setup` heals the bad install state.
-rm -f /etc/pbr.d/*.template 2>/dev/null || true
-
 # AmneziaWG kmod + tools come from Slava-Shchipunov's release feed -- they
 # aren't in the official OpenWrt repos. Auto-detect arch and target from
 # /etc/openwrt_release; env override lets the maintainer pin a build that
@@ -1294,17 +1268,6 @@ if [ -f /etc/config/amnezia ]; then
   uci -q set amnezia.config.installed_version="${INSTALLED_VERSION:-main}" 2>/dev/null || true
   uci -q set amnezia.config.installed_ts="$(date +%s)" 2>/dev/null || true
   uci -q commit amnezia 2>/dev/null || true
-fi
-
-# LuCI toggle buttons (System -> Custom Commands). Optional; skip silently
-# when the helper isn't available (.ipk path doesn't ship it as it's a
-# niche luci-app-commands integration the user likely doesn't want).
-if [ -f /tmp/install-luci-toggle.sh ]; then
-  if SRC=/tmp/awg-toggle.sh sh /tmp/install-luci-toggle.sh >>"$LOG" 2>&1; then
-    log "luci toggle installed"
-  else
-    log "WARN: luci toggle install failed (non-fatal)"
-  fi
 fi
 
 # zapret (DPI desync) install. Service stays DISABLED after install -- user

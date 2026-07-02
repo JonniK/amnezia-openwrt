@@ -27,10 +27,6 @@ CRON_MARK='# amnezia-ru-update'
 [ -f "$SRC/amnezia/section/zapret.js" ]        || { echo "missing $SRC/amnezia/section/zapret.js"; exit 1; }
 [ -f "$SRC/amnezia/section/dns.js" ]           || { echo "missing $SRC/amnezia/section/dns.js"; exit 1; }
 
-# Required helper scripts must already exist (installed by install-luci-toggle.sh).
-[ -x /usr/bin/awg-toggle ] || { echo "missing /usr/bin/awg-toggle — run install-luci-toggle.sh first"; exit 1; }
-[ -x /usr/bin/awg-status ] || { echo "missing /usr/bin/awg-status — run install-luci-toggle.sh first"; exit 1; }
-
 # Place RU update script.
 cp "$RU_UPDATE_SRC" "$RU_UPDATE_DST"
 chmod 0755 "$RU_UPDATE_DST"
@@ -67,8 +63,6 @@ cat <<EOF
 luci-app-amnezia: installed.
 
   Menu:     Network -> Amnezia
-  Toggle:   /usr/bin/awg-toggle
-  Status:   /usr/bin/awg-status
   RU sync:  /usr/bin/awg-ru-update  (cron: Sundays 04:30)
   Stamp:    /etc/amnezia/ru-update.json
 
