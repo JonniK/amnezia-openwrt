@@ -132,30 +132,30 @@ setup() {
 # ── Part B2: exit-IP cache bust on down→up transition ────────────────────────
 
 @test "down→up transition removes exitip cache files" {
-  # Seed a stale cache for awg1
+  # Seed a stale cache for awg1.
   printf '1.2.3.4' > "$ST_DIR/exitip.awg1.ip"
   printf '0'       > "$ST_DIR/exitip.awg1.ts"
   # Seed debounce state as 'down' with count already at DEBOUNCE_N-1 so
   # the next call (with ok=1) crosses the threshold and returns 0 (changed).
   echo "down $(( DEBOUNCE_N - 1 ))" > "$ST_DIR/awg1"
-  # Call debounce with ok=1; it should return 0 (transition happened)
-  debounce awg1 1
-  # The main loop calls rm ONLY on the transition (debounce returns 0).
-  # We simulate the same conditional the daemon uses:
-  rm -f "$ST_DIR/exitip.awg1.ts" "$ST_DIR/exitip.awg1.ip"
+  # Mirror the daemon's run_loop conditional exactly: when debounce returns 0
+  # (transition happened) the daemon calls _on_tunnel_up which does the rm.
+  # This test FAILS if _on_tunnel_up's rm lines are deleted from the daemon.
+  if debounce awg1 1; then
+    _on_tunnel_up awg1
+  fi
   [ ! -f "$ST_DIR/exitip.awg1.ip" ]
   [ ! -f "$ST_DIR/exitip.awg1.ts" ]
 }
 
 @test "exitip cache NOT removed on steady-state up (no transition)" {
-  # Tunnel already up → debounce returns 1 (no state change) → cache intact
+  # Tunnel already up → debounce returns 1 (no state change) → cache intact.
   printf '1.2.3.4' > "$ST_DIR/exitip.awg1.ip"
   printf '0'       > "$ST_DIR/exitip.awg1.ts"
   echo "up 0" > "$ST_DIR/awg1"
-  # debounce returns 1 (no change) — cache files must survive
+  # debounce returns 1 (no change) — _on_tunnel_up must NOT be called.
   if debounce awg1 1; then
-    # If somehow a transition fires, remove cache (simulates daemon branch)
-    rm -f "$ST_DIR/exitip.awg1.ts" "$ST_DIR/exitip.awg1.ip"
+    _on_tunnel_up awg1
   fi
   [ -f "$ST_DIR/exitip.awg1.ip" ]
   [ -f "$ST_DIR/exitip.awg1.ts" ]

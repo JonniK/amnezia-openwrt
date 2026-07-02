@@ -1,6 +1,9 @@
 #!/usr/bin/env bats
 load '../lib/harness.bash'
-setup() { _require_linux_nft || skip "needs Linux nft/ip"; }
+setup() {
+  _require_linux_nft || skip "needs Linux nft/ip"
+  sudo ip netns del amznhtest 2>/dev/null || true
+}
 @test "resilient nexthop replace with buckets succeeds in a netns" {
   run sudo ip netns add amznhtest
   sudo ip netns exec amznhtest ip link add dummy0 type dummy

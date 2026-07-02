@@ -6,4 +6,10 @@ export PATH="$HARNESS_DIR/stubs:$PATH"
 export AMNEZIA_DRYRUN=1
 
 # Skip helper for Tier-2 (real-kernel) tests.
-_require_linux_nft() { command -v nft >/dev/null 2>&1 && [ "$(uname -s)" = Linux ]; }
+# Checks the REAL system binaries (not the test/stubs/ shims on PATH) so a
+# stub on PATH cannot mask a missing system nft or ip installation.
+_require_linux_nft() {
+  [ "$(uname -s)" = Linux ] || return 1
+  { [ -x /usr/sbin/nft ] || [ -x /sbin/nft ]; } || return 1
+  { [ -x /sbin/ip ]      || [ -x /usr/sbin/ip ]; }
+}

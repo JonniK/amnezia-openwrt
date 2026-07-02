@@ -22,10 +22,12 @@ CRON_MARK='# amnezia-ru-update'
 [ -f "$RU_UPDATE_SRC" ]                        || { echo "missing $RU_UPDATE_SRC"; exit 1; }
 # Preflight: amnezia resource modules must be present.
 [ -f "$SRC/amnezia/util.js" ]                  || { echo "missing $SRC/amnezia/util.js"; exit 1; }
-[ -f "$SRC/amnezia/section/failover.js" ]      || { echo "missing $SRC/amnezia/section/failover.js"; exit 1; }
-[ -f "$SRC/amnezia/section/routing.js" ]       || { echo "missing $SRC/amnezia/section/routing.js"; exit 1; }
-[ -f "$SRC/amnezia/section/zapret.js" ]        || { echo "missing $SRC/amnezia/section/zapret.js"; exit 1; }
-[ -f "$SRC/amnezia/section/dns.js" ]           || { echo "missing $SRC/amnezia/section/dns.js"; exit 1; }
+# Glob all section modules so a future section/foo.js is picked up automatically.
+_scount=0
+for _sf in "$SRC/amnezia/section/"*.js; do
+  [ -f "$_sf" ] && _scount=$(( _scount + 1 ))
+done
+[ "$_scount" -gt 0 ] || { echo "missing $SRC/amnezia/section/*.js (no section modules found)"; exit 1; }
 
 # Place RU update script.
 cp "$RU_UPDATE_SRC" "$RU_UPDATE_DST"
