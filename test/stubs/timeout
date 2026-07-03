@@ -2,6 +2,9 @@
 # timeout stub: ignore the duration argument, execute the remaining command.
 # Tests use injectable $LOGREAD stubs that return finite data immediately,
 # so no real timeout enforcement is needed.
-echo "timeout $*" >> "${STUB_LOG:-/dev/null}"
+#
+# IMPORTANT: must NOT log to $STUB_LOG — force-warm.bats counts nslookup
+# calls via grep -c on $STUB_LOG; an extra echo here produces a second
+# matching line per invocation and doubles the count (50 vs 25).
 shift
 exec "$@"
