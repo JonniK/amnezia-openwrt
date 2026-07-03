@@ -77,7 +77,10 @@ cmd_disable() {
   fi
   # L3: unconditional ip-rule flush — doesn't depend on profile parsing succeeding.
   dns_iprule_flush
-  uci set amnezia.config.dot_enabled=0
+  # Teardown mode = service lifecycle stop (init stop/reboot), NOT a user-facing
+  # feature disable.  When AMNEZIA_DNS_TEARDOWN=1 (set by stop_service), skip
+  # persisting dot_enabled=0 so restart/reboot cannot silently disable the feature.
+  [ -n "${AMNEZIA_DNS_TEARDOWN:-}" ] || uci set amnezia.config.dot_enabled=0
   uci -q delete amnezia.config.dns_active_tier 2>/dev/null || true
   uci commit amnezia
 }

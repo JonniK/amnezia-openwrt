@@ -16,5 +16,8 @@ start_service() {
 stop_service() {
   # H1: set sentinel so cmd_disable does NOT call "$AMNEZIA_DNS_INIT" stop again
   # (which would re-enter stop_service → infinite recursion + fork storm).
-  AMNEZIA_DNS_STOPPING=1 /usr/bin/amnezia-dns-ctl disable >/dev/null 2>&1 || true
+  # AMNEZIA_DNS_TEARDOWN=1: service lifecycle stop (init stop/restart/reboot) —
+  # must NOT flip the persistent dot_enabled toggle; only a user-facing
+  # 'amnezia-dns-ctl disable' (no env) should do that.
+  AMNEZIA_DNS_STOPPING=1 AMNEZIA_DNS_TEARDOWN=1 /usr/bin/amnezia-dns-ctl disable >/dev/null 2>&1 || true
 }
