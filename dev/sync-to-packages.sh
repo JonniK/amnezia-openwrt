@@ -62,13 +62,15 @@ cp "$SRC/install-dnsmasq-full.sh"          "$PBR_PKG/usr/sbin/install-dnsmasq-fu
 cp "$SRC/configure-dnsmasq-ru-nftset.sh"   "$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset"
 cp "$SRC/configure-dnsmasq-amnezia.sh"     "$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia"
 cp "$SRC/amnezia-failover"                 "$PBR_PKG/usr/sbin/amnezia-failover"
+cp "$SRC/amnezia-blackbox.sh"             "$PBR_PKG/usr/sbin/amnezia-blackbox"
 chmod 0755 \
 	"$PBR_PKG/usr/sbin/amnezia-pbr-setup" \
 	"$PBR_PKG/usr/sbin/install-zapret" \
 	"$PBR_PKG/usr/sbin/install-dnsmasq-full" \
 	"$PBR_PKG/usr/sbin/configure-dnsmasq-ru-nftset" \
 	"$PBR_PKG/usr/sbin/configure-dnsmasq-amnezia" \
-	"$PBR_PKG/usr/sbin/amnezia-failover"
+	"$PBR_PKG/usr/sbin/amnezia-failover" \
+	"$PBR_PKG/usr/sbin/amnezia-blackbox"
 
 # Shared library: amnezia-common.sh, amnezia-routing.sh, amnezia-tunnel-lib.sh, amnezia-dns-lib.sh
 cp "$SRC/lib/amnezia-common.sh"         "$PBR_PKG/usr/lib/amnezia/amnezia-common.sh"

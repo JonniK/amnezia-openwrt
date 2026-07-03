@@ -9,6 +9,7 @@ load '../lib/harness.bash'
 @test "Phase F scripts pass shellcheck" {
   cd "$HARNESS_DIR/.."
   run shellcheck --severity=warning -s sh \
+    openwrt/amnezia-blackbox.sh \
     openwrt/amnezia-autotunnel.sh \
     openwrt/amnezia-force-load.sh \
     openwrt/amnezia-force-update.sh \

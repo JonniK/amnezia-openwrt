@@ -77,6 +77,10 @@ _covered() {
   _covered amnezia-autotunnel.sh
 }
 
+@test "staging covers amnezia-blackbox.sh" {
+  _covered amnezia-blackbox.sh
+}
+
 @test "staging covers 99-amnezia-force-load.hotplug" {
   _covered 99-amnezia-force-load.hotplug
 }
