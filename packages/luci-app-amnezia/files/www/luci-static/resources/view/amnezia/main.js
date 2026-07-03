@@ -148,6 +148,12 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				'details.amnezia-action summary{font-weight:normal;}' +
 				'.amnezia-master-off{opacity:0.55;pointer-events:none;}'
 			]),
+			// Sticky notifications: stay visible at the top of the viewport when the
+			// user has scrolled down. Uses position:sticky (not fixed) so multiple
+			// notifications stack naturally in flow and degrade gracefully.
+			E('style', { 'id': 'amz-notify-style' }, [
+				'#maincontent .alert-message, .alert-message { position: sticky; top: 8px; z-index: 9999; box-shadow: 0 2px 6px rgba(0,0,0,0.15); }'
+			]),
 
 			// Master switch strip (above accordion, always interactive).
 			// Built populated synchronously so it paints on first render.
