@@ -10,6 +10,8 @@ var forceUpdateInFlight = false;
 var saveManualInFlight = false;
 var appAddInFlight = false;
 var autotunnelToggleInFlight = false;
+var ppActiveFile = null;      // '/tmp/amnezia-fo/probe-page.json' or '/tmp/amnezia-fo/watch.json'
+var _ppLastResult = null;     // last parsed probe-page/watch JSON; used by handleProbePageAddAll
 
 function parseRuStamp(text) {
 	if (!text) return null;
@@ -171,6 +173,97 @@ function paintAutotunnelPanel(view, st) {
 				])
 			]));
 		})(domains[i]);
+	}
+}
+
+// ── Probe-page / watch results painter ───────────────────────────────────────
+// Called from refresh() after reading probe-page.json or watch.json.
+// Safe to use getElementById (we're in refresh/handler context, DOM exists).
+// No innerHTML with string interpolation — uses E() and text nodes only.
+function paintProbePageResults(view, data) {
+	var container = document.getElementById('amz-pp-results');
+	if (!container) return;
+	container.innerHTML = '';
+	if (!data || !Array.isArray(data.hosts) || data.hosts.length === 0) return;
+	_ppLastResult = data;
+
+	// Progress line while running.
+	if (data.running) {
+		container.appendChild(E('p', { 'style': 'color:#666;margin:4px 0;' },
+			_('probing… ') + String(data.done || 0) + '/' + String(data.total || 0)));
+	}
+
+	var tbody = E('tbody', {});
+	for (var i = 0; i < data.hosts.length; i++) {
+		(function(h) {
+			// Color convention: throttled=red, ok=green, forced/ru=gray, other=gray.
+			var statusColor = '#666';
+			if (h.verdict === 'ok') statusColor = '#3c763d';
+			else if (h.status === 'throttled') statusColor = '#c0392b';
+
+			var verdictText = h.status || '';
+			if (h.verdict && h.verdict !== h.status) verdictText += ' / ' + h.verdict;
+
+			var dText = h.d_ms != null
+				? String(h.d_ms) + 'ms' + (h.d_speed ? ' ' + String(h.d_speed) + 'KB/s' : '')
+				: '';
+			var tText = h.t_ms != null
+				? String(h.t_ms) + 'ms' + (h.t_speed ? ' ' + String(h.t_speed) + 'KB/s' : '')
+				: '';
+
+			// "Add" button only for throttled and not yet added rows.
+			var actionCell;
+			if (h.status === 'throttled' && !h.added) {
+				actionCell = E('td', { 'style': 'padding:2px 4px;' }, [
+					E('button', {
+						'class': 'btn cbi-button-action',
+						'style': 'padding:2px 8px;',
+						'click': ui.createHandlerFn(view, 'handleProbePageAdd', h.host)
+					}, _('Add'))
+				]);
+			} else {
+				actionCell = E('td', {
+					'style': 'padding:2px 4px;color:#888;font-style:italic;'
+				}, h.added ? _('added') : '');
+			}
+
+			tbody.appendChild(E('tr', {}, [
+				E('td', { 'style': 'padding:2px 6px;' }, String(h.host || '')),
+				E('td', { 'style': 'padding:2px 6px;color:' + statusColor + ';' }, verdictText),
+				E('td', { 'style': 'padding:2px 6px;color:#666;font-size:11px;' }, dText),
+				E('td', { 'style': 'padding:2px 6px;color:#666;font-size:11px;' }, tText),
+				actionCell
+			]));
+		})(data.hosts[i]);
+	}
+
+	container.appendChild(E('table', { 'style': 'width:100%;border-collapse:collapse;margin-top:6px;' }, [
+		E('thead', {}, [
+			E('tr', {}, [
+				E('th', { 'style': 'text-align:left;padding:2px 6px;border-bottom:1px solid #ccc;' }, _('Host')),
+				E('th', { 'style': 'text-align:left;padding:2px 6px;border-bottom:1px solid #ccc;' }, _('Status / Verdict')),
+				E('th', { 'style': 'text-align:left;padding:2px 6px;border-bottom:1px solid #ccc;' }, _('Direct')),
+				E('th', { 'style': 'text-align:left;padding:2px 6px;border-bottom:1px solid #ccc;' }, _('Tunnel')),
+				E('th', { 'style': 'text-align:left;padding:2px 6px;border-bottom:1px solid #ccc;' }, _('Action'))
+			])
+		]),
+		tbody
+	]));
+
+	// "Add all throttled" button when run is complete and ≥1 throttled non-added row.
+	if (!data.running) {
+		var throttledCount = 0;
+		for (var j = 0; j < data.hosts.length; j++) {
+			if (data.hosts[j].status === 'throttled' && !data.hosts[j].added) throttledCount++;
+		}
+		if (throttledCount > 0) {
+			container.appendChild(E('div', { 'style': 'margin-top:6px;' }, [
+				E('button', {
+					'class': 'btn cbi-button-positive',
+					'click': ui.createHandlerFn(view, 'handleProbePageAddAll')
+				}, _('Add all throttled (') + String(throttledCount) + ')')
+			]));
+		}
 	}
 }
 
@@ -461,6 +554,81 @@ return baseclass.extend({
 					ui.addNotification(null, E('p', {}, _('Remove failed: ') + err), 'danger');
 				});
 			}, this));
+		},
+
+		// ── Probe-page / watch handlers ───────────────────────────────────────────
+
+		// handleProbePage(ev) — NO extra arg; reads URL from the shared domain input.
+		handleProbePage: function(ev) {
+			var el = document.getElementById('amz-autotunnel-domain');
+			var url = (el && el.value || '').trim();
+			if (!url) {
+				ui.addNotification(null, E('p', {}, _('Enter a URL or domain')));
+				return Promise.resolve();
+			}
+			ppActiveFile = '/tmp/amnezia-fo/probe-page.json';
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-autotunnel', ['probe-page', url, '--async']).then(L.bind(function(res) {
+				ui.addNotification(null, E('p', {}, _('Probe page started')),
+					(res && res.code === 0) ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('probe-page failed: ') + err), 'danger');
+			});
+		},
+
+		// handleWatch(ev) — NO extra arg.
+		handleWatch: function(ev) {
+			ppActiveFile = '/tmp/amnezia-fo/watch.json';
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-autotunnel', ['watch', '30', '--async']).then(L.bind(function(res) {
+				ui.addNotification(null, E('p', {}, _('Watching 30s — reload the problem site now on your device')),
+					(res && res.code === 0) ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('watch failed: ') + err), 'danger');
+			});
+		},
+
+		// handleProbePageAdd(host, ev) — host from createHandlerFn extra arg (FIRST).
+		// LuCI createHandlerFn convention: extra args FIRST, event LAST.
+		// Defined as function(host, ev): host arrives first, event last.
+		handleProbePageAdd: function(host, ev) {
+			var self = this;
+			return fs.exec('/usr/bin/amnezia-autotunnel', ['add', host, '--force']).then(L.bind(function(res) {
+				ui.addNotification(null, E('p', {}, _('Added: ') + host),
+					(res && res.code === 0) ? 'info' : 'warning');
+				return self.refresh();
+			}, this)).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Add failed: ') + err), 'danger');
+			});
+		},
+
+		// handleProbePageAddAll(ev) — NO extra arg; reads throttled hosts from _ppLastResult.
+		// Chains sequential add calls then notifies and refreshes.
+		handleProbePageAddAll: function(ev) {
+			if (!_ppLastResult || !Array.isArray(_ppLastResult.hosts)) return Promise.resolve();
+			var hosts = [];
+			for (var i = 0; i < _ppLastResult.hosts.length; i++) {
+				var h = _ppLastResult.hosts[i];
+				if (h.status === 'throttled' && !h.added) hosts.push(h.host);
+			}
+			if (!hosts.length) return Promise.resolve();
+			var self = this;
+			var chain = Promise.resolve();
+			for (var j = 0; j < hosts.length; j++) {
+				(function(host) {
+					chain = chain.then(function() {
+						return fs.exec('/usr/bin/amnezia-autotunnel', ['add', host, '--force']).catch(function(){});
+					});
+				})(hosts[j]);
+			}
+			return chain.then(function() {
+				ui.addNotification(null, E('p', {}, _('Added all throttled hosts')), 'info');
+				return self.refresh();
+			}).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('Add all failed: ') + err), 'danger');
+			});
 		},
 
 		// handleAppAdd(ev) — NO extra arg; reads form fields in the handler (DOM exists here).
@@ -775,14 +943,14 @@ return baseclass.extend({
 				E('summary', {}, _('Tunnel a site (auto-probe)')),
 				E('div', { 'class': 'cbi-section-node' }, [
 					E('div', { 'class': 'cbi-value' }, [
-						E('label', { 'class': 'cbi-value-title' }, _('Domain')),
+						E('label', { 'class': 'cbi-value-title' }, _('Domain / URL')),
 						E('div', { 'class': 'cbi-value-field' }, [
 							E('input', {
 								'id': 'amz-autotunnel-domain',
 								'type': 'text',
 								'class': 'cbi-input-text',
-								'style': 'width:260px;',
-								'placeholder': 'example.com'
+								'style': 'width:320px;',
+								'placeholder': 'example.com or https://example.com/page'
 							})
 						])
 					]),
@@ -792,8 +960,28 @@ return baseclass.extend({
 							E('button', {
 								'id': 'amz-autotunnel-btn',
 								'class': 'btn cbi-button-action',
+								'style': 'margin-right:6px;',
 								'click': ui.createHandlerFn(view, 'handleAutotunnelAdd')
-							}, _('Probe & add'))
+							}, _('Probe & add')),
+							E('button', {
+								'id': 'amz-pp-btn',
+								'class': 'btn cbi-button-action',
+								'style': 'margin-right:6px;',
+								'click': ui.createHandlerFn(view, 'handleProbePage')
+							}, _('Probe page')),
+							E('button', {
+								'id': 'amz-watch-btn',
+								'class': 'btn cbi-button-action',
+								'click': ui.createHandlerFn(view, 'handleWatch')
+							}, _('Watch 30s'))
+						])
+					]),
+					// Results container — empty on first paint, populated by refresh()
+					// after probe-page or watch completes each poll tick.
+					E('div', { 'class': 'cbi-value' }, [
+						E('label', { 'class': 'cbi-value-title' }, _('Page results')),
+						E('div', { 'class': 'cbi-value-field' }, [
+							E('div', { 'id': 'amz-pp-results' })
 						])
 					])
 				])
@@ -1098,6 +1286,14 @@ return baseclass.extend({
 			var st = parseAutotunnelStatus((res && res.stdout) || '');
 			paintAutotunnelPanel(view, st);
 		});
-		return Promise.all([p1, p6, pApps, pAt]);
+		// Read active probe-page or watch result file (whichever was last started).
+		var pPP = ppActiveFile
+			? L.resolveDefault(fs.read(ppActiveFile), '').then(function(text) {
+				var data = null;
+				try { if (text) data = JSON.parse(text); } catch (e) {}
+				paintProbePageResults(view, data);
+			})
+			: Promise.resolve();
+		return Promise.all([p1, p6, pApps, pAt, pPP]);
 	}
 });

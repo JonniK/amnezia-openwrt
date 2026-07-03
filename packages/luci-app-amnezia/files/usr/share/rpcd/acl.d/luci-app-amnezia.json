@@ -9,7 +9,9 @@
 				"/etc/amnezia/seed-must-tunnel.list":   [ "read" ],
 				"/var/run/amnezia-failover.json":        [ "read" ],
 				"/etc/amnezia/force-tunnel.list":       [ "read" ],
-				"/etc/amnezia/force-update.json":       [ "read" ]
+				"/etc/amnezia/force-update.json":       [ "read" ],
+				"/tmp/amnezia-fo/probe-page.json":      [ "read" ],
+				"/tmp/amnezia-fo/watch.json":           [ "read" ]
 			}
 		},
 		"write": {

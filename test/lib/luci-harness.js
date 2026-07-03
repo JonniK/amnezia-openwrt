@@ -199,7 +199,12 @@ if (require.main === module) {
         handleAutotunnelAdd: [],  // NO extra arg — reads domain from DOM input in handler
         // Autotunnel worker handlers.
         handleAutotunnelToggle: [],          // NO extra arg — reads state from DOM
-        handleAutotunnelRemove: ['ex.com']   // extra arg = domain (FIRST), event last
+        handleAutotunnelRemove: ['ex.com'],  // extra arg = domain (FIRST), event last
+        // Probe-page / watch handlers.
+        handleProbePage: [],                 // NO extra arg — reads URL from DOM input
+        handleWatch: [],                     // NO extra arg
+        handleProbePageAdd: ['example.com'], // extra arg = host (FIRST), event last
+        handleProbePageAddAll: []            // NO extra arg — reads from _ppLastResult
       };
       const CHANGE_HANDLERS = Object.keys(WIRING);
       const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };

@@ -96,7 +96,7 @@ _make_throttled_curl() {
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
-if [ "$_has_iface" = "1" ]; then printf '200 0.200'; else printf '000 0.000'; fi
+if [ "$_has_iface" = "1" ]; then printf '200 0.200 500000 102400'; else printf '000 0.000 0 0'; fi
 CURLSTUB
   chmod +x "$_sd/curl"
   export CURL="$_sd/curl"
