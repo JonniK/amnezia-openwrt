@@ -189,7 +189,7 @@ if (require.main === module) {
         handleMakeDefault: ['awgSENT'], handleTunnelRestart: ['awgSENT'],
         handleTunnelToggle: ['awgSENT'], handleTunnelRemove: ['awgSENT', '1.2.3.4'],
         handleForcePin: [], handleForceUnpin: [],
-        handleDotSetEnabled: ['1'], handleDotProvider: [], handleDotTest: [],
+        handleDotSetEnabled: ['1'], handleDotProvider: [], handleDotTest: [], handleRuBypass: [],
         handleMasterToggle: ['1'],
         handleProbe: ['ex.com'], handleSourceToggle: ['itdoginfo_inside'],
         // Tunnel-apps handlers — extra args first, event last (LuCI convention).

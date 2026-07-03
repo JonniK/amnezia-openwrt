@@ -140,6 +140,70 @@ dns_dnsmasq_restore() {
   dns_dnsmasq_del_plain
 }
 
+# ---------------------------------------------------------------------------
+# RU DNS bypass helpers — domain-scoped server= directives for .ru / .su /
+# .xn--p1ai and user-listed RU CDN domains, written to the dnsmasq conf-dir
+# so dnsmasq honours them regardless of strict-order.
+# ---------------------------------------------------------------------------
+AMZ_DNSMASQ_CONFDIR="${AMZ_DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
+AMNEZIA_RU_BYPASS_LIST="${AMNEZIA_RU_BYPASS_LIST:-/etc/amnezia/ru-dns-bypass.list}"
+
+# Print built-in TLDs (ru, su, xn--p1ai) then entries from AMNEZIA_RU_BYPASS_LIST
+# (comments/whitespace/leading-dots stripped). Deduped with sort -u when available.
+dns_ru_bypass_domains() {
+  {
+    printf 'ru\nsu\nxn--p1ai\n'
+    if [ -f "$AMNEZIA_RU_BYPASS_LIST" ]; then
+      while IFS= read -r _rbd_line; do
+        # Strip inline comments, surrounding whitespace, leading dot.
+        _rbd_line=$(printf '%s' "$_rbd_line" | sed 's/#.*//')
+        _rbd_line=$(printf '%s' "$_rbd_line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        _rbd_line=$(printf '%s' "$_rbd_line" | sed 's/^\.//')
+        [ -z "$_rbd_line" ] && continue
+        printf '%s\n' "$_rbd_line"
+      done < "$AMNEZIA_RU_BYPASS_LIST"
+    fi
+  } | if command -v sort >/dev/null 2>&1; then sort -u; else cat; fi
+}
+
+# Write chunked server=/.../ip lines to $AMZ_DNSMASQ_CONFDIR/amnezia-ru-dns.conf.
+# Resolver IPs come from uci amnezia.config.dns_ru_resolver (default 77.88.8.8 77.88.8.1).
+# Each line is kept ≤900 bytes in the domain portion (mirror force-load's nftset chunker),
+# emitting one server= line per resolver IP per chunk.
+# Also idempotently asserts dhcp.@dnsmasq[0].confdir (mirror force-load lines 195-201).
+dns_ru_bypass_render() {
+  mkdir -p "$AMZ_DNSMASQ_CONFDIR"
+  # Idempotently wire conf-dir into dnsmasq UCI.
+  _rub_cur=$(uci -q get dhcp.@dnsmasq[0].confdir 2>/dev/null || true)
+  if [ "$_rub_cur" != "$AMZ_DNSMASQ_CONFDIR" ]; then
+    uci set "dhcp.@dnsmasq[0].confdir=$AMZ_DNSMASQ_CONFDIR"
+    uci commit dhcp
+  fi
+  _rub_res=$(uci -q get amnezia.config.dns_ru_resolver 2>/dev/null || true)
+  [ -z "$_rub_res" ] && _rub_res="77.88.8.8 77.88.8.1"
+  _rub_tmp=$(mktemp "$AMZ_DNSMASQ_CONFDIR/.amz-ru-bypass.XXXXXX" 2>/dev/null \
+    || echo "$AMZ_DNSMASQ_CONFDIR/.amz-ru-bypass.$$")
+  dns_ru_bypass_domains | awk -v resolvers="$_rub_res" '
+    function emit(buf,    n, parts, i) {
+      n = split(resolvers, parts, " ")
+      for (i = 1; i <= n; i++) if (parts[i] != "") print "server=" buf "/" parts[i]
+    }
+    BEGIN { buf = "" }
+    { gsub(/[ \t\r]/, ""); sub(/^\./, ""); if ($0 == "") next
+      cand = buf "/" $0
+      if (length(cand) > 900) { emit(buf); buf = "/" $0 } else { buf = cand }
+    }
+    END { if (buf != "") emit(buf) }
+  ' > "$_rub_tmp"
+  mv "$_rub_tmp" "$AMZ_DNSMASQ_CONFDIR/amnezia-ru-dns.conf"
+}
+
+# Remove the RU bypass conf file. No dnsmasq restart — caller is responsible.
+dns_ru_bypass_clear() {
+  rm -f "$AMZ_DNSMASQ_CONFDIR/amnezia-ru-dns.conf"
+}
+
+# ---------------------------------------------------------------------------
 # Render the candidate dnsmasq options we control to a temp file and --test THAT
 # (deterministic; never a router-instance hash path). Restart only on pass.
 # M5: commit dhcp ONLY after --test passes; revert on failure so a bad candidate

@@ -12,12 +12,18 @@ _has_bin() {
   command -v stubby >/dev/null 2>&1 && command -v https-dns-proxy >/dev/null 2>&1
 }
 
+# Default ON: returns 0 (true/bypass active) unless dns_ru_bypass is exactly '0'.
+_ru_bypass_on() {
+  [ "$(uci -q get amnezia.config.dns_ru_bypass 2>/dev/null)" != 0 ]
+}
+
 cmd_apply() {
   _prov=$(uci -q get amnezia.config.dns_provider || echo quad9)
   dnsmasq_lock
   if ! _has_bin; then
     amz_log "dns: stubby/https-dns-proxy missing -> plain provider DNS"
     dns_dnsmasq_restore; dns_dnsmasq_add_plain
+    dns_ru_bypass_clear
     if dns_dnsmasq_reload; then uci set amnezia.config.dns_active_tier=plaintext; uci commit amnezia; fi
     dnsmasq_unlock; return 0
   fi
@@ -30,6 +36,8 @@ cmd_apply() {
   # under strict-order — never plaintext-first.
   dns_dnsmasq_del_plain
   [ "$(uci -q get amnezia.config.dns_active_tier)" = plaintext ] && dns_dnsmasq_add_plain
+  # RU DNS bypass: render domain-scoped server= directives (or clear when disabled).
+  if _ru_bypass_on; then dns_ru_bypass_render; else dns_ru_bypass_clear; fi
   dns_iprule_flush   # clear any stale pref-30900 rule (revert-path leak fix)
   dns_iprule_set "$DNS_DOT_IP"
   if dns_dnsmasq_reload; then dnsmasq_unlock; return 0; fi
@@ -73,7 +81,7 @@ cmd_disable() {
   "$AMNEZIA_DOH_INIT" stop 2>/dev/null || true
   # L8: only restore/reload dnsmasq if DoT was previously active (idempotent when already plain).
   if [ "$_was_enabled" = 1 ]; then
-    dnsmasq_lock; dns_dnsmasq_restore; dns_dnsmasq_reload || true; dnsmasq_unlock
+    dnsmasq_lock; dns_dnsmasq_restore; dns_ru_bypass_clear; dns_dnsmasq_reload || true; dnsmasq_unlock
   fi
   # L3: unconditional ip-rule flush — doesn't depend on profile parsing succeeding.
   dns_iprule_flush
@@ -197,18 +205,30 @@ cmd_status() {
   _en=$(uci -q get amnezia.config.dot_enabled || echo 0)
   _pr=$(uci -q get amnezia.config.dns_provider || echo quad9)
   _tier=$(uci -q get amnezia.config.dns_active_tier 2>/dev/null || echo off)
+  _rb=true; _ru_bypass_on || _rb=false
   # L5: short-circuit when disabled — no probe needed, report honestly.
   # Force active_tier=off regardless of stale UCI value (disabled status fix).
   if [ "$_en" != 1 ]; then
-    printf '{"enabled":false,"provider":"%s","active_tier":"off","encrypted":false,"healthy":false}\n' \
-      "$_pr"
+    printf '{"enabled":false,"provider":"%s","active_tier":"off","encrypted":false,"healthy":false,"ru_bypass":%s}\n' \
+      "$_pr" "$_rb"
     return 0
   fi
   _enc=false; case "$_tier" in dot|doh) _enc=true ;; esac
   # L1/L4: status path uses 1s probe timeout to keep status calls snappy.
   _hl=false; _PROBE_TIMEOUT=1 _verify_encrypted && _hl=true
-  printf '{"enabled":%s,"provider":"%s","active_tier":"%s","encrypted":%s,"healthy":%s}\n' \
-    "$([ "$_en" = 1 ] && echo true || echo false)" "$_pr" "$_tier" "$_enc" "$_hl"
+  printf '{"enabled":%s,"provider":"%s","active_tier":"%s","encrypted":%s,"healthy":%s,"ru_bypass":%s}\n' \
+    "$([ "$_en" = 1 ] && echo true || echo false)" "$_pr" "$_tier" "$_enc" "$_hl" "$_rb"
+}
+
+cmd_ru_bypass() {
+  case "${1:-}" in
+    on)  uci set amnezia.config.dns_ru_bypass=1 ;;
+    off) uci set amnezia.config.dns_ru_bypass=0 ;;
+    *)   echo "usage: amnezia-dns-ctl ru-bypass {on|off}" >&2; return 2 ;;
+  esac
+  uci commit amnezia
+  [ "$(uci -q get amnezia.config.dot_enabled)" = 1 ] && cmd_apply
+  return 0
 }
 
 cmd_assert_rule() {
@@ -228,8 +248,9 @@ case "${1:-}" in
   enable) cmd_enable ;;
   disable) cmd_disable ;;
   set-provider) cmd_set_provider "${2:?provider}" ;;
+  ru-bypass) cmd_ru_bypass "${2:-}" ;;
   watchdog) cmd_watchdog ;;
   status) cmd_status ;;
   assert-rule) cmd_assert_rule ;;
-  *) echo "usage: amnezia-dns-ctl {apply|enable|disable|set-provider|status|watchdog|assert-rule}" >&2; exit 2 ;;
+  *) echo "usage: amnezia-dns-ctl {apply|enable|disable|set-provider|ru-bypass|status|watchdog|assert-rule}" >&2; exit 2 ;;
 esac

@@ -332,6 +332,25 @@ _amz_wire_force_engine() {
     amz_log "force-tunnel.list already present"
   fi
 
+  # Seed /etc/amnezia/ru-dns-bypass.list (idempotent — never clobbers user edits on upgrade).
+  if [ ! -f "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" ]; then
+    _rdbl=$(resolve_dep \
+      "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" \
+      ru-dns-bypass.list \
+      ru-dns-bypass.list) || true
+    if [ -n "$_rdbl" ] && \
+       [ "$_rdbl" != "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" ]; then
+      cp "$_rdbl" "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" 2>/dev/null || true
+    else
+      touch "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" 2>/dev/null || true
+    fi
+    amz_log "ru-dns-bypass.list seeded"
+  else
+    amz_log "ru-dns-bypass.list already present"
+  fi
+
   # Install the daily amnezia-force-update cron entry (dedup, idempotent).
   _afe_cron=/etc/crontabs/root
   mkdir -p /etc/crontabs 2>/dev/null || true
