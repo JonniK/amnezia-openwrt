@@ -52,10 +52,10 @@ _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
 if [ "$_has_iface" = "1" ]; then
   # Tunnel probe: return 200 with fast time.
-  printf '200 0.200'
+  printf '200 0.200 500000 102400'
 else
   # Direct probe: return 000 (failure).
-  printf '000 0.000'
+  printf '000 0.000 0 0'
 fi
 CURLSTUB
   chmod +x "$_stub_dir/curl"
@@ -83,10 +83,10 @@ _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
 if [ "$_has_iface" = "1" ]; then
   # Tunnel probe: 200 at 0.5s.
-  printf '200 0.500'
+  printf '200 0.500 400000 200000'
 else
   # Direct probe: 200 but slow (6s -> well above 3*0.5=1.5, min threshold 1.5).
-  printf '200 6.000'
+  printf '200 6.000 5000 30000'
 fi
 CURLSTUB
   chmod +x "$_stub_dir/curl"
@@ -112,9 +112,9 @@ echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
 if [ "$_has_iface" = "1" ]; then
-  printf '200 0.500'
+  printf '200 0.500 400000 200000'
 else
-  printf '200 0.400'
+  printf '200 0.400 500000 200000'
 fi
 CURLSTUB
   chmod +x "$_stub_dir/curl"
@@ -138,7 +138,7 @@ CURLSTUB
 #!/bin/sh
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 # All probes return 000 (both direct and tunnel).
-printf '000 0.000'
+printf '000 0.000 0 0'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -199,7 +199,7 @@ CURLSTUB
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
-[ "$_has_iface" = "1" ] && printf '200 0.300' || printf '000 0.000'
+[ "$_has_iface" = "1" ] && printf '200 0.300 500000 150000' || printf '000 0.000 0 0'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -242,7 +242,7 @@ FLSTUB
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 _has_iface=0
 for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
-[ "$_has_iface" = "1" ] && printf '200 0.300' || printf '000 0.000'
+[ "$_has_iface" = "1" ] && printf '200 0.300 500000 150000' || printf '000 0.000 0 0'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -286,7 +286,7 @@ FLSTUB
 #!/bin/sh
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 # Both return 200 fast -> would normally be "ok" and not added.
-printf '200 0.300'
+printf '200 0.300 500000 150000'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -355,7 +355,7 @@ FLSTUB
 #!/bin/sh
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
 # Both direct and tunnel return 200 fast -> verdict ok.
-printf '200 0.300'
+printf '200 0.300 500000 150000'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -377,7 +377,7 @@ CURLSTUB
   cat > "$_stub_dir/curl" <<'CURLSTUB'
 #!/bin/sh
 echo "curl $*" >> "${STUB_LOG:-/dev/null}"
-printf '000 0.000'
+printf '000 0.000 0 0'
 CURLSTUB
   chmod +x "$_stub_dir/curl"
   export CURL="$_stub_dir/curl"
@@ -386,4 +386,155 @@ CURLSTUB
   [ "$status" -eq 4 ]
   echo "$output" | grep -q '"verdict":"tunnel-down"'
   echo "$output" | grep -q '"result":"not-added"'
+}
+
+# ---------------------------------------------------------------------------
+# verdict v2: stall scenario — direct exit 28 mid-body, tunnel completes -> throttled
+# ---------------------------------------------------------------------------
+@test "probe: direct exit 28 mid-body (stall), tunnel ok -> verdict throttled" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-stall"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "$_has_iface" = "1" ]; then
+  # Tunnel completes cleanly.
+  printf '200 1.000 500000 500000'
+  exit 0
+else
+  # Direct: hits max-time mid-body (TSPU stall signature: partial 17KB, exit 28).
+  printf '200 8.000 1024 17408'
+  exit 28
+fi
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe example.com
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict":"throttled"'
+}
+
+# ---------------------------------------------------------------------------
+# verdict v2: throughput scenario — direct 50KB/s, tunnel 500KB/s -> throttled
+# ---------------------------------------------------------------------------
+@test "probe: throughput rule — direct 50KB/s vs tunnel 500KB/s (100KB body) -> throttled" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-throughput"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "$_has_iface" = "1" ]; then
+  # Tunnel: 100KB at 500KB/s; timing not throttled (th=max(1.5,3*0.8)=2.4, d=2.0<2.4).
+  printf '200 0.800 512000 102400'
+  exit 0
+else
+  # Direct: 100KB at 50KB/s; d_speed(51200) < t_speed/3(170666) -> throughput throttled.
+  printf '200 2.000 51200 102400'
+  exit 0
+fi
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe example.com
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict":"throttled"'
+}
+
+# ---------------------------------------------------------------------------
+# verdict v2: tiny-body regression — small body must NOT trip throughput rule
+# ---------------------------------------------------------------------------
+@test "probe: tiny body (2KB) both fast -> verdict ok, throughput rule does not fire" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-tiny"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+# Both paths: small 403 body (2KB), fast; d_size=2048 < 65536 -> throughput rule skipped.
+printf '403 0.300 10240 2048'
+exit 0
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe example.com
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict":"ok"'
+}
+
+# ---------------------------------------------------------------------------
+# verdict v2: sample_url is passed through to curl
+# ---------------------------------------------------------------------------
+@test "probe: sample_url arg is forwarded to curl" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-sampleurl"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "$_has_iface" = "1" ]; then
+  printf '200 0.300 500000 150000'
+  exit 0
+else
+  printf '200 0.200 500000 150000'
+  exit 0
+fi
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe example.com "https://example.com/large-asset.js"
+  [ "$status" -eq 0 ]
+  # The sample URL must appear in the stub log (passed as curl target).
+  grep -q "large-asset.js" "$STUB_LOG" \
+    || { echo "sample_url not forwarded to curl; stub log: $(cat $STUB_LOG)"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# verdict v2: JSON contains the four new speed/size fields
+# ---------------------------------------------------------------------------
+@test "probe: JSON output contains d_speed, d_size, t_speed, t_size fields" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-json4"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "$_has_iface" = "1" ]; then
+  printf '200 0.300 512000 102400'
+  exit 0
+else
+  printf '200 0.250 600000 150000'
+  exit 0
+fi
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe example.com
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"d_speed":'
+  echo "$output" | grep -q '"d_size":'
+  echo "$output" | grep -q '"t_speed":'
+  echo "$output" | grep -q '"t_size":'
+  # Spot-check that numeric values are present (non-empty).
+  echo "$output" | grep -qE '"d_speed":[0-9]+'
+  echo "$output" | grep -qE '"d_size":[0-9]+'
 }

@@ -157,73 +157,96 @@ _pick_tunnel() {
 }
 
 # ---------------------------------------------------------------------------
-# _probe_curl <domain> <ip> [<ifname>]
-# Sets _probe_code and _probe_ms. Uses $CURL.
+# _probe_curl <domain> <ip> [<ifname>] [<url>]
+# Sets _probe_code, _probe_ms, _probe_sec, _probe_exit, _probe_speed,
+# _probe_size. Uses $CURL.
 # With ifname, adds --interface <ifname>.
+# With url (4th arg), fetches that URL instead of https://<domain>/ — the
+# --resolve pin still uses domain:443 so IP pinning works regardless.
 # ---------------------------------------------------------------------------
 _probe_curl() {
   _pc_domain="$1"
   _pc_ip="$2"
   _pc_if="${3:-}"
+  _pc_url="${4:-}"
+  _pc_target="${_pc_url:-https://${_pc_domain}/}"
 
   if [ -n "$_pc_if" ]; then
-    _pc_out=$("$CURL" -s -o /dev/null -w '%{http_code} %{time_total}' \
+    _pc_out=$("$CURL" -s -o /dev/null \
+      -w '%{http_code} %{time_total} %{speed_download} %{size_download}' \
       --max-time "$PROBE_MAXTIME" \
       --interface "$_pc_if" \
       --resolve "${_pc_domain}:443:${_pc_ip}" \
-      "https://${_pc_domain}/" 2>/dev/null)
+      "$_pc_target" 2>/dev/null)
+    _probe_exit=$?
   else
-    _pc_out=$("$CURL" -s -o /dev/null -w '%{http_code} %{time_total}' \
+    _pc_out=$("$CURL" -s -o /dev/null \
+      -w '%{http_code} %{time_total} %{speed_download} %{size_download}' \
       --max-time "$PROBE_MAXTIME" \
       --resolve "${_pc_domain}:443:${_pc_ip}" \
-      "https://${_pc_domain}/" 2>/dev/null)
+      "$_pc_target" 2>/dev/null)
+    _probe_exit=$?
   fi
 
   _probe_code=$(printf '%s' "$_pc_out" | awk '{print $1}')
   _probe_sec=$(printf '%s' "$_pc_out" | awk '{print $2}')
   # Convert seconds (possibly decimal) to integer milliseconds via awk.
   _probe_ms=$(printf '%s' "$_probe_sec" | awk '{printf "%d", $1 * 1000 + 0.5}')
-  # Normalize empty/000 code.
-  [ -z "$_probe_code" ] && _probe_code="000"
-  [ -z "$_probe_ms" ] && _probe_ms="0"
+  # Speed (bytes/sec) and body size (bytes) — rounded to nearest integer.
+  _probe_speed=$(printf '%s' "$_pc_out" | awk '{printf "%d", $3 + 0.5}')
+  _probe_size=$(printf '%s' "$_pc_out" | awk '{printf "%d", $4 + 0.5}')
+  # Normalize empty/000 code and missing numeric fields.
+  [ -z "$_probe_code" ]  && _probe_code="000"
+  [ -z "$_probe_ms" ]    && _probe_ms="0"
+  [ -z "$_probe_speed" ] && _probe_speed="0"
+  [ -z "$_probe_size" ]  && _probe_size="0"
 }
 
 # ---------------------------------------------------------------------------
-# _do_probe <domain>
+# _do_probe <domain> [<sample_url>]
 # Runs the full probe sequence.
-# Sets: _verdict, _ip, _d_code, _d_ms, _t_if, _t_code, _t_ms
+# Sets: _verdict, _ip, _d_code, _d_ms, _d_exit, _d_speed, _d_size,
+#       _t_if, _t_code, _t_ms, _t_exit, _t_speed, _t_size
 # ---------------------------------------------------------------------------
 _do_probe() {
   _dp_domain="$1"
+  _dp_url="${2:-}"
 
   # 1. Resolve IP.
   _resolve_domain "$_dp_domain"
   _ip="$_resolved_ip"
   if [ -z "$_ip" ]; then
     _verdict="unresolved"
-    _d_code="000"; _d_ms="0"; _t_if=""; _t_code="000"; _t_ms="0"
+    _d_code="000"; _d_ms="0"; _d_exit="0"; _d_speed="0"; _d_size="0"
+    _t_if=""; _t_code="000"; _t_ms="0"; _t_exit="0"; _t_speed="0"; _t_size="0"
     return 0
   fi
 
   # 2. Direct probe.
-  _probe_curl "$_dp_domain" "$_ip" ""
+  _probe_curl "$_dp_domain" "$_ip" "" "$_dp_url"
   _d_code="$_probe_code"
   _d_ms="$_probe_ms"
   _d_sec="$_probe_sec"
+  _d_exit="$_probe_exit"
+  _d_speed="$_probe_speed"
+  _d_size="$_probe_size"
 
   # 3. Pick tunnel.
   _pick_tunnel
   _t_if="$_tunnel_if"
 
   # 4. Tunnel probe — try active_pool first; if not set or returns 000, try awg1/awg2/awg3.
-  _t_code="000"; _t_ms="0"; _t_sec="0"
+  _t_code="000"; _t_ms="0"; _t_sec="0"; _t_exit="0"; _t_speed="0"; _t_size="0"
   _try_tunnel() {
     _tt_if="$1"
-    _probe_curl "$_dp_domain" "$_ip" "$_tt_if"
+    _probe_curl "$_dp_domain" "$_ip" "$_tt_if" "$_dp_url"
     if [ "$_probe_code" != "000" ]; then
       _t_code="$_probe_code"
       _t_ms="$_probe_ms"
       _t_sec="$_probe_sec"
+      _t_exit="$_probe_exit"
+      _t_speed="$_probe_speed"
+      _t_size="$_probe_size"
       _t_if="$_tt_if"
       return 0
     fi
@@ -241,40 +264,56 @@ _do_probe() {
     # If still 000 but we had a _t_if from active_pool and hadn't tried it, it's already done.
   fi
 
-  # 5. Verdict.
+  # 5. Verdict (checked in priority order).
   if [ "$_t_code" = "000" ]; then
     _verdict="tunnel-down"
   elif [ "$_d_code" = "000" ]; then
     _verdict="throttled"
+  elif [ "$_d_exit" = "28" ] && [ "$_d_size" -gt 0 ] && [ "$_t_exit" = "0" ]; then
+    # TSPU stall: direct hit max-time mid-body, tunnel completed cleanly.
+    _verdict="throttled"
   else
-    # Both OK: throttled if direct > max(1.5, 3.0 * tunnel).
-    # Use awk for float compare (BusyBox has no bc).
-    _is_throttled=$(awk -v d="${_d_sec:-0}" -v t="${_t_sec:-0}" \
-      'BEGIN{th=3.0*t; if(th<1.5)th=1.5; if(d>th) print "1"; else print "0"}')
-    if [ "$_is_throttled" = "1" ]; then
+    # Throughput check: only when both completed and body was large enough to measure.
+    _tp_throttled="0"
+    if [ "$_d_exit" = "0" ] && [ "$_t_exit" = "0" ] && \
+       [ "$_d_size" -ge 65536 ] && [ "$_t_speed" -gt 0 ]; then
+      _tp_throttled=$(awk -v ds="${_d_speed:-0}" -v ts="${_t_speed:-0}" \
+        'BEGIN{if(ds < ts/3) print "1"; else print "0"}')
+    fi
+    if [ "$_tp_throttled" = "1" ]; then
       _verdict="throttled"
     else
-      _verdict="ok"
+      # Both OK: throttled if direct > max(1.5, 3.0 * tunnel).
+      # Use awk for float compare (BusyBox has no bc).
+      _is_throttled=$(awk -v d="${_d_sec:-0}" -v t="${_t_sec:-0}" \
+        'BEGIN{th=3.0*t; if(th<1.5)th=1.5; if(d>th) print "1"; else print "0"}')
+      if [ "$_is_throttled" = "1" ]; then
+        _verdict="throttled"
+      else
+        _verdict="ok"
+      fi
     fi
   fi
 }
 
 # ---------------------------------------------------------------------------
-# cmd_probe <domain>
+# cmd_probe <domain> [<sample_url>]
 # ---------------------------------------------------------------------------
 cmd_probe() {
   _domain="$1"
+  _sample_url="${2:-}"
   _validate_domain "$_domain"
-  _do_probe "$_domain"
+  _do_probe "$_domain" "$_sample_url"
 
   if [ "$_verdict" = "unresolved" ]; then
     printf '{"domain":"%s","verdict":"unresolved"}\n' "$_domain"
     exit 0
   fi
 
-  printf '{"domain":"%s","ip":"%s","direct_code":%s,"direct_ms":%s,"tunnel":"%s","tunnel_code":%s,"tunnel_ms":%s,"verdict":"%s"}\n' \
+  printf '{"domain":"%s","ip":"%s","direct_code":%s,"direct_ms":%s,"tunnel":"%s","tunnel_code":%s,"tunnel_ms":%s,"verdict":"%s","d_speed":%s,"d_size":%s,"t_speed":%s,"t_size":%s}\n' \
     "$_domain" "$_ip" "$_d_code" "$_d_ms" \
-    "${_t_if:-}" "$_t_code" "$_t_ms" "$_verdict"
+    "${_t_if:-}" "$_t_code" "$_t_ms" "$_verdict" \
+    "${_d_speed:-0}" "${_d_size:-0}" "${_t_speed:-0}" "${_t_size:-0}"
   exit 0
 }
 
@@ -819,8 +858,8 @@ cmd_auto() {
 # ---------------------------------------------------------------------------
 case "${1:-}" in
   probe)
-    [ $# -ge 2 ] || { printf 'Usage: %s probe <domain>\n' "$0" >&2; exit 1; }
-    cmd_probe "$2"
+    [ $# -ge 2 ] || { printf 'Usage: %s probe <domain> [url]\n' "$0" >&2; exit 1; }
+    cmd_probe "$2" "${3:-}"
     ;;
   add)
     [ $# -ge 2 ] || { printf 'Usage: %s add <domain> [--force]\n' "$0" >&2; exit 1; }
