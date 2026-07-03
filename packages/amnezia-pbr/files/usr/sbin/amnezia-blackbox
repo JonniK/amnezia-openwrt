@@ -1,13 +1,14 @@
 #!/bin/sh
 # amnezia-blackbox: append a one-line vitals sample to flash every run (cron 1/min).
 # Survives spontaneous resets so the trend just before a hang is recoverable.
-LOG=/etc/amnezia/blackbox.log
+LOG="${AMNEZIA_BLACKBOX_LOG:-/etc/amnezia/blackbox.log}"
+STATE_JSON="${AMNEZIA_STATE_JSON:-/var/run/amnezia-failover.json}"
 t=$(date +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "?")
 up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
 temp=$(( $(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0) / 1000 ))
 load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
 memav=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null)
-_pool=$(awk -F'"' '/"active_pool":/{print $4}' /var/run/amnezia-failover.json 2>/dev/null)
+_pool=$(sed -n 's/.*"active_pool":"\([^"]*\)".*/\1/p' "$STATE_JSON" 2>/dev/null)
 _pool=${_pool:-awg3}
 xfer=$(awg show "$_pool" transfer 2>/dev/null | awk '{print "rx="$2" tx="$3}')
 fo=$(uci -q get amnezia.config.dnsleak_failopen 2>/dev/null || echo 0)
