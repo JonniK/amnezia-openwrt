@@ -22,6 +22,26 @@
     nexthop groups. Включается полем `globals.mode`.
   - Fail-closed: когда все туннели упали, устанавливается blackhole
     default — LAN-трафик не уходит через WAN без шифрования.
+  - **Make-default**: `amnezia-failover-ctl make-default <awgN>`
+    перенумеровывает метрики так, чтобы выбранный туннель побеждал
+    в следующем pool election без отключения других туннелей.
+  - **Force-pin**: `amnezia-failover-ctl force-pin <awgN>` обходит
+    порядок метрик и направляет весь pool через один туннель. Если он
+    упадёт — pool fail-closed (нет молчаливого переключения).
+    Снять: `force-unpin`.
+  - **Per-tunnel restart**: `amnezia-failover-ctl restart <awgN>`
+    перезапускает один интерфейс не трогая остальные (кнопка Restart
+    в каждой строке LuCI).
+  - **Exit IP display**: демон зондирует публичный egress-IP каждого
+    UP-туннеля в фоновом потоке (TTL кеш 300 с) и отдаёт его в JSON
+    состояния как `exit_ip`/`exit_ip_age`. LuCI показывает IP + возраст;
+    упавшие туннели отображаются как `—`.
+  - **Master switch**: `amnezia-failover-ctl master off` переводит
+    роутер в fail-open (LAN → WAN напрямую, без туннеля, без DoT).
+    `master on` восстанавливает все сохранённые настройки. Состояние
+    сохраняется после перезагрузки через `amnezia.config.master_enabled`
+    (по умолчанию `1`). LuCI показывает полосу состояния master выше
+    аккордеона.
 - **Два режима маршрутизации**, переключаемых в рантайме (UCI `config.routing_mode`):
   - `tunnel-default` (по умолчанию): весь внешний трафик идёт через туннель;
     `.ru` TLD и RU CIDR идут напрямую через WAN.
@@ -58,8 +78,15 @@
 - **IPv6 fail-closed**: LAN→WAN IPv6 forwarding дропается, LAN
   RA/DHCPv6/NDP выключены. Туннели несут только IPv4-трафик.
 - Страница LuCI **Network → Amnezia** с:
-  - статусом туннелей и failover, здоровье и handshake age каждого туннеля;
-  - переключателем туннеля и режима в один клик;
+  - **Полоса состояния master** (выше аккордеона) для fail-open/restore
+    всего стека одной кнопкой;
+  - статусом туннелей и failover, здоровье, handshake age и **exit IP**
+    (с возрастом кеша) каждого туннеля;
+  - кнопками **Make default**, **Restart**, **Toggle** и **Remove** на
+    каждой строке туннеля;
+  - **Force pool through** селектор + кнопки Pin/Unpin; предупреждающий
+    баннер когда автоматический failover приостановлен;
+  - переключателем режима failover / balance;
   - **Форма добавления туннеля** (вставить `.conf` или ссылку `vpn://`) и
     кнопка **Remove** на каждой строке туннеля;
   - **Выбор режима маршрутизации** (tunnel-default / direct-default);
@@ -69,7 +96,9 @@
   - **Domain probe** — классифицирует как сайт ломается на прямом WAN;
   - **Verify list** — проверяет набор доменов после применения стратегии;
   - **Blockcheck** runner с live-логом + apply/revert рекомендованных
-    nfqws стратегий.
+    nfqws стратегий;
+  - **Encrypted DNS (DoT)** переключатель с выбором провайдера и
+    индикатором активного уровня; рендерится при первой загрузке.
 
 ## Скриншоты
 
@@ -163,6 +192,12 @@ UCI-конфиг (`/etc/config/amnezia`) и `/etc/amnezia/awg*.conf` помеч�
 | `/etc/amnezia/force-tunnel.list` | Ручные записи allowlist (домены/IP); авто-обновление никогда не перезаписывает |
 | `/etc/amnezia/force.d/` | Кеш авто-обновления: по одному `.list`-файлу на каждый включённый источник |
 | `/etc/amnezia/force-update.json` | Стамп последнего обновления force-списка (счётчики по источникам + статус) |
+| `/tmp/amnezia-fo/exitip.<awgN>.ip` | Кешированный exit-IP для каждого туннеля (записывается фоновым зондом демона; сбрасывается при down→up или удалении туннеля) |
+| `/tmp/amnezia-fo/exitip.<awgN>.ts` | Unix-метка времени последнего зонда exit-IP для `<awgN>` (TTL 300 с) |
+| `/usr/lib/amnezia/amnezia-dns-lib.sh` | Encrypted-DNS helpers: профили провайдеров, stubby/DoH UCI render, управление dnsmasq server list, ip rule helpers |
+| `/usr/bin/amnezia-dns-ctl` | CLI state machine зашифрованного DNS (`enable`, `disable`, `apply`, `set-provider`, `status`, `watchdog`) |
+| `/etc/init.d/amnezia-dns` | procd init (START=97): `apply` при старте, `watchdog` как respawned procd service |
+| `/etc/hotplug.d/firewall/99-amnezia-dns` | Восстанавливает DoT ip rule после каждого `fw4 reload` |
 
 ### Настройка нескольких туннелей
 
@@ -175,6 +210,7 @@ UCI-конфиг (`/etc/config/amnezia`) и `/etc/amnezia/awg*.conf` помеч�
 |---|---|---|
 | `globals.mode` | `failover` | `failover` = strict-priority (один exit IP); `balance` = load-balance по здоровым туннелям |
 | `globals.sticky_target` | `awg1` | Туннель для sticky-маркированного трафика (claude.ai, anthropic.com) |
+| `globals.force_pool` | — | Если задан (имя туннеля) — весь pool направляется через этот туннель (fail-closed если упадёт); задаётся через `force-pin`, снимается через `force-unpin` |
 
 **`config tunnel 'awgN'`** — одна секция на туннель (awg1 … awg5):
 
@@ -219,16 +255,26 @@ amnezia-failover-ctl set-mode failover       # вернуть strict-priority
 amnezia-failover-ctl set-sticky awg2         # закрепить sticky на awg2
 amnezia-failover-ctl set-weight awg2 3       # поднять вес awg2 в balance
 amnezia-failover-ctl toggle awg2             # включить/выключить awg2 в pool
+amnezia-failover-ctl make-default awg2       # перенумеровать метрики: awg2 выигрывает следующий pool election
+amnezia-failover-ctl force-pin awg2          # направить весь pool через awg2 (fail-closed если упадёт)
+amnezia-failover-ctl force-unpin             # снять pin, вернуть выбор по метрикам
+amnezia-failover-ctl restart awg2            # ifdown awg2; sleep 1; ifup awg2
+amnezia-failover-ctl master off              # fail-open: отключить VPN-маршрутизацию + DoT
+amnezia-failover-ctl master on               # восстановить стек из сохранённых настроек
 amnezia-failover-ctl set-routing-mode direct-default   # переключить в режим allowlist
 amnezia-failover-ctl set-routing-mode tunnel-default   # вернуть туннель по умолчанию
 amnezia-failover-ctl set-source refilter_domains 1     # включить источник force-списка
 amnezia-failover-ctl set-source refilter_domains 0     # выключить его
 ```
 
-`set-mode`, `set-sticky`, `set-weight`, `toggle` коммитят UCI и перезапускают монитор.
-`set-routing-mode` перегенерирует активный classifier, запускает `amnezia-force-load`,
-перезагружает fw4 (в фоновом subshell, SSH не рвётся), и сбрасывает conntrack pool/sticky
-метки чтобы существующие потоки немедленно пересмотрели маршрут.
+`set-mode`, `set-sticky`, `set-weight`, `toggle` и `make-default` коммитят UCI и
+перезапускают монитор. `force-pin` и `force-unpin` коммитят UCI и трогают
+`/tmp/amnezia-fo/immediate` для немедленного reconcile без перезапуска. `restart`
+перезапускает только указанный интерфейс. `master off|on` останавливает/запускает
+демон, сбрасывает/восстанавливает ip rules и DoT, и проверяет WAN + DNS перед
+возвратом. `set-routing-mode` перегенерирует активный classifier, запускает
+`amnezia-force-load`, перезагружает fw4 (в фоновом subshell, SSH не рвётся), и
+сбрасывает conntrack метки чтобы существующие потоки немедленно пересмотрели маршрут.
 `set-source` только коммитит UCI; изменение вступает в силу при следующем
 запуске `amnezia-force-update`.
 
@@ -298,6 +344,125 @@ amnezia-force-load     # слить + применить уже скачанны
 
 Ручные записи в `/etc/amnezia/force-tunnel.list` всегда сливаются и
 никогда не перезаписываются `amnezia-force-update`.
+
+### Защита от DNS-утечек
+
+`amnezia-dnsleak-ctl` устанавливает три firewall-правила чтобы клиенты не могли
+обойти DNS-резолвер роутера:
+
+1. **Перехват порта 53** — DNAT всего LAN UDP/TCP-трафика на порт 53 к dnsmasq
+   роутера; клиенты не могут напрямую обратиться к внешним резолверам.
+2. **Блокировка DoT** — REJECT LAN→WAN TCP порт 853 (запрещает прямой DoT
+   от клиентов).
+3. **Блокировка DoH** — REJECT LAN→WAN TCP порт 443 к фиксированному списку
+   IP известных DoH-провайдеров (Cloudflare, Google, Quad9).
+
+Фича **устанавливается при первоначальной настройке** (init включён для загрузки)
+но **по умолчанию выключена** (`dnsleak_enabled=0`). procd watchdog следит за
+dnsmasq каждые 10 секунд; если dnsmasq перестаёт отвечать — **fail-open**
+(убирает правила перехвата из живой nft-таблицы, чтобы клиенты сохраняли DNS
+через туннель) и восстанавливает их когда dnsmasq снова здоров.
+
+```sh
+amnezia-dnsleak-ctl enable      # добавить UCI правила, fw4 reload, запустить watchdog
+amnezia-dnsleak-ctl disable     # убрать правила, fw4 reload, остановить watchdog
+amnezia-dnsleak-ctl status      # enabled=, failopen=, resolver_ok=
+```
+
+UCI-параметры (под `amnezia.config`): `dnsleak_enabled` (0/1),
+`dnsleak_failopen` (runtime, 1 когда активен fail-open).
+
+### Auto-tunnel (авто-learning доменов, opt-in)
+
+`amnezia-autotunnel` мониторит логи запросов dnsmasq и может автоматически
+добавлять дросселированные или geo-блокированные домены в force-tunnel список.
+**Opt-in, по умолчанию выключен.**
+
+`enable` пишет dnsmasq confdir сниппет с `log-queries`, перезапускает dnsmasq
+(с health-check и авто-откатом при ошибке), устанавливает
+`amnezia.config.autotunnel_enabled=1` и добавляет cron-задачу (раз в минуту),
+которая запускает `amnezia-autotunnel auto`. Рабочий процесс читает syslog
+dnsmasq, зондирует домены из запросов и добавляет их в force-tunnel список когда
+обнаруживает дросселирование на прямом WAN. Добавленные домены сохраняются после
+`disable` — `disable` убирает только cron и log-сниппет.
+
+```sh
+amnezia-autotunnel enable          # установить cron + dnsmasq log сниппет
+amnezia-autotunnel disable         # убрать cron + сниппет; добавленные домены сохраняются
+amnezia-autotunnel status          # JSON: enabled, cron present, added count
+amnezia-autotunnel add example.com [--force]   # добавить вручную
+amnezia-autotunnel remove example.com          # убрать из force-tunnel списка
+amnezia-autotunnel probe example.com           # классифицировать один домен
+```
+
+### Зашифрованный DNS (DoT)
+
+Стек зашифрованного DNS **по умолчанию выключен** — существующее поведение DNS
+не меняется пока ты его не включишь. После включения dnsmasq перестаёт использовать
+DNS-провайдер от WAN и перенаправляет все запросы через два локальных процесса:
+
+- **stubby** (DoT, `127.0.0.1:5453`) — TLS-аутентифицированный DNS, трафик идёт
+  через sticky-туннель, чтобы резолвер использовал тот же exit IP что и закреплённые
+  домены.
+- **https-dns-proxy** (DoH, `127.0.0.1:5454`) — HTTPS DNS, трафик идёт напрямую
+  на IP провайдера.
+
+procd watchdog следит за обоими listeners каждые 20 секунд. Если оба не отвечают
+3 проверки подряд — добавляет WAN-назначенный резолвер как последний plaintext
+уровень позади зашифрованных listeners в dnsmasq `strict-order` (зашифрованный
+всегда пробуется первым). После 2 успешных проверок + 120 секунд выдержки
+plaintext уровень убирается.
+
+**Включить / выключить:**
+
+```sh
+amnezia-dns-ctl enable          # установить пакеты если нужно, применить, проверить, запустить watchdog
+amnezia-dns-ctl disable         # остановить watchdog и демоны, восстановить plain dnsmasq, убрать ip rule
+```
+
+Или переключить чекбокс в LuCI → Network → Amnezia → Encrypted DNS (DoT).
+
+**Сменить провайдера:**
+
+```sh
+amnezia-dns-ctl set-provider quad9      # quad9 (по умолчанию)
+amnezia-dns-ctl set-provider adguard
+amnezia-dns-ctl set-provider dns0
+amnezia-dns-ctl set-provider mullvad
+amnezia-dns-ctl set-provider google
+```
+
+Или использовать dropdown в LuCI. `set-provider` на активном стеке перенастраивает
+stubby и https-dns-proxy на ходу, проверяет новый резолвер и откатывается к
+предыдущему провайдеру при неудаче.
+
+**Проверить текущее состояние:**
+
+```sh
+amnezia-dns-ctl status
+# → {"enabled":true,"provider":"quad9","active_tier":"dot","encrypted":true,"healthy":true}
+```
+
+Значения `active_tier`: `dot` (отвечает stubby), `doh` (отвечает https-dns-proxy),
+`plaintext` (активен watchdog fallback), `off` (выключено).
+
+**UCI-параметры** (все под `amnezia.config`):
+
+| UCI-поле | По умолч. | Описание |
+|---|---|---|
+| `dot_enabled` | `0` | `1` = зашифрованный DNS активен |
+| `dns_provider` | `quad9` | Встроенное имя провайдера (см. список выше) |
+| `dot_resolver` | — | Кастомный: `<IP>#<hostname>` для stubby (только через CLI) |
+| `doh_resolver` | — | Кастомный: полный DoH URL для https-dns-proxy (только через CLI) |
+| `doh_bootstrap` | — | Кастомный: bootstrap IP для DoH резолвера (только через CLI) |
+| `dns_active_tier` | `off` | Runtime state; не редактировать вручную |
+
+**Необходимые пакеты** (устанавливаются автоматически): `stubby`, `https-dns-proxy`.
+Если одного нет — `amnezia-dns-ctl enable` выводит подсказку по установке, а
+`amnezia-dns-ctl apply` деградирует до plain DNS провайдера, не ломая резолвинг.
+
+> **Важно:** Quad9 блокирует часть российских доменов (SERVFAIL для sanctioned.ru).
+> Если используешь DoT, рекомендуется `amnezia-dns-ctl set-provider google`.
 
 ### Поддерживаемое железо
 

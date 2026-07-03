@@ -35,6 +35,13 @@ const ui = { createHandlerFn:function(ctx, fn){
 		return function(){ var callArgs = Array.prototype.slice.call(arguments); return Promise.resolve(f.apply(ctx, args.concat(callArgs))); };
 	}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
 const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null) };
+// uci module stub: load/unload are async cache ops; get returns the configured value.
+// Default '1' for master_enabled — mirrors default-ON semantics in main.js.
+const uciStub = {
+  load: function() { return Promise.resolve(); },
+  unload: function() { /* synchronous clear, returns undefined like LuCI */ },
+  get: function(pkg, section, option) { return '1'; }
+};
 const poll = { add:()=>{}, remove:()=>{} };
 const baseclass = { extend:o=>o }, view = { extend:o=>o };
 // Return recording nodes for known element IDs so paintMasterStrip can mutate them.
@@ -61,15 +68,17 @@ function makeQuerySelectorResult(selector) {
 const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
 // DATA: 14 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list),
 // 13 (autotunnel worker status).
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, {stdout:'1'}, {stdout:'[]'}, {stdout:'{"enabled":0,"routing_mode":"direct-default","loadavg":0.1,"added_count":0,"added":[],"verdict_count":0,"hour_count":0}'}];
+// DATA[11] is a plain string '1' (from uci.get, not fs.exec) — master_enabled default ON.
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, '1', {stdout:'[]'}, {stdout:'{"enabled":0,"routing_mode":"direct-default","loadavg":0.1,"added_count":0,"added":[],"verdict_count":0,"hour_count":0}'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
   const src = fs.readFileSync(file,'utf8');
-  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns'];
+  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns','uci'];
   const fn = new Function(...names, src);
   return fn(baseclass, ui, fsStub, poll, view, E, _, L, documentStub,
-           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns); }
+           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns,
+           uciStub); }
 
 // Default loader (succeeding fs stubs).
 function load(rel, deps){ return loadWith(rel, deps, fsApi); }

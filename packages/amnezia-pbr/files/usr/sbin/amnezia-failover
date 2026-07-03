@@ -77,7 +77,7 @@ tunnel_healthy() {  # $1 iface $2 track_ip
   ping_via "$1" "$2"
 }
 
-# ── debounce ─────────────────────────────────────────────────────────────────
+# ── debounce / transition handlers ──────────────────────────────────────────
 
 state_reset() { echo "up 0" > "$ST_DIR/$1"; }
 state_get()   { awk '{print $1}' "$ST_DIR/$1" 2>/dev/null || echo up; }
@@ -91,6 +91,13 @@ debounce() {
   _c=$((_c+1))
   if [ "$_c" -ge "$DEBOUNCE_N" ]; then echo "$_want 0" > "$ST_DIR/$1"; return 0; fi
   echo "$_s $_c" > "$ST_DIR/$1"; return 1
+}
+
+# Called on debounce down→up transition. Clears the exit-IP probe cache so the
+# first post-recovery poll re-probes the tunnel's current public egress address.
+_on_tunnel_up() {  # $1 iface
+  amz_log "tunnel $1 came up"
+  rm -f "$ST_DIR/exitip.${1}.ts" "$ST_DIR/exitip.${1}.ip"
 }
 
 # ── exit-IP probe ────────────────────────────────────────────────────────────
@@ -359,8 +366,7 @@ run_loop() {
       _track=$(uci -q get "amnezia.${_n}.track_ip" 2>/dev/null || echo "1.1.1.1")
       if tunnel_healthy "$_n" "$_track"; then
         if debounce "$_n" 1; then
-          amz_log "tunnel $_n came up"
-          rm -f "$ST_DIR/exitip.${_n}.ts" "$ST_DIR/exitip.${_n}.ip"
+          _on_tunnel_up "$_n"
         fi
         HEALTHY="$HEALTHY $_n"
       else

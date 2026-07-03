@@ -112,14 +112,25 @@ dns_dnsmasq_encrypted() {
   uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
 }
 
+# Public resolvers used when DHCP provides no nameservers (WAN without DNS).
+# Never use Quad9 here: it SERVFAILs sanctioned RU domains (project constraint).
+AMNEZIA_FALLBACK_DNS="${AMNEZIA_FALLBACK_DNS:-8.8.8.8 1.1.1.1}"
+
 _resolv_provider_ips() { awk '/^nameserver /{print $2}' "$AMNEZIA_RESOLV_AUTO" 2>/dev/null; }
+# Return DHCP nameservers, or AMNEZIA_FALLBACK_DNS when resolv.conf.auto has none.
+# Guarantees the plaintext tier is always non-empty (prevents total DNS outage on
+# WANs that supply no nameservers via DHCP while dnsmasq runs noresolv+strict-order).
+_effective_provider_ips() {
+  _epi=$(_resolv_provider_ips)
+  [ -n "$_epi" ] && printf '%s\n' "$_epi" || printf '%s\n' "$AMNEZIA_FALLBACK_DNS"
+}
 dns_dnsmasq_add_plain() {
-  for _ip in $(_resolv_provider_ips); do
+  for _ip in $(_effective_provider_ips); do
     uci -q del_list "dhcp.@dnsmasq[0].server=$_ip"; uci add_list "dhcp.@dnsmasq[0].server=$_ip"
   done
 }
 dns_dnsmasq_del_plain() {
-  for _ip in $(_resolv_provider_ips); do uci -q del_list "dhcp.@dnsmasq[0].server=$_ip"; done
+  for _ip in $(_effective_provider_ips); do uci -q del_list "dhcp.@dnsmasq[0].server=$_ip"; done
 }
 dns_dnsmasq_restore() {
   uci -q delete "dhcp.@dnsmasq[0].noresolv" 2>/dev/null || true

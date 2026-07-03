@@ -86,3 +86,25 @@ EOF
   [ "$status" -eq 0 ]
   grep -q 'nslookup check.example 192.0.2.1' "$STUB_LOG"
 }
+
+# ---------------------------------------------------------------------------
+# Test 6: bounded-wave batching — a 25-domain list still resolves all 25
+# ---------------------------------------------------------------------------
+@test "wave batching: 25-domain list completes with all 25 nslookup calls" {
+  # Build a list with 25 unique domains (more than the default wave size of 10).
+  {
+    i=1
+    while [ "$i" -le 25 ]; do
+      printf 'site%d.example\n' "$i"
+      i=$(( i + 1 ))
+    done
+  } > "$FORCE_DIR/force-tunnel.list"
+
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+
+  # All 25 nslookup calls must be present in the stub log.
+  _count=$(grep -c 'nslookup site' "$STUB_LOG" 2>/dev/null || printf '0')
+  [ "$_count" -eq 25 ] \
+    || { echo "expected 25 nslookup calls, got $_count"; false; }
+}

@@ -85,37 +85,53 @@ tar xzf payload.tar.gz -C payload --strip-components=1 || fail "extract failed"
 echo "install: staging payload to /tmp/"
 SRC=payload/openwrt
 
-# Flat files: staged directly under /tmp/ (install-amnezia-pbr.sh with SCRIPT_DIR=/tmp
-# resolves these via resolve_dep or the legacy find_helper mechanism).
-for _f in install-dnsmasq-full.sh configure-dnsmasq-amnezia.sh \
-          awg-toggle.sh install-luci-toggle.sh \
-          zapret-toggle.sh zapret-status.sh zapret-blockcheck.sh \
-          zapret-apply.sh zapret-probe.sh zapret-verify.sh \
-          seed-must-tunnel.list seed-sticky-domains.list install-zapret.sh \
-          install-luci-app-amnezia.sh install-amnezia-pbr.sh \
-          awg-ru-update.sh \
-          amnezia-ru-cidr.sh amnezia-status.sh \
-          amnezia-failover amnezia-failover.init amnezia-failover-ctl.sh \
-          amnezia-ru-load.init 99-amnezia-ru-load.hotplug \
-          iproute2-amnezia-rt_tables.conf amnezia-app-ctl.sh \
-          amnezia-force-warm.sh amnezia-autotunnel.sh; do
-	[ -f "$SRC/$_f" ] && cp "$SRC/$_f" "/tmp/$(basename "$_f")" || \
-		err "WARN: $_f missing from payload; some functionality may degrade"
+# Flat scripts, inits, and hotplugs: stage all via globs so newly-added helpers
+# are included automatically without updating this list.  The guard
+# `[ -f "$_f" ] || continue` silently skips an unmatched glob pattern.
+for _f in "$SRC"/*.sh "$SRC"/*.init "$SRC"/*.hotplug; do
+	[ -f "$_f" ] || continue
+	_bn=$(basename "$_f")
+	cp "$_f" "/tmp/$_bn" || err "WARN: $_bn staging failed; some functionality may degrade"
 done
 chmod +x /tmp/install-amnezia-pbr.sh
 
-# Shared libs: SCRIPT_DIR=/tmp, installer sources $SCRIPT_DIR/lib/amnezia-*.sh.
-mkdir -p /tmp/lib
-for _f in amnezia-common.sh amnezia-routing.sh; do
-	[ -f "$SRC/lib/$_f" ] && cp "$SRC/lib/$_f" "/tmp/lib/$_f" || \
-		err "WARN: lib/$_f missing from payload; some functionality may degrade"
+# Extensionless daemon binary (not caught by *.sh glob — stage explicitly).
+if [ -f "$SRC/amnezia-failover" ]; then
+	cp "$SRC/amnezia-failover" /tmp/amnezia-failover
+	chmod +x /tmp/amnezia-failover
+else
+	err "WARN: amnezia-failover missing from payload; failover daemon will not run"
+fi
+
+# iproute2 routing tables config (no extension — stage explicitly).
+if [ -f "$SRC/iproute2-amnezia-rt_tables.conf" ]; then
+	cp "$SRC/iproute2-amnezia-rt_tables.conf" /tmp/iproute2-amnezia-rt_tables.conf
+else
+	err "WARN: iproute2-amnezia-rt_tables.conf missing from payload"
+fi
+
+# Seed lists and force-tunnel.list.
+for _f in "$SRC"/*.list; do
+	[ -f "$_f" ] || continue
+	_bn=$(basename "$_f")
+	cp "$_f" "/tmp/$_bn" || err "WARN: $_bn staging failed"
 done
 
-# nftables classifier: installer looks at $SCRIPT_DIR/nftables.d/ (= /tmp/nftables.d/).
+# Shared libs: installer sources $SCRIPT_DIR/lib/amnezia-*.sh (SCRIPT_DIR=/tmp).
+mkdir -p /tmp/lib
+for _f in "$SRC"/lib/*.sh; do
+	[ -f "$_f" ] || continue
+	_bn=$(basename "$_f")
+	cp "$_f" "/tmp/lib/$_bn" || err "WARN: lib/$_bn staging failed; some functionality may degrade"
+done
+
+# nftables classifier fragments: installer reads $SCRIPT_DIR/nftables.d/ (= /tmp/nftables.d/).
 mkdir -p /tmp/nftables.d
-[ -f "$SRC/nftables.d/30-amnezia-classify.nft" ] && \
-	cp "$SRC/nftables.d/30-amnezia-classify.nft" /tmp/nftables.d/30-amnezia-classify.nft || \
-	err "WARN: nftables.d/30-amnezia-classify.nft missing from payload; classifier install will degrade"
+for _f in "$SRC"/nftables.d/*.nft; do
+	[ -f "$_f" ] || continue
+	_bn=$(basename "$_f")
+	cp "$_f" "/tmp/nftables.d/$_bn" || err "WARN: nftables.d/$_bn staging failed; classifier install may degrade"
+done
 
 # UCI scaffold (different naming because installer copies to /etc/config/amnezia)
 [ -f "$SRC/config/amnezia" ] && cp "$SRC/config/amnezia" /tmp/amnezia.config

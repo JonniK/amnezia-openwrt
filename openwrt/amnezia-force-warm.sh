@@ -42,7 +42,10 @@ if command -v flock >/dev/null 2>&1; then
   flock -n 7 2>/dev/null || exit 0
 fi
 
+FORCE_WARM_WAVE="${FORCE_WARM_WAVE:-10}"   # max concurrent nslookup processes per wave
+
 _n=0
+_wave=0
 while IFS= read -r _line; do
   # Strip inline comments (everything from # onward).
   _entry="${_line%%#*}"
@@ -60,9 +63,15 @@ while IFS= read -r _line; do
   # BusyBox nslookup does NOT accept -timeout or host#port; use external timeout only.
   timeout 5 nslookup "$_entry" "$WARM_RESOLVER" >/dev/null 2>&1 &
   _n=$((_n + 1))
+  _wave=$((_wave + 1))
+  # Bound parallelism: flush each completed wave before starting the next.
+  if [ "$_wave" -ge "$FORCE_WARM_WAVE" ]; then
+    wait
+    _wave=0
+  fi
 done < "$FORCE_DIR/force-tunnel.list"
 
-# Wait for all background nslookup processes to finish.
+# Wait for the last (partial) wave to finish.
 wait
 
 amz_log "force-warm: re-resolved $_n domain(s) via $WARM_RESOLVER"

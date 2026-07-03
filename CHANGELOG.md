@@ -2,6 +2,15 @@
 
 ## [unreleased]
 
+### Document dnsleak + autotunnel; drop dead pbr-era scripts; refresh CHEATSHEETs and RU docs
+
+- **amnezia-dnsleak-ctl** documented in both READMEs: port-53 DNAT intercept, DoT/DoH block, fail-open watchdog, default-OFF despite init being boot-enabled.
+- **amnezia-autotunnel** documented in both READMEs: opt-in domain auto-learning worker, enable/disable/probe/add/remove CLI, coalesced dnsmasq restart with health-check rollback.
+- Dead pbr-era layer removed: `openwrt/pbr-cleanup-dupes.sh`, `openwrt/pbr-reload.sh`, `openwrt/pbr-status.sh`, `openwrt/pbr.d/` (3 scripts), `openwrt/awg-toggle.sh`, `openwrt/install-luci-toggle.sh`; referencing dead code surgically removed from `install-amnezia-pbr.sh`, `install-luci-app-amnezia.sh`, `dev/deploy-openwrt-safe.sh`, `dev/sync-to-packages.sh`.
+- `openwrt/config/amnezia` routing_mode comment rewritten to reflect both modes as fully implemented; `# option master_enabled '1'` discoverability line added.
+- `CHEATSHEET.md` and `CHEATSHEET.ru.md` rewritten as current-CLI cheatsheets (replaced pre-multitunnel content referencing non-existent scripts and removed pbr subsystem).
+- `README.ru.md` updated to match `README.md`: encrypted-DNS section (full), DNS-leak prevention section, auto-tunnel section, master switch / make-default / force-pin / per-tunnel restart / exit-IP bullets, updated failover-ctl command list, `globals.force_pool` UCI row, DNS-related "where things live" entries.
+
 ### Remove autolearn
 
 The auto-learning feature (`amnezia-autolearn`, `amnezia-autolearn-ctl`, `amnezia-autolearn-lib.sh`, `amnezia-autolearn.init`) has been removed entirely. The implementation never worked correctly — broken verdict parsing meant no domains were ever learned — and the cron job correlated with an intermittent kernel hang on the AX3000T (hard reset every 30 min aligned with autolearn's cron interval). All associated UCI options (`autolearn_*`), the deny.list exclusion in `amnezia-force-load`, the LuCI `autolearn.js` panel, and the ACL entry for `amnezia-autolearn-ctl` are removed. The `master on|off` verbs no longer snapshot or restore `autolearn_enabled`. `zapret-probe`'s pinned-IP second argument is retained as a general SSRF-safe probe option.

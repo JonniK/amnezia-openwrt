@@ -63,7 +63,7 @@ start_remote_deploy() {
   echo "=== Upload installer + AWG config + payload ==="
   # Flat scripts and configs land directly in /tmp/ via basename. The
   # installer (install-amnezia-pbr.sh) reads them from there.
-  for _f in openwrt/pbr.d/ru-direct.sh openwrt/pbr.d/99-lan-vpn-full.sh openwrt/pbr.d/99-lan-vpn-vpn-only.sh openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/awg-toggle.sh openwrt/pbr-status.sh openwrt/pbr-reload.sh openwrt/install-luci-toggle.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh openwrt/install-amnezia-pbr.sh openwrt/amnezia-app-ctl.sh openwrt/amnezia-force-warm.sh openwrt/amnezia-autotunnel.sh; do
+  for _f in openwrt/install-dnsmasq-full.sh openwrt/configure-dnsmasq-ru-nftset.sh openwrt/zapret-toggle.sh openwrt/zapret-status.sh openwrt/zapret-blockcheck.sh openwrt/zapret-apply.sh openwrt/zapret-probe.sh openwrt/zapret-verify.sh openwrt/seed-must-tunnel.list openwrt/install-zapret.sh openwrt/install-luci-app-amnezia.sh openwrt/install-amnezia-pbr.sh openwrt/amnezia-app-ctl.sh openwrt/amnezia-force-warm.sh openwrt/amnezia-autotunnel.sh; do
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/$(basename "$_f")"
   done
   # UCI scaffold has a slash-free filename (`amnezia`), so basename loop
@@ -79,15 +79,16 @@ start_remote_deploy() {
   # on-device require() resolves modules before the entry point is loaded.
   for _f in openwrt/luci-app-amnezia/menu/luci-app-amnezia.json \
             openwrt/luci-app-amnezia/acl/luci-app-amnezia.json \
-            openwrt/luci-app-amnezia/amnezia/util.js \
-            openwrt/luci-app-amnezia/amnezia/section/failover.js \
-            openwrt/luci-app-amnezia/amnezia/section/routing.js \
-            openwrt/luci-app-amnezia/amnezia/section/zapret.js \
-            openwrt/luci-app-amnezia/amnezia/section/dns.js \
-            openwrt/luci-app-amnezia/view/main.js; do
+            openwrt/luci-app-amnezia/amnezia/util.js; do
     _rel=${_f#openwrt/luci-app-amnezia/}
     cat "$REPO_ROOT/$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
   done
+  # Glob all section modules so a future section/foo.js is picked up automatically.
+  for _f in "$REPO_ROOT"/openwrt/luci-app-amnezia/amnezia/section/*.js; do
+    _rel="amnezia/section/$(basename "$_f")"
+    cat "$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
+  done
+  cat "$REPO_ROOT/openwrt/luci-app-amnezia/view/main.js" | ssh_run "cat > /tmp/luci-app-amnezia/view/main.js"
   ssh_run "chmod +x /tmp/install-amnezia-pbr.sh"
   ssh_run "cat > /tmp/awg-setup.conf" <"$CONF_LOCAL"
   # Detach the installer from this SSH session so a dropped connection

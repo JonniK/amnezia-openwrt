@@ -3,6 +3,7 @@
 'require fs';
 'require ui';
 'require poll';
+'require uci';
 'require amnezia.util as util';
 'require amnezia.section.failover as failover';
 'require amnezia.section.routing as routing';
@@ -84,9 +85,12 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
 					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
 					res.code === 0 ? 'info' : 'warning');
-				// Re-read master state and repaint the strip.
-				return L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }).then(function(r) {
-					var newState = (r.stdout || '1').trim();
+				// Re-read master state fresh (uci.unload clears the cache) and repaint the strip.
+				uci.unload('amnezia');
+				return uci.load('amnezia').then(function() {
+					return uci.get('amnezia', 'config', 'master_enabled');
+				}).then(function(v) {
+					var newState = (v != null ? v : '1').trim();
 					paintMasterStrip(self, newState !== '0');
 				}).then(function() {
 					return self.refresh();
@@ -114,8 +118,9 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			L.resolveDefault(fs.read('/etc/amnezia/force-update.json'), ''),
 			// index 10: DoT status — parsed synchronously in dns.render() for first paint.
 			L.resolveDefault(fs.exec('/usr/bin/amnezia-dns-ctl', ['status']), { stdout: '' }),
-			// index 11: master_enabled flag — default '1' (enabled) if uci key absent.
-			L.resolveDefault(fs.exec('/sbin/uci', ['-q','get','amnezia.config.master_enabled']), { stdout: '1' }),
+			// index 11: master_enabled (amnezia.config.master_enabled) via uci module — default '1' if absent/error.
+			uci.load('amnezia').then(function() { return uci.get('amnezia', 'config', 'master_enabled'); },
+				function() { return '1'; }).then(function(v) { return v != null ? v : '1'; }),
 			// index 12: tunnel apps list for first-paint (routing section).
 			L.resolveDefault(fs.exec('/usr/bin/amnezia-app-ctl', ['list']), { stdout: '[]' }),
 			// index 13: autotunnel worker status for first-paint (routing section).
@@ -124,8 +129,8 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 	},
 
 	render: function(data) {
-		// Parse master flag from index 11; default to enabled.
-		var masterRaw = (data && data[11] && data[11].stdout) || '1';
+		// Parse master flag from index 11 (plain string from uci module); default to enabled.
+		var masterRaw = (data && data[11] != null) ? String(data[11]) : '1';
 		var masterEnabled = masterRaw.trim() !== '0';
 
 		var body = E('div', { 'class': 'cbi-map' }, [

@@ -2,6 +2,7 @@
 # Loads the RU CIDR list into the amnezia_ru4 nft set at boot (after the
 # firewall service has started) and wires a hotplug trigger so the set is
 # repopulated on every fw4/firewall reload.
+# shellcheck disable=SC2034  # USE_PROCD/START/STOP are consumed by /etc/rc.common framework
 START=96
 STOP=9
 

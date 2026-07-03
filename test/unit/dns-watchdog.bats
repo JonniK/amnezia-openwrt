@@ -189,6 +189,23 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   [ "$_set_line" -lt "$_first_unlock" ]
 }
 
+@test "empty resolv.conf.auto: _enter_plain falls back to AMNEZIA_FALLBACK_DNS, tier=plaintext" {
+  # Regression guard: when DHCP provides no nameservers, _resolv_provider_ips
+  # returns nothing.  Without the fallback, dns_dnsmasq_add_plain adds ZERO
+  # servers while dnsmasq is in noresolv+strict-order -> total DNS outage.
+  # Fix: _effective_provider_ips falls back to AMNEZIA_FALLBACK_DNS (8.8.8.8 1.1.1.1).
+  # Set resolv.auto to an empty file so _resolv_provider_ips returns nothing.
+  printf '' > "$BATS_TEST_TMPDIR/resolv.auto"
+  export AMNEZIA_RESOLV_AUTO="$BATS_TEST_TMPDIR/resolv.auto"
+  # Force plaintext path: both encrypted probes fail, N=1.
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_DNS_WD_N=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=fail AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  # Plaintext tier must be committed.
+  grep -q "set amnezia.config.dns_active_tier=plaintext" "$STUB_LOG"
+  # Fallback resolver 8.8.8.8 must be added (not the empty resolv.auto).
+  grep -q "add_list dhcp.@dnsmasq\[0\].server=8.8.8.8" "$STUB_LOG"
+}
+
 @test "disabled watchdog: dot_enabled=0 breaks loop immediately, never enters plaintext" {
   # Regression guard for tier-resurrection race: when cmd_disable signals the
   # watchdog (via procd stop), a late tick already past the signal could run

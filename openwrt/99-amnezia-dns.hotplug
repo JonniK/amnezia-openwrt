@@ -1,6 +1,6 @@
 #!/bin/sh
-# Re-assert the DoT ip rule + refresh provider IPs on firewall reload
-# (proven trigger; sidesteps awg ifup/ifupdate boot race).
+# Re-assert the DoT ip rule after fw4 flushes it on firewall reload.
+# Only re-inserts the pref-30900 rule — does NOT restart dnsmasq/stubby/doh.
 [ "$ACTION" = reload ] || exit 0
 [ "$(uci -q get amnezia.config.dot_enabled)" = 1 ] || exit 0
-/usr/bin/amnezia-dns-ctl apply >/dev/null 2>&1 &
+/usr/bin/amnezia-dns-ctl assert-rule >/dev/null 2>&1 &

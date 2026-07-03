@@ -2,6 +2,7 @@
 	"luci-app-amnezia": {
 		"description": "AmneziaWG multi-tunnel failover controls, RU IP list refresh, zapret DPI bypass, and tunnel/allowlist management",
 		"read": {
+			"uci": [ "amnezia" ],
 			"file": {
 				"/etc/amnezia/ru-update.json":          [ "read" ],
 				"/etc/amnezia/blockcheck.json":         [ "read" ],

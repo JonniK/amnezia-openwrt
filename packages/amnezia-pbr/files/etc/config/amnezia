@@ -9,14 +9,17 @@
 
 config amnezia 'config'
 	# routing_mode controls whether AmneziaWG is the default route or
-	# only used for an explicit must-tunnel allow-list.
-	#   tunnel-default  (current behaviour) LAN -> awg1 by default, with
-	#                   .ru TLDs and RU CIDRs routed direct via WAN.
-	#   direct-default  (Plan B, not yet wired) LAN -> WAN direct by default
-	#                   with zapret DPI desync, must-tunnel domains -> awg1.
-	# Switching modes will eventually be a one-click operation in LuCI; for
-	# now this scaffold lets consumers (status wrappers, future Plan B
-	# include-swap logic) read intent without parsing /etc/pbr.d/ file names.
+	# only used for an explicit must-tunnel allow-list. Both modes are
+	# fully implemented and switchable at runtime.
+	#   tunnel-default  (default) LAN -> tunnel by default; .ru TLDs and
+	#                   RU CIDRs route direct via WAN. Force-tunnel list
+	#                   is dormant in this mode.
+	#   direct-default  LAN -> WAN direct by default; only addresses in
+	#                   amnezia_force4 (allowlist) and sticky addresses go
+	#                   through the tunnel. Useful when most traffic works
+	#                   fine on direct + zapret.
+	# Switch via: amnezia-failover-ctl set-routing-mode tunnel-default|direct-default
+	# or via the Routing Mode selector in LuCI -> Network -> Amnezia.
 	option routing_mode 'tunnel-default'
 
 	# Stamp the install so `uci show amnezia` doubles as a quick "what's
@@ -24,6 +27,7 @@ config amnezia 'config'
 	# preserved across re-runs only if user has not overridden routing_mode.
 	option installed_version 'main'
 	option installed_ts ''
+	# option master_enabled '1'    # Master kill-switch: 0 = fail-open (all VPN + DoT off, LAN -> WAN direct). Default 1.
 	option dot_enabled '0'
 	option dns_provider 'quad9'
 	option dot_resolver ''
