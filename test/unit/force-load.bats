@@ -195,3 +195,47 @@ setup() {
   [ "${_count}" -eq 0 ] || { echo "expected 0 nftset lines for IP-only input, got ${_count}"; false; }
 }
 
+# ---------------------------------------------------------------------------
+# Add-only vs --flush behaviour (the session-kill fix)
+# ---------------------------------------------------------------------------
+
+@test "default invocation does NOT flush the nft set but still adds elements" {
+  # Runtime dnsmasq-resolved IPs must survive a default (hotplug/boot/autotunnel)
+  # force-load invocation — flushing kills established tunneled sessions.
+  printf '1.2.3.4\nexample.com\n' > "$FORCE_DIR/force-tunnel.list"
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # nft add element must be present.
+  grep -q 'nft add element inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "expected nft add element, not found"; cat "$STUB_LOG"; false; }
+  # nft flush set must NOT appear (add-only default).
+  run grep -q 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG"
+  [ "$status" -ne 0 ] || { echo "flush was called on default invocation (breaks live sessions)"; false; }
+}
+
+@test "--flush invocation flushes the set then adds elements" {
+  # User-initiated refresh (force-update, set-routing-mode, app-ctl remove)
+  # must flush first so removed list entries are evicted from the nft set.
+  printf '5.5.5.5\nexample.org\n' > "$FORCE_DIR/force-tunnel.list"
+  run sh "$SCRIPT" --flush
+  [ "$status" -eq 0 ]
+  # Flush must appear before add.
+  grep -q 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "expected nft flush set, not found"; cat "$STUB_LOG"; false; }
+  grep -q 'nft add element inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "expected nft add element after flush, not found"; cat "$STUB_LOG"; false; }
+}
+
+@test "--flush with save-manual works: flushes and adds the manual content" {
+  # Verify --flush and save-manual compose correctly.
+  run sh "$SCRIPT" --flush save-manual "$(printf '9.9.9.9\nmanual.example')"
+  [ "$status" -eq 0 ]
+  grep -q 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "flush not called with --flush save-manual"; false; }
+  grep -q 'amnezia_force4.*9.9.9.9' "$STUB_LOG" \
+    || { echo "IP from manual content not added"; false; }
+  [ -f "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf" ]
+  grep -q 'manual\.example' "$AMZ_DNSMASQ_CONFDIR/amnezia-force.conf" \
+    || { echo "domain from manual content not in conf"; false; }
+}
+

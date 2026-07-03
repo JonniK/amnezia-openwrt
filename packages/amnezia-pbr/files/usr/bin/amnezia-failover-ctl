@@ -87,7 +87,9 @@ case "$1" in
       exit 1
     fi
     mv "$_cls_tmp" "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
-    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+    # User-initiated routing-mode change: flush the set so stale entries from
+    # the prior mode are evicted before the new classifier and fw4 reload.
+    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush
     # M2: Both conntrack flushes are unconditional after fw4 reload —
     # POOL and STICKY are flushed regardless of reload exit status.
     ( sleep 1 && fw4 reload 2>/dev/null; \
@@ -137,6 +139,15 @@ case "$1" in
     ;;
   force-unpin)
     uci -q delete amnezia.globals.force_pool
+    uci commit amnezia
+    touch "$ST_DIR/immediate"
+    ;;
+  set-failback)
+    case "$2" in
+      sticky|auto) ;;
+      *) amz_log "ctl: set-failback requires sticky or auto"; exit 2 ;;
+    esac
+    uci set amnezia.globals.failback="$2"
     uci commit amnezia
     touch "$ST_DIR/immediate"
     ;;
@@ -208,7 +219,7 @@ case "$1" in
     esac
     ;;
   *)
-    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|restart|master} [args]" >&2
+    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|set-failback|restart|master} [args]" >&2
     exit 1
     ;;
 esac

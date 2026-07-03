@@ -246,7 +246,9 @@ _cmd_remove() {
   uci -q delete "amnezia.${_name}" || true
   uci commit amnezia
   rm -f "$FORCE_DIR/force.d/${_name}.list"
-  ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+  # Pass --flush: the list file was just removed so its IPs must be evicted
+  # from the nft set; user-initiated remove accepts the one-shot resync blip.
+  ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush
 }
 
 # ---------------------------------------------------------------------------
