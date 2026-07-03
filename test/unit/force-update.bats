@@ -49,6 +49,15 @@ setup() {
   grep -q 'amnezia-force-load' "$STUB_LOG"
 }
 
+@test "force-update passes --flush to force-load (list refresh must evict removed entries)" {
+  # force-update is a user/cron-initiated full list refresh; removals from upstream
+  # lists must propagate into the nft set, so force-load must be called with --flush.
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  grep -q 'amnezia-force-load --flush' "$STUB_LOG" \
+    || { echo "force-update did not call force-load --flush"; cat "$STUB_LOG"; false; }
+}
+
 # Regression: real OpenWrt uci show quotes option values ('1', not 1).
 # The old grep+sed extraction kept the quotes so _enabled became "'1'" and the
 # comparison [ "$_enabled" = "1" ] was FALSE — every enabled source was skipped.

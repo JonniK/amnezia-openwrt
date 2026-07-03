@@ -222,6 +222,9 @@ mkdir -p "$FORCE_DIR/force.d"
   printf '{"ts":%s,"sources":{%s}}\n' "$_ts" "$_stamp_entries" \
     > "$FORCE_DIR/force-update.json"
 
-  # Call force-load to merge+apply everything.
-  ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+  # Call force-load to merge+apply everything.  Pass --flush so that entries
+  # removed from upstream lists are actually evicted from the nft set (user
+  # or cron triggered a full list refresh, so a one-shot resync blip is
+  # acceptable; runtime dnsmasq-resolved IPs will be re-warmed on next query).
+  ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush
 )

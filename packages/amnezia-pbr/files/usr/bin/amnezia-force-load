@@ -29,6 +29,22 @@ AMNEZIA_DNSMASQ_INIT="${AMNEZIA_DNSMASQ_INIT:-/etc/init.d/dnsmasq}"
 AMZ_DNSMASQ_CONFDIR="${AMZ_DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
 SET_FORCE4=amnezia_force4
 
+# Parse --flush flag: must appear as the first argument when specified.
+# By default force-load is add-only: runtime dnsmasq-resolved entries (CDN IPs
+# placed into amnezia_force4 by nftset directives when domains are resolved)
+# must survive reloads.  The classifier marks traffic per-packet with no
+# conntrack restore, so flushing the set instantly strips the fwmark from
+# ESTABLISHED flows to those IPs — causing a mid-flow route flip to direct WAN
+# and killing TLS sessions to RU-blocked hosts.  Stale entries are acceptable;
+# the volatile set is cleared on the next fw4 reload or boot (fw4 re-declares
+# it empty from the .nft classifier include).  Pass --flush only for
+# user-initiated list refreshes where removals must take effect.
+_do_flush=0
+if [ "$1" = "--flush" ]; then
+  _do_flush=1
+  shift
+fi
+
 # Capture save-manual arguments before entering the subshell.
 _save_manual=0
 _save_manual_content=""
@@ -148,7 +164,10 @@ fi
   fi
 
   # Load IPs/CIDRs into amnezia_force4 (batch like amnezia-ru-cidr).
-  nft flush set inet fw4 "$SET_FORCE4" 2>/dev/null || true
+  # Flush only when --flush was requested; see comment at top for rationale.
+  if [ "$_do_flush" = 1 ]; then
+    nft flush set inet fw4 "$SET_FORCE4" 2>/dev/null || true
+  fi
   _n=0; _buf=""
   while IFS= read -r _c; do
     [ -n "$_c" ] || continue
