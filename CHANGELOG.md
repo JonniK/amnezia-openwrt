@@ -2,6 +2,13 @@
 
 ## [unreleased]
 
+### Import device vitals logger (amnezia-blackbox) — repo↔router parity
+
+- `openwrt/amnezia-blackbox.sh` added: cron-driven vitals logger (1/min) writing uptime, CPU temp, load, free mem, active-tunnel transfer counters, and dnsleak fail-open state to `/etc/amnezia/blackbox.log` (size-capped at 3000 lines). Active tunnel is read from `/var/run/amnezia-failover.json` (`active_pool` field), falling back to `awg3` when the state file is absent.
+- `install-amnezia-pbr.sh`: installs `/usr/sbin/amnezia-blackbox` and wires `* * * * * /usr/sbin/amnezia-blackbox # amnezia-blackbox` cron entry (idempotent sed-dedup pattern, same as force-warm).
+- `dev/sync-to-packages.sh`: maps `amnezia-blackbox.sh` → `packages/amnezia-pbr/files/usr/sbin/amnezia-blackbox` so the .ipk ships the logger.
+- Tests: shellcheck-phaseF, install-staging, installer-hardening assertions added.
+
 ### Document dnsleak + autotunnel; drop dead pbr-era scripts; refresh CHEATSHEETs and RU docs
 
 - **amnezia-dnsleak-ctl** documented in both READMEs: port-53 DNAT intercept, DoT/DoH block, fail-open watchdog, default-OFF despite init being boot-enabled.

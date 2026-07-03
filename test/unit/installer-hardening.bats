@@ -183,6 +183,21 @@ load '../lib/harness.bash'
 }
 
 # ---------------------------------------------------------------------------
+# amnezia-blackbox: cron entry and dedup tag present in installer source
+# ---------------------------------------------------------------------------
+@test "blackbox: installer source contains per-minute cron line for /usr/sbin/amnezia-blackbox" {
+  F="$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh"
+  grep -q '/usr/sbin/amnezia-blackbox.*# amnezia-blackbox' "$F" \
+    || { echo "FAIL: amnezia-blackbox cron line not found in source"; false; }
+}
+
+@test "blackbox: installer source contains idempotent sed-dedup for # amnezia-blackbox" {
+  F="$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh"
+  grep -q "sed -i.*/# amnezia-blackbox/" "$F" \
+    || { echo "FAIL: sed dedup of amnezia-blackbox not found"; false; }
+}
+
+# ---------------------------------------------------------------------------
 # Fix 4: pbr remnants removed during migrate
 # ---------------------------------------------------------------------------
 @test "Fix4/migrate: pbr remnants removed after pbr package removal" {
