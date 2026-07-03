@@ -254,6 +254,36 @@ setup() {
   [ "$_enc_line" -lt "$_plain_add_line" ]
 }
 
+@test "disable: TEARDOWN=1 skips dot_enabled=0 but still runs teardown (init stop/reboot)" {
+  # Service lifecycle stop (init stop/reboot) must not flip the persistent toggle.
+  # dot_enabled stays 1; but teardown actions (iprule flush, dnsmasq restore, daemon stops) still run.
+  export UCI_GET_amnezia_config_dot_enabled=1
+  run sh -c "AMNEZIA_DNS_TEARDOWN=1 AMNEZIA_DNS_STOPPING=1 AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  # dot_enabled must NOT be persisted as 0
+  run grep -q "set amnezia.config.dot_enabled=0" "$STUB_LOG"; [ "$status" -ne 0 ]
+  # But teardown actions still run: iprule flush, dnsmasq restore, daemon stops
+  grep -q "ip rule del pref 30900" "$STUB_LOG"
+  grep -q "delete dhcp.@dnsmasq\[0\].noresolv" "$STUB_LOG"
+  grep -q "stubby stop" "$STUB_LOG"
+}
+
+@test "disable: plain (no TEARDOWN env) still persists dot_enabled=0 (user-facing disable)" {
+  # User-facing 'amnezia-dns-ctl disable' with no AMNEZIA_DNS_TEARDOWN must
+  # continue to set dot_enabled=0 — existing semantics unchanged.
+  export UCI_GET_amnezia_config_dot_enabled=1
+  run sh -c "AMNEZIA_DNS_STOPPING=1 AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNS_INIT=amnezia-dns sh '$CTL' disable"
+  [ "$status" -eq 0 ]
+  grep -q "set amnezia.config.dot_enabled=0" "$STUB_LOG"
+}
+
+@test "init: stop_service passes AMNEZIA_DNS_TEARDOWN=1 on the disable call (structural)" {
+  # Regression guard: init stop must carry both sentinels so restart/reboot
+  # never silently persists dot_enabled=0.
+  INIT="$HARNESS_DIR/../openwrt/amnezia-dns.init"
+  grep -q "AMNEZIA_DNS_TEARDOWN=1" "$INIT"
+}
+
 @test "_enter_plain: does not mark plaintext tier when dnsmasq reload fails (LOW)" {
   # Gate tier/timestamp commit on reload success.  When dnsmasq --test fails
   # (AMNEZIA_DNSMASQ_FAIL=1 in stub), _enter_plain must NOT set dns_active_tier
