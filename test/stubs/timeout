@@ -1,0 +1,7 @@
+#!/bin/sh
+# timeout stub: ignore the duration argument, execute the remaining command.
+# Tests use injectable $LOGREAD stubs that return finite data immediately,
+# so no real timeout enforcement is needed.
+echo "timeout $*" >> "${STUB_LOG:-/dev/null}"
+shift
+exec "$@"

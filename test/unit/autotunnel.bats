@@ -538,3 +538,267 @@ CURLSTUB
   echo "$output" | grep -qE '"d_speed":[0-9]+'
   echo "$output" | grep -qE '"d_size":[0-9]+'
 }
+
+# ===========================================================================
+# probe-page and watch tests
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Helper: build a per-test curl stub that handles both page-fetch (no -w flag)
+# and probe-fetch (-w flag).  Accepts env vars:
+#   PAGE_HTML_FILE  — path to the HTML fixture to echo for page fetches
+#   CURL_DIRECT_OUT — 4-field string for direct probes (default: throttled)
+#   CURL_TUNNEL_OUT — 4-field string for tunnel probes (default: fast)
+# ---------------------------------------------------------------------------
+_make_pp_curl_stub() {
+  _stub_dir="$1"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+echo "curl $*" >> "${STUB_LOG:-/dev/null}"
+# Distinguish page-fetch (-s --max-time 15 ...) from probe-fetch (-w flag).
+_has_w=0
+for _a in "$@"; do case "$_a" in -w) _has_w=1; break ;; esac; done
+if [ "$_has_w" = "0" ]; then
+  # Page fetch: return HTML fixture if provided.
+  if [ -n "${PAGE_HTML_FILE:-}" ] && [ -f "$PAGE_HTML_FILE" ]; then
+    cat "$PAGE_HTML_FILE"
+  fi
+  exit 0
+fi
+# Probe fetch: check for --interface (tunnel) vs direct.
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "$_has_iface" = "1" ]; then
+  printf '%s' "${CURL_TUNNEL_OUT:-200 0.200 500000 102400}"
+else
+  printf '%s' "${CURL_DIRECT_OUT:-000 0.000 0 0}"
+fi
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+}
+
+# (a) probe-page harvest: 3 probed hosts + 1 forced, IP-literal excluded
+@test "probe-page: harvests 3 hosts, excludes IP-literal, marks force-covered as forced" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+
+  # Force list: covers cdn.forced.com (entry "forced.com" suffix-matches it).
+  mkdir -p "$FORCE_DIR"
+  printf 'forced.com\n' > "$FORCE_DIR/force-tunnel.list"
+
+  # HTML fixture: absolute https, protocol-relative, plain link, IP-literal, forced host.
+  _html_f="$BATS_TEST_TMPDIR/page.html"
+  cat > "$_html_f" <<'HTML'
+<html><head>
+<script src="https://js.example.com/app.js?v=1"></script>
+<link rel="stylesheet" href="https://css.example.com/main.css">
+<img src="//img.example.com/logo.png">
+<script src="//cdn.forced.com/vendor.js"></script>
+<a href="https://192.168.1.1/admin">admin</a>
+<a href="https://other.example.com/page">other</a>
+</head></html>
+HTML
+  export PAGE_HTML_FILE="$_html_f"
+
+  _stub_dir="$BATS_TEST_TMPDIR/pp-stubs-a"
+  _make_pp_curl_stub "$_stub_dir"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe-page "https://js.example.com/app.js"
+  [ "$status" -eq 0 ] || { echo "output: $output"; false; }
+
+  # 1 forced (cdn.forced.com covered by forced.com entry)
+  echo "$output" | grep -q '"status":"forced"' \
+    || { echo "missing forced: $output"; false; }
+  # IP literal 192.168.1.1 must NOT appear in hosts array
+  echo "$output" | grep -qF '"host":"192.168.1.1"' \
+    && { echo "IP literal appeared in output: $output"; false; } || true
+  # At least 3 probed hosts present
+  _probed_count=$(echo "$output" | grep -o '"status":"probed"' | wc -l | tr -d ' ')
+  [ "$_probed_count" -ge 3 ] \
+    || { echo "expected >=3 probed, got $_probed_count: $output"; false; }
+  # JSON has expected top-level fields
+  echo "$output" | grep -q '"page_host":'
+  echo "$output" | grep -q '"total":'
+  echo "$output" | grep -q '"hosts":'
+}
+
+# (b) sample-url selection: asset URL (.js) is passed to curl for that host's probe
+@test "probe-page: asset URL (.js) is used as sample_url for the probe" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  mkdir -p "$FORCE_DIR"
+  : > "$FORCE_DIR/force-tunnel.list"
+
+  _html_f="$BATS_TEST_TMPDIR/page-b.html"
+  cat > "$_html_f" <<'HTML'
+<html><body>
+<a href="https://assets.example.com/plain-page">link</a>
+<script src="https://assets.example.com/bundle.js"></script>
+</body></html>
+HTML
+  export PAGE_HTML_FILE="$_html_f"
+
+  _stub_dir="$BATS_TEST_TMPDIR/pp-stubs-b"
+  _make_pp_curl_stub "$_stub_dir"
+  # Make both direct and tunnel return ok so the test completes cleanly.
+  export CURL_DIRECT_OUT="200 0.200 500000 102400"
+  export CURL_TUNNEL_OUT="200 0.200 500000 102400"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" probe-page "https://page.example.com/"
+  [ "$status" -eq 0 ] || { echo "output: $output"; false; }
+
+  # The .js URL must appear as a curl argument in the stub log
+  grep -q "bundle.js" "$STUB_LOG" \
+    || { echo "bundle.js not passed to curl; stub log: $(cat "$STUB_LOG")"; false; }
+}
+
+# (c) --add-throttled: throttled host gets added (added:1 in JSON, save-manual called)
+@test "probe-page --add-throttled: throttled host is added to force list (added:1)" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  mkdir -p "$FORCE_DIR"
+  : > "$FORCE_DIR/force-tunnel.list"
+
+  _html_f="$BATS_TEST_TMPDIR/page-c.html"
+  cat > "$_html_f" <<'HTML'
+<html><body>
+<script src="https://slow.example.com/app.js"></script>
+</body></html>
+HTML
+  export PAGE_HTML_FILE="$_html_f"
+
+  # page host = slow.example.com: direct 000 → throttled
+  _stub_dir="$BATS_TEST_TMPDIR/pp-stubs-c"
+  _make_pp_curl_stub "$_stub_dir"
+  export CURL_DIRECT_OUT="000 0.000 0 0"
+  export CURL_TUNNEL_OUT="200 0.200 500000 102400"
+  export CURL="$_stub_dir/curl"
+
+  _cap_f="$BATS_TEST_TMPDIR/save-manual-c.txt"
+  _fl_dir="$BATS_TEST_TMPDIR/fl-c"
+  mkdir -p "$_fl_dir"
+  cat > "$_fl_dir/amnezia-force-load" <<FLSTUB
+#!/bin/sh
+echo "amnezia-force-load \$*" >> "\${STUB_LOG:-/dev/null}"
+if [ "\$1" = "save-manual" ]; then printf '%s' "\$2" > "$_cap_f"; fi
+exit 0
+FLSTUB
+  chmod +x "$_fl_dir/amnezia-force-load"
+  export AMNEZIA_FORCE_LOAD="$_fl_dir/amnezia-force-load"
+
+  run sh "$SCRIPT" probe-page "https://slow.example.com/" --add-throttled
+  [ "$status" -eq 0 ] || { echo "output: $output"; false; }
+
+  # At least one host must have added:1
+  echo "$output" | grep -q '"added":1' \
+    || { echo "no added:1 found: $output"; false; }
+  # save-manual must have been called
+  grep -q "save-manual" "$STUB_LOG" \
+    || { echo "save-manual not called; stub log: $(cat "$STUB_LOG")"; false; }
+}
+
+# (d) watch: 127.0.0.1 queries excluded, LAN queries probed
+@test "watch: excludes 127.0.0.1 queries, probes LAN-client queries" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  mkdir -p "$FORCE_DIR"
+  : > "$FORCE_DIR/force-tunnel.list"
+
+  # logread stub: emits queries from LAN IP (192.168.1.5) and from 127.0.0.1.
+  _lr_dir="$BATS_TEST_TMPDIR/lr-d"
+  mkdir -p "$_lr_dir"
+  cat > "$_lr_dir/logread" <<'LRSTUB'
+#!/bin/sh
+echo "logread $*" >> "${STUB_LOG:-/dev/null}"
+# Simulate dnsmasq query log lines.
+printf 'Jun 30 10:00:01 router dnsmasq[123]: query[A] lansite.example.com from 192.168.1.5\n'
+printf 'Jun 30 10:00:02 router dnsmasq[123]: query[A] selfsite.example.com from 127.0.0.1\n'
+printf 'Jun 30 10:00:03 router dnsmasq[123]: query[A] another.example.com from 192.168.1.10\n'
+LRSTUB
+  chmod +x "$_lr_dir/logread"
+  export LOGREAD="$_lr_dir/logread"
+
+  _stub_dir="$BATS_TEST_TMPDIR/pp-stubs-d"
+  _make_pp_curl_stub "$_stub_dir"
+  export CURL_DIRECT_OUT="200 0.200 500000 102400"
+  export CURL_TUNNEL_OUT="200 0.200 500000 102400"
+  export CURL="$_stub_dir/curl"
+
+  run sh "$SCRIPT" watch 10
+  [ "$status" -eq 0 ] || { echo "output: $output"; false; }
+
+  # JSON has window field
+  echo "$output" | grep -q '"window":10'
+  # lansite and another must appear in hosts array (LAN client queries)
+  echo "$output" | grep -q '"lansite.example.com"' \
+    || { echo "lansite not in output: $output"; false; }
+  echo "$output" | grep -q '"another.example.com"' \
+    || { echo "another.example.com not in output: $output"; false; }
+  # selfsite (from 127.0.0.1) must NOT appear
+  echo "$output" | grep -qF '"selfsite.example.com"' \
+    && { echo "selfsite appeared (should be excluded): $output"; false; } || true
+}
+
+# (e) async probe-page: prints {"started":1}, writes state file with running:0
+@test "probe-page --async: prints started:1, state file reaches running:0" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="1.2.3.4"
+  mkdir -p "$FORCE_DIR"
+  : > "$FORCE_DIR/force-tunnel.list"
+
+  _html_f="$BATS_TEST_TMPDIR/page-e.html"
+  printf '<html><body><a href="https://async.example.com/page">x</a></body></html>\n' \
+    > "$_html_f"
+  export PAGE_HTML_FILE="$_html_f"
+
+  _stub_dir="$BATS_TEST_TMPDIR/pp-stubs-e"
+  _make_pp_curl_stub "$_stub_dir"
+  export CURL_DIRECT_OUT="200 0.200 500000 102400"
+  export CURL_TUNNEL_OUT="200 0.200 500000 102400"
+  export CURL="$_stub_dir/curl"
+
+  _pp_state="$BATS_TEST_TMPDIR/probe-page-async.json"
+  export PROBE_PAGE_STATE="$_pp_state"
+  export PROBE_PAGE_LOCK="$BATS_TEST_TMPDIR/probe-page-async.lock"
+
+  run sh "$SCRIPT" probe-page "https://async.example.com/" --async
+  [ "$status" -eq 0 ] || { echo "output: $output"; false; }
+  # Must immediately print {"started":1}
+  echo "$output" | grep -q '"started":1' \
+    || { echo "missing started:1: $output"; false; }
+
+  # Poll until state file shows running:0 (background job completes fast).
+  _tries=0
+  while [ "$_tries" -lt 30 ]; do
+    if [ -f "$_pp_state" ] && grep -q '"running":0' "$_pp_state" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+    _tries=$((_tries + 1))
+  done
+
+  [ -f "$_pp_state" ] || { echo "state file not created"; false; }
+  grep -q '"running":0' "$_pp_state" \
+    || { echo "state file never reached running:0: $(cat "$_pp_state" 2>/dev/null)"; false; }
+  grep -q '"url":' "$_pp_state"
+  grep -q '"hosts":' "$_pp_state"
+}
+
+# (f) invalid url -> exit 2
+@test "probe-page: missing url arg exits 2" {
+  run sh "$SCRIPT" probe-page
+  [ "$status" -eq 2 ]
+}
+
+@test "probe-page: unsupported scheme (ftp://) exits 2" {
+  run sh "$SCRIPT" probe-page "ftp://example.com/"
+  [ "$status" -eq 2 ]
+}
+
+@test "probe-page: bare host with no dot exits 2" {
+  run sh "$SCRIPT" probe-page "localhost"
+  [ "$status" -eq 2 ]
+}

@@ -47,6 +47,14 @@ AUTOTUNNEL_SKIP_HEALTHCHECK="${AUTOTUNNEL_SKIP_HEALTHCHECK:-}"
 _CRON_MARKER="amnezia-autotunnel"
 # dnsmasq confdir snippet filename.
 _AUTOTUNNEL_LOG_CONF="${DNSMASQ_CONFDIR}/amnezia-autotunnel-log.conf"
+# ---------------------------------------------------------------------------
+# probe-page and watch: injectable paths and commands.
+# ---------------------------------------------------------------------------
+PROBE_PAGE_LOCK="${PROBE_PAGE_LOCK:-/var/lock/amnezia-probe-page.lock}"
+PROBE_PAGE_STATE="${PROBE_PAGE_STATE:-/tmp/amnezia-fo/probe-page.json}"
+WATCH_LOCK="${WATCH_LOCK:-/var/lock/amnezia-watch.lock}"
+WATCH_STATE="${WATCH_STATE:-/tmp/amnezia-fo/watch.json}"
+TIMEOUT="${TIMEOUT:-timeout}"
 
 # ---------------------------------------------------------------------------
 # _validate_domain <domain>
@@ -854,6 +862,471 @@ cmd_auto() {
 }
 
 # ---------------------------------------------------------------------------
+# _is_force_covered <host>
+# Returns 0 if <host> is suffix-covered by any force list entry, 1 otherwise.
+# dnsmasq suffix semantics: "example.com" covers "cdn.example.com".
+# ---------------------------------------------------------------------------
+_is_force_covered() {
+  _ifc_h="$1"
+  for _ifc_f in \
+      "$FORCE_DIR/force-tunnel.list" \
+      "$FORCE_DIR"/force.d/*.list; do
+    [ -f "$_ifc_f" ] || continue
+    while IFS= read -r _ifc_line; do
+      _ifc_e="${_ifc_line%%#*}"
+      _ifc_e=$(printf '%s' "$_ifc_e" | tr -d ' \t\r')
+      [ -n "$_ifc_e" ] || continue
+      [ "$_ifc_h" = "$_ifc_e" ] && return 0
+      case "$_ifc_h" in
+        *."$_ifc_e") return 0 ;;
+      esac
+    done < "$_ifc_f"
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _is_ru_host <host>
+# Returns 0 if host belongs to the RU-direct set (.ru TLD or IP in ru4 set).
+# ---------------------------------------------------------------------------
+_is_ru_host() {
+  _irh="$1"
+  case "$_irh" in *.ru) return 0 ;; esac
+  _resolve_domain "$_irh"
+  if [ -n "$_resolved_ip" ]; then
+    _irh_in=$("$NFT" list set inet fw4 amnezia_ru4 2>/dev/null \
+      | grep -F "$_resolved_ip" | head -1 || true)
+    [ -n "$_irh_in" ] && return 0
+  fi
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _pp_add_host <domain>
+# Add domain to force-tunnel.list without a dnsmasq flush (uses pending marker
+# so the coalesced apply handles the directive reload).
+# Sets _pp_add_result: "added", "already-present", "capped", or "error".
+# ---------------------------------------------------------------------------
+_pp_add_host() {
+  _pah_d="$1"
+  _pp_add_result="error"
+  _pah_list="$FORCE_DIR/force-tunnel.list"
+  _pah_cap=$(uci -q get amnezia.config.autotunnel_list_cap 2>/dev/null \
+    || printf '200')
+  # Already-present check.
+  if [ -f "$_pah_list" ]; then
+    while IFS= read -r _pah_l; do
+      _pah_e="${_pah_l%%#*}"
+      _pah_e=$(printf '%s' "$_pah_e" | tr -d ' \t\r')
+      if [ "$_pah_e" = "$_pah_d" ]; then
+        _pp_add_result="already-present"
+        return 0
+      fi
+    done < "$_pah_list"
+  fi
+  # List cap check.
+  _pah_sz=0
+  [ -f "$_pah_list" ] && \
+    _pah_sz=$(grep -c . "$_pah_list" 2>/dev/null || printf '0')
+  if [ "$_pah_sz" -ge "$_pah_cap" ] 2>/dev/null; then
+    _pp_add_result="capped"
+    return 0
+  fi
+  # Build new list content.
+  _pah_new=""
+  if [ -f "$_pah_list" ]; then
+    while IFS= read -r _pah_l; do
+      _pah_e="${_pah_l%%#*}"
+      _pah_e=$(printf '%s' "$_pah_e" | tr -d ' \t\r')
+      [ "$_pah_e" = "$_pah_d" ] && continue
+      _pah_new="${_pah_new}${_pah_l}
+"
+    done < "$_pah_list"
+  fi
+  _pah_new="${_pah_new}${_pah_d}"
+  ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} save-manual "$_pah_new"
+  _inject_ips "$_pah_d"
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  : > "$STATE_DIR/pending"
+  amz_log "autotunnel probe-page: added $_pah_d"
+  _pp_add_result="added"
+}
+
+# ---------------------------------------------------------------------------
+# _pp_json_host <host> <status> <verdict> <d_ms> <t_ms> <d_speed> <t_speed> <added>
+# Emit a single JSON host object (no newline).
+# ---------------------------------------------------------------------------
+_pp_json_host() {
+  printf '{"host":"%s","status":"%s","verdict":"%s","d_ms":%s,"t_ms":%s,"d_speed":%s,"t_speed":%s,"added":%d}' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"
+}
+
+# ---------------------------------------------------------------------------
+# _probe_page_run <url> <page_host> <add_throttled> [state_file]
+# Core implementation for probe-page.  Synchronous (state_file empty): prints
+# final JSON to stdout.  Async (state_file set): writes progress + final JSON
+# to state_file atomically via tmp+mv.
+# ---------------------------------------------------------------------------
+_probe_page_run() {
+  _prun_url="$1"
+  _prun_ph="$2"
+  _prun_add="$3"
+  _prun_sf="${4:-}"
+  _prun_tab=$(printf '\t')
+  _prun_tmpd="/tmp/amnezia-fo"
+  mkdir -p "$_prun_tmpd" 2>/dev/null || true
+  _prun_hf="$_prun_tmpd/pp-html-$$.tmp"
+  _prun_pf="$_prun_tmpd/pp-pairs-$$.tmp"
+  _prun_cf="$_prun_tmpd/pp-cands-$$.tmp"
+
+  # 1. Fetch HTML (capped at 512 KB via head; avoids --max-filesize portability).
+  "$CURL" -s --max-time 15 -L --max-redirs 3 \
+    "$_prun_url" 2>/dev/null | head -c 524288 > "$_prun_hf" || true
+
+  # 2. Extract "host<TAB>sample_url" pairs from HTML.
+  #    Prefers asset extensions (.js/.css/img/font) as the sample URL per host.
+  grep -oE \
+    'https?://[^[:space:]"<>)]+|//[A-Za-z0-9][A-Za-z0-9._-]*/[^[:space:]"<>)]*' \
+    "$_prun_hf" 2>/dev/null | \
+  awk -v tab="	" '
+  {
+    url=$0
+    h=url
+    sub(/^https?:\/\//, "", h)
+    sub(/^\/\//, "", h)
+    if (match(h, /:[0-9]+/)) {
+      h = substr(h,1,RSTART-1) substr(h,RSTART+RLENGTH)
+    }
+    slash=index(h,"/")
+    host=(slash>0) ? substr(h,1,slash-1) : h
+    sub(/[?#].*/, "", host)
+    if (host=="") next
+    is_a=(url ~ /\.(js|css|png|jpg|jpeg|webp|svg|woff2?)([?#].*)?$/)
+    if (!(host in fu)) { fu[host]=url; ord[++n]=host }
+    if (is_a && !(host in au)) { au[host]=url }
+  }
+  END {
+    for(i=1;i<=n;i++){
+      h=ord[i]
+      print h tab (h in au ? au[h] : fu[h])
+    }
+  }' > "$_prun_pf" 2>/dev/null || true
+  rm -f "$_prun_hf" 2>/dev/null || true
+
+  # 3. Candidate list: page_host first, then HTML-derived hosts (page_host excluded
+  #    from the HTML-derived list — it was already added first).
+  printf '%s\t%s\n' "$_prun_ph" "https://${_prun_ph}/" > "$_prun_cf"
+  if [ -f "$_prun_pf" ]; then
+    while IFS="$_prun_tab" read -r _pc_h _pc_u; do
+      [ -n "$_pc_h" ] || continue
+      [ "$_pc_h" = "$_prun_ph" ] && continue
+      printf '%s\t%s\n' "$_pc_h" "$_pc_u"
+    done < "$_prun_pf" >> "$_prun_cf"
+  fi
+  rm -f "$_prun_pf" 2>/dev/null || true
+
+  # 4. Classify and probe each candidate.
+  _prun_json=""
+  _prun_total=0
+  _prun_probed=0
+
+  while IFS="$_prun_tab" read -r _ph _pu; do
+    [ -n "$_ph" ] || continue
+    # Skip IP-literal hosts (no DNS entry, not a domain name).
+    case "$_ph" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) continue ;; esac
+    # Force-covered → report status, skip probe.
+    if _is_force_covered "$_ph"; then
+      _pe=$(_pp_json_host "$_ph" "forced" "" "0" "0" "0" "0" "0")
+      [ -n "$_prun_json" ] && _prun_json="${_prun_json},"
+      _prun_json="${_prun_json}${_pe}"
+      _prun_total=$((_prun_total + 1))
+      if [ -n "$_prun_sf" ]; then
+        printf \
+          '{"url":"%s","page_host":"%s","running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+          "$_prun_url" "$_prun_ph" \
+          "$_prun_total" "$_prun_total" "$_prun_json" \
+          > "${_prun_sf}.tmp" \
+          && mv "${_prun_sf}.tmp" "$_prun_sf" 2>/dev/null || true
+      fi
+      continue
+    fi
+    # RU direct → report status, skip probe.
+    if _is_ru_host "$_ph"; then
+      _pe=$(_pp_json_host "$_ph" "ru" "" "0" "0" "0" "0" "0")
+      [ -n "$_prun_json" ] && _prun_json="${_prun_json},"
+      _prun_json="${_prun_json}${_pe}"
+      _prun_total=$((_prun_total + 1))
+      if [ -n "$_prun_sf" ]; then
+        printf \
+          '{"url":"%s","page_host":"%s","running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+          "$_prun_url" "$_prun_ph" \
+          "$_prun_total" "$_prun_total" "$_prun_json" \
+          > "${_prun_sf}.tmp" \
+          && mv "${_prun_sf}.tmp" "$_prun_sf" 2>/dev/null || true
+      fi
+      continue
+    fi
+    # Cap at 20 probed hosts.
+    if [ "$_prun_probed" -ge 20 ]; then
+      amz_log "autotunnel probe-page: cap (20) reached, skipping $_ph"
+      continue
+    fi
+    # Probe via _do_probe (verdict v2: stall + throughput rules).
+    _do_probe "$_ph" "$_pu"
+    _pv="$_verdict"
+    _pdm="$_d_ms"; _ptm="$_t_ms"
+    _pds="${_d_speed:-0}"; _pts="${_t_speed:-0}"
+    _prun_probed=$((_prun_probed + 1))
+    _pst="probed"
+    [ "$_pv" = "unresolved" ] && _pst="unresolved"
+    # Add to force list if throttled and --add-throttled was requested.
+    _padded=0
+    if [ "$_prun_add" = "1" ] && [ "$_pv" = "throttled" ]; then
+      _pp_add_host "$_ph"
+      [ "$_pp_add_result" = "added" ] && _padded=1
+    fi
+    _pe=$(_pp_json_host "$_ph" "$_pst" "$_pv" \
+      "$_pdm" "$_ptm" "$_pds" "$_pts" "$_padded")
+    [ -n "$_prun_json" ] && _prun_json="${_prun_json},"
+    _prun_json="${_prun_json}${_pe}"
+    _prun_total=$((_prun_total + 1))
+    if [ -n "$_prun_sf" ]; then
+      printf \
+        '{"url":"%s","page_host":"%s","running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+        "$_prun_url" "$_prun_ph" \
+        "$_prun_total" "$_prun_total" "$_prun_json" \
+        > "${_prun_sf}.tmp" \
+        && mv "${_prun_sf}.tmp" "$_prun_sf" 2>/dev/null || true
+    fi
+  done < "$_prun_cf"
+  rm -f "$_prun_cf" 2>/dev/null || true
+
+  # 5. Final JSON.
+  if [ -n "$_prun_sf" ]; then
+    printf \
+      '{"url":"%s","page_host":"%s","running":0,"done":%d,"total":%d,"hosts":[%s]}\n' \
+      "$_prun_url" "$_prun_ph" \
+      "$_prun_total" "$_prun_total" "$_prun_json" \
+      > "${_prun_sf}.tmp" \
+      && mv "${_prun_sf}.tmp" "$_prun_sf" 2>/dev/null || true
+  else
+    printf '{"url":"%s","page_host":"%s","total":%d,"hosts":[%s]}\n' \
+      "$_prun_url" "$_prun_ph" "$_prun_total" "$_prun_json"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_probe_page [<url>] [--add-throttled] [--async]
+# ---------------------------------------------------------------------------
+cmd_probe_page() {
+  _ppg_url=""
+  _ppg_add=0
+  _ppg_async=0
+  for _ppg_a in "$@"; do
+    case "$_ppg_a" in
+      --add-throttled) _ppg_add=1 ;;
+      --async)         _ppg_async=1 ;;
+      *)               _ppg_url="$_ppg_a" ;;
+    esac
+  done
+
+  [ -n "$_ppg_url" ] || {
+    printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+      "$0" >&2
+    exit 2
+  }
+
+  # Validate and normalise URL; extract page host.
+  case "$_ppg_url" in
+    https://*)
+      _ppg_ph="${_ppg_url#https://}"
+      _ppg_ph="${_ppg_ph%%/*}"
+      _ppg_fetch="$_ppg_url"
+      ;;
+    http://*)
+      _ppg_ph="${_ppg_url#http://}"
+      _ppg_ph="${_ppg_ph%%/*}"
+      _ppg_fetch="$_ppg_url"
+      ;;
+    *://*)
+      printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+        "$0" >&2
+      exit 2
+      ;;
+    *)
+      # Bare host → treat as https://host/
+      _ppg_ph="${_ppg_url%%/*}"
+      _ppg_fetch="https://${_ppg_url}"
+      _ppg_url="$_ppg_fetch"
+      ;;
+  esac
+
+  # Validate the extracted host (must be a valid domain name).
+  case "$_ppg_ph" in
+    '' | *[!A-Za-z0-9.-]*)
+      printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+        "$0" >&2; exit 2 ;;
+    *.*) ;;
+    *)
+      printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+        "$0" >&2; exit 2 ;;
+  esac
+  case "$_ppg_ph" in
+    [.-]*)
+      printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+        "$0" >&2; exit 2 ;;
+  esac
+  _ppg_last=$(printf '%s' "$_ppg_ph" | tail -c 1)
+  case "$_ppg_last" in
+    [.-])
+      printf 'Usage: %s probe-page <https://url|host> [--add-throttled] [--async]\n' \
+        "$0" >&2; exit 2 ;;
+  esac
+
+  if [ "$_ppg_async" = "1" ]; then
+    mkdir -p /tmp/amnezia-fo 2>/dev/null || true
+    (
+      exec 9>"$PROBE_PAGE_LOCK"
+      if command -v flock >/dev/null 2>&1; then
+        flock -n 9 2>/dev/null || exit 0
+      fi
+      _probe_page_run "$_ppg_fetch" "$_ppg_ph" "$_ppg_add" "$PROBE_PAGE_STATE"
+    ) </dev/null >/dev/null 2>&1 &
+    printf '{"started":1}\n'
+    exit 0
+  fi
+
+  _probe_page_run "$_ppg_fetch" "$_ppg_ph" "$_ppg_add" ""
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# _watch_run <seconds> <add_throttled> [state_file]
+# Core implementation for watch.  Collects dnsmasq DNS queries for <seconds>
+# via $LOGREAD -f, filters, probes, and emits JSON.
+# ---------------------------------------------------------------------------
+_watch_run() {
+  _wr_secs="$1"
+  _wr_add="$2"
+  _wr_sf="${3:-}"
+
+  # Collect DNS query domains: exclude router-self (127.0.0.1), .arpa, .local,
+  # bare labels, and IP-literal "domains".
+  _wr_domains=$("$TIMEOUT" "$_wr_secs" "$LOGREAD" -f 2>/dev/null | \
+    grep -E 'dnsmasq.*query\[A' | \
+    grep -v 'from 127\.' | \
+    sed -n 's/.*query\[A[^]]*\] \([^ ]*\) .*/\1/p' | \
+    grep '\.' | \
+    grep -v -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | \
+    grep -v -E '\.arpa$|\.lan$|\.local$|in-addr\.arpa|ip6\.arpa' | \
+    sort -u | head -30)
+
+  _wr_json=""
+  _wr_total=0
+  _wr_probed=0
+
+  for _wh in $_wr_domains; do
+    # Force-covered?
+    if _is_force_covered "$_wh"; then
+      _we=$(_pp_json_host "$_wh" "forced" "" "0" "0" "0" "0" "0")
+      [ -n "$_wr_json" ] && _wr_json="${_wr_json},"
+      _wr_json="${_wr_json}${_we}"
+      _wr_total=$((_wr_total + 1))
+      if [ -n "$_wr_sf" ]; then
+        printf '{"window":%d,"running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+          "$_wr_secs" "$_wr_total" "$_wr_total" "$_wr_json" \
+          > "${_wr_sf}.tmp" && mv "${_wr_sf}.tmp" "$_wr_sf" 2>/dev/null || true
+      fi
+      continue
+    fi
+    # RU direct?
+    if _is_ru_host "$_wh"; then
+      _we=$(_pp_json_host "$_wh" "ru" "" "0" "0" "0" "0" "0")
+      [ -n "$_wr_json" ] && _wr_json="${_wr_json},"
+      _wr_json="${_wr_json}${_we}"
+      _wr_total=$((_wr_total + 1))
+      if [ -n "$_wr_sf" ]; then
+        printf '{"window":%d,"running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+          "$_wr_secs" "$_wr_total" "$_wr_total" "$_wr_json" \
+          > "${_wr_sf}.tmp" && mv "${_wr_sf}.tmp" "$_wr_sf" 2>/dev/null || true
+      fi
+      continue
+    fi
+    # Cap at 30 probed hosts.
+    if [ "$_wr_probed" -ge 30 ]; then
+      amz_log "autotunnel watch: cap (30) reached, skipping $_wh"
+      continue
+    fi
+    _do_probe "$_wh"
+    _wv="$_verdict"
+    _wdm="$_d_ms"; _wtm="$_t_ms"
+    _wds="${_d_speed:-0}"; _wts="${_t_speed:-0}"
+    _wr_probed=$((_wr_probed + 1))
+    _wst="probed"
+    [ "$_wv" = "unresolved" ] && _wst="unresolved"
+    _wadded=0
+    if [ "$_wr_add" = "1" ] && [ "$_wv" = "throttled" ]; then
+      _pp_add_host "$_wh"
+      [ "$_pp_add_result" = "added" ] && _wadded=1
+    fi
+    _we=$(_pp_json_host "$_wh" "$_wst" "$_wv" \
+      "$_wdm" "$_wtm" "$_wds" "$_wts" "$_wadded")
+    [ -n "$_wr_json" ] && _wr_json="${_wr_json},"
+    _wr_json="${_wr_json}${_we}"
+    _wr_total=$((_wr_total + 1))
+    if [ -n "$_wr_sf" ]; then
+      printf '{"window":%d,"running":1,"done":%d,"total":%d,"hosts":[%s]}\n' \
+        "$_wr_secs" "$_wr_total" "$_wr_total" "$_wr_json" \
+        > "${_wr_sf}.tmp" && mv "${_wr_sf}.tmp" "$_wr_sf" 2>/dev/null || true
+    fi
+  done
+
+  if [ -n "$_wr_sf" ]; then
+    printf '{"window":%d,"running":0,"done":%d,"total":%d,"hosts":[%s]}\n' \
+      "$_wr_secs" "$_wr_total" "$_wr_total" "$_wr_json" \
+      > "${_wr_sf}.tmp" && mv "${_wr_sf}.tmp" "$_wr_sf" 2>/dev/null || true
+  else
+    printf '{"window":%d,"total":%d,"hosts":[%s]}\n' \
+      "$_wr_secs" "$_wr_total" "$_wr_json"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# cmd_watch [<seconds>] [--add-throttled] [--async]
+# ---------------------------------------------------------------------------
+cmd_watch() {
+  _cw_secs=30
+  _cw_add=0
+  _cw_async=0
+  for _cw_a in "$@"; do
+    case "$_cw_a" in
+      --add-throttled) _cw_add=1 ;;
+      --async)         _cw_async=1 ;;
+      [0-9]*)          _cw_secs="$_cw_a" ;;
+    esac
+  done
+  # Clamp 10..120.
+  _cw_secs=$(awk -v s="$_cw_secs" \
+    'BEGIN{if(s+0<10)s=10;if(s+0>120)s=120;print s+0}')
+
+  if [ "$_cw_async" = "1" ]; then
+    mkdir -p /tmp/amnezia-fo 2>/dev/null || true
+    (
+      exec 9>"$WATCH_LOCK"
+      if command -v flock >/dev/null 2>&1; then
+        flock -n 9 2>/dev/null || exit 0
+      fi
+      _watch_run "$_cw_secs" "$_cw_add" "$WATCH_STATE"
+    ) </dev/null >/dev/null 2>&1 &
+    printf '{"started":1}\n'
+    exit 0
+  fi
+
+  _watch_run "$_cw_secs" "$_cw_add" ""
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 case "${1:-}" in
@@ -881,8 +1354,16 @@ case "${1:-}" in
   status)
     cmd_status
     ;;
+  probe-page)
+    shift
+    cmd_probe_page "$@"
+    ;;
+  watch)
+    shift
+    cmd_watch "$@"
+    ;;
   *)
-    printf 'Usage: %s {probe <domain>|add <domain> [--force]|remove <domain>|auto|enable|disable|status}\n' "$0" >&2
+    printf 'Usage: %s {probe <domain>|add <domain> [--force]|remove <domain>|auto|enable|disable|status|probe-page <url> [--add-throttled] [--async]|watch [seconds] [--add-throttled] [--async]}\n' "$0" >&2
     exit 1
     ;;
 esac
