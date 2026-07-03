@@ -10,6 +10,7 @@ jobs:
   integration:
     name: Tier-2 real-kernel bats (ubuntu)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout

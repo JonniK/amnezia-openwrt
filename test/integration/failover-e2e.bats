@@ -80,6 +80,10 @@ export STUB_LOG="${st_d}/stub.log"
 : > "\$STUB_LOG"
 
 # Source the real daemon (defines all functions; does not start run_loop).
+# dash's '.' does NOT pass extra args to the sourced file (unlike bash), so
+# the daemon's '[ "$1" = "--source-only" ] && return 0' guard would see an
+# empty $1 and fall through to run_loop, hanging forever.  'set --' fixes it.
+set -- --source-only
 . "${repo}/openwrt/amnezia-failover" --source-only
 
 # Scenario: awg1 (metric 1, lowest = highest priority) is DOWN; awg2 is healthy.
@@ -102,7 +106,7 @@ ip route show table 101 | grep -q "default dev awg2"
 SCRIPT
   chmod +x "$inner"
 
-  sudo ip netns exec "$_NS" sh "$inner"
+  timeout 120 sudo ip netns exec "$_NS" sh "$inner"
 }
 
 @test "daemon clears exit-IP cache on tunnel up transition (_on_tunnel_up)" {
@@ -112,6 +116,8 @@ SCRIPT
   export ST_DIR="$BATS_TEST_TMPDIR/amnezia-fo-cache"
   mkdir -p "$ST_DIR"
 
+  # Same dash portability guard as the netns test — harmless under bash.
+  set -- --source-only
   . "$HARNESS_DIR/../openwrt/amnezia-failover" --source-only
 
   # Seed stale exit-IP cache for awg1.
