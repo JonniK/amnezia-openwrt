@@ -1,0 +1,21 @@
+# RU DNS bypass extra domains (user-editable).
+# When DoT is enabled, dnsmasq forwards queries for these domains — and for all
+# .ru / .su / .xn--p1ai (.рф) TLDs (built in) — directly to Yandex DNS
+# (77.88.8.8 / 77.88.8.1), bypassing stubby/DoH.
+#
+# Rationale: stubby egresses via the VPN tunnel, so without this bypass the DoT
+# provider sees a foreign exit IP and returns far CDN nodes for RU sites
+# (confirmed live: static.avito.ru resolved to a 12×-slower node).
+#
+# Add only non-RU-TLD RU services here — ru/su/xn--p1ai are already built in.
+# One domain per line. Lines starting with # are comments. Leading dots are
+# stripped automatically. This file is seeded on first install only; an existing
+# device keeps its own runtime copy unchanged on upgrade.
+avito.st
+vk.com
+userapi.com
+mycdn.me
+yastatic.net
+yandex.net
+ya.ru
+wbstatic.net

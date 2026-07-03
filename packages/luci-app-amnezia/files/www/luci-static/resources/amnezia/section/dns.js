@@ -42,14 +42,28 @@ function dnsRowMarkup(view, st) {
 		? (_('on · tier: ') + (st.active_tier || '—') + ' · ' + (st.healthy ? _('answering ✓') : _('NOT answering ✗')))
 		: _('off (plaintext provider DNS)');
 
+	var ruBypassLabel = enabled ? E('label', {
+		'style': 'margin-left:8px;font-size:12px;cursor:pointer;',
+		'title': _('Resolve .ru/.su/.рф and RU CDNs via Yandex DNS directly — fixes CDN locality for RU sites')
+	}, [
+		E('input', {
+			'type': 'checkbox',
+			'style': 'margin-right:4px;',
+			'checked': st.ru_bypass ? 'checked' : null,
+			'change': view ? ui.createHandlerFn(view, 'handleRuBypass') : function(){ return Promise.resolve(); }
+		}),
+		_('RU DNS bypass')
+	]) : null;
+
 	var children = [
 		E('div', { 'style': 'display:flex;align-items:center;flex-wrap:wrap;gap:4px;' }, [
 			E('strong', { 'style': 'margin-right:6px;' }, _('Encrypted DNS (DoT)')),
 			toggleBtn,
 			E('span', { 'style': 'margin-left:6px;' }, _('Provider:')), sel,
 			testBtn,
-			E('span', { 'style': 'margin-left:8px;color:#666;font-size:12px;' }, statusTxt)
-		])
+			E('span', { 'style': 'margin-left:8px;color:#666;font-size:12px;' }, statusTxt),
+			ruBypassLabel
+		].filter(function(x){ return x != null; }))
 	];
 	if (st.active_tier === 'plaintext')
 		children.push(E('div', { 'class': 'alert-message warning', 'style': 'margin-top:6px;' },
@@ -99,6 +113,19 @@ return baseclass.extend({
 				return L.resolveDefault(refreshDnsStatus(self), null);
 			}).catch(function(err) {
 				ui.addNotification(null, E('p', {}, _('Provider change failed: ') + err), 'danger');
+			});
+		},
+
+		handleRuBypass: function(ev) {
+			var self = this;
+			var on = ev && ev.target && ev.target.checked ? 'on' : 'off';
+			return fs.exec('/usr/bin/amnezia-dns-ctl', ['ru-bypass', on]).then(function(res) {
+				ui.addNotification(null, E('pre', { 'style': 'white-space:pre-wrap;margin:0;' },
+					(res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')),
+					res.code === 0 ? 'info' : 'warning');
+				return L.resolveDefault(refreshDnsStatus(self), null);
+			}).catch(function(err) {
+				ui.addNotification(null, E('p', {}, _('RU DNS bypass change failed: ') + err), 'danger');
 			});
 		},
 
