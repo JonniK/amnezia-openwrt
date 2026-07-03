@@ -347,6 +347,29 @@ _amz_wire_force_engine() {
     >> "$_afe_cron" 2>/dev/null || true
   amz_log "amnezia-force-warm cron installed (every 2 min)"
 
+  # Install the vitals logger to /usr/sbin/amnezia-blackbox.
+  if [ ! -f /usr/sbin/amnezia-blackbox ]; then
+    _bb_src=$(resolve_dep \
+      /usr/sbin/amnezia-blackbox \
+      amnezia-blackbox.sh \
+      amnezia-blackbox.sh) || true
+    if [ -n "$_bb_src" ] && [ "$_bb_src" != /usr/sbin/amnezia-blackbox ]; then
+      cp "$_bb_src" /usr/sbin/amnezia-blackbox 2>/dev/null || true
+      chmod 0755 /usr/sbin/amnezia-blackbox 2>/dev/null || true
+      amz_log "amnezia-blackbox installed to /usr/sbin"
+    else
+      amz_log "WARN: amnezia-blackbox.sh not found; vitals logger will be missing"
+    fi
+  else
+    amz_log "amnezia-blackbox already present (/usr/sbin)"
+  fi
+
+  # Install the per-minute blackbox cron entry (dedup, idempotent).
+  sed -i '/# amnezia-blackbox/d' "$_afe_cron" 2>/dev/null || true
+  echo '* * * * * /usr/sbin/amnezia-blackbox >/dev/null 2>&1 # amnezia-blackbox' \
+    >> "$_afe_cron" 2>/dev/null || true
+  amz_log "amnezia-blackbox cron installed (every minute)"
+
   /etc/init.d/cron enable 2>/dev/null || true
   /etc/init.d/cron reload 2>/dev/null || true
 
