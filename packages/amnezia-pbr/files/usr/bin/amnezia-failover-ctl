@@ -142,6 +142,15 @@ case "$1" in
     uci commit amnezia
     touch "$ST_DIR/immediate"
     ;;
+  set-failback)
+    case "$2" in
+      sticky|auto) ;;
+      *) amz_log "ctl: set-failback requires sticky or auto"; exit 2 ;;
+    esac
+    uci set amnezia.globals.failback="$2"
+    uci commit amnezia
+    touch "$ST_DIR/immediate"
+    ;;
   restart)
     _ctl_tun_exists "$2" || { amz_log "ctl: restart unknown tunnel '$2'"; exit 1; }
     ifdown "$2"; sleep 1; ifup "$2"
@@ -210,7 +219,7 @@ case "$1" in
     esac
     ;;
   *)
-    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|restart|master} [args]" >&2
+    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|set-failback|restart|master} [args]" >&2
     exit 1
     ;;
 esac

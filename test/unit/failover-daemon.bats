@@ -243,6 +243,59 @@ setup() {
   [ "$(cat "$CURL_CALLCOUNT")" = 1 ]
 }
 
+# ── Sticky failback ───────────────────────────────────────────────────────────
+
+@test "failback=sticky + current pool healthy: stays on _PREV_POOL despite better-metric recovery" {
+  # awg2 (metric 2) is the current pool; awg1 (metric 1) just recovered.
+  # With failback=sticky the daemon stays on awg2 — no session-killing auto-return.
+  export UCI_GET_amnezia_globals_failback=sticky
+  FORCE_POOL="" MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1 awg2" _PREV_POOL=awg2 run _best_pool
+  [ "$output" = awg2 ]
+}
+
+@test "failback=auto + current pool healthy: returns to best-metric recovered tunnel (today behaviour)" {
+  # Same topology but failback=auto (default) → lowest-metric healthy awg1 wins.
+  export UCI_GET_amnezia_globals_failback=auto
+  FORCE_POOL="" MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1 awg2" _PREV_POOL=awg2 run _best_pool
+  [ "$output" = awg1 ]
+}
+
+@test "failback=sticky + current pool DOWN: picks best healthy (normal failover away)" {
+  # The currently-active pool awg2 failed — must switch to best healthy awg1.
+  export UCI_GET_amnezia_globals_failback=sticky
+  FORCE_POOL="" MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1" _PREV_POOL=awg2 run _best_pool
+  [ "$output" = awg1 ]
+}
+
+@test "failback=sticky + survivor stays after original pool recovers" {
+  # After awg2 failed, daemon moved to awg1 (_PREV_POOL=awg1). Now awg2 recovers.
+  # With failback=sticky stay on awg1 (the survivor) — don't switch back to awg2.
+  export UCI_GET_amnezia_globals_failback=sticky
+  FORCE_POOL="" MEMBERS="awg2:1:1 awg1:2:1" HEALTHY="awg2 awg1" _PREV_POOL=awg1 run _best_pool
+  [ "$output" = awg1 ]
+}
+
+@test "failback=sticky + no prior pool: picks best healthy by metric (fresh start)" {
+  # _PREV_POOL is empty on daemon startup — sticky guard skips, metric wins.
+  export UCI_GET_amnezia_globals_failback=sticky
+  FORCE_POOL="" MEMBERS="awg1:1:1 awg2:2:1" HEALTHY="awg1 awg2" _PREV_POOL="" run _best_pool
+  [ "$output" = awg1 ]
+}
+
+@test "force_pool pin overrides sticky failback" {
+  # force_pool is checked first; failback setting is irrelevant.
+  export UCI_GET_amnezia_globals_failback=sticky
+  FORCE_POOL=awg3 MEMBERS="awg1:1:1 awg2:2:1 awg3:3:1" HEALTHY="awg1 awg2 awg3" _PREV_POOL=awg2 run _best_pool
+  [ "$output" = awg3 ]
+}
+
+@test "write_state emits failback field" {
+  MODE=failover MEMBERS="awg1:1:1" HEALTHY="awg1" FORCE_POOL=""
+  STATE_FILE="$BATS_TEST_TMPDIR/fb.json"
+  write_state awg1 awg1
+  grep -q '"failback"' "$BATS_TEST_TMPDIR/fb.json"
+}
+
 # ── Part D: balance-mode degrade when kernel lacks `ip nexthop` ────────────────
 
 @test "balance mode + no nexthop support: degrades to failover lowest-metric (not first tunnel)" {

@@ -84,6 +84,32 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
+# set-failback
+# ---------------------------------------------------------------------------
+
+@test "set-failback sticky: writes uci and touches immediate trigger (no daemon restart)" {
+  run sh "$CTL" set-failback sticky
+  [ "$status" -eq 0 ]
+  grep -q 'set amnezia.globals.failback=sticky' "$STUB_LOG"
+  grep -q 'commit amnezia' "$STUB_LOG"
+  [ -f "$ST_DIR/immediate" ]
+  ! grep -q 'amnezia-failover restart' "$STUB_LOG"
+}
+
+@test "set-failback auto: writes uci and touches immediate trigger" {
+  run sh "$CTL" set-failback auto
+  [ "$status" -eq 0 ]
+  grep -q 'set amnezia.globals.failback=auto' "$STUB_LOG"
+  grep -q 'commit amnezia' "$STUB_LOG"
+  [ -f "$ST_DIR/immediate" ]
+}
+
+@test "set-failback bogus: exits 2" {
+  run sh "$CTL" set-failback bogus
+  [ "$status" -eq 2 ]
+}
+
+# ---------------------------------------------------------------------------
 # restart
 # ---------------------------------------------------------------------------
 
