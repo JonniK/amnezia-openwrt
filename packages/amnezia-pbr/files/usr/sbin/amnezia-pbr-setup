@@ -351,6 +351,25 @@ _amz_wire_force_engine() {
     amz_log "ru-dns-bypass.list already present"
   fi
 
+  # Seed /etc/amnezia/autotunnel-exclude.list (idempotent — never clobbers user edits on upgrade).
+  if [ ! -f "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" ]; then
+    _atel=$(resolve_dep \
+      "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" \
+      autotunnel-exclude.list \
+      autotunnel-exclude.list) || true
+    if [ -n "$_atel" ] && \
+       [ "$_atel" != "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" ]; then
+      cp "$_atel" "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" 2>/dev/null || true
+    else
+      touch "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/autotunnel-exclude.list" 2>/dev/null || true
+    fi
+    amz_log "autotunnel-exclude.list seeded"
+  else
+    amz_log "autotunnel-exclude.list already present"
+  fi
+
   # Install the daily amnezia-force-update cron entry (dedup, idempotent).
   _afe_cron=/etc/crontabs/root
   mkdir -p /etc/crontabs 2>/dev/null || true

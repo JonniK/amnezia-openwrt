@@ -55,6 +55,36 @@ PROBE_PAGE_STATE="${PROBE_PAGE_STATE:-/tmp/amnezia-fo/probe-page.json}"
 WATCH_LOCK="${WATCH_LOCK:-/var/lock/amnezia-watch.lock}"
 WATCH_STATE="${WATCH_STATE:-/tmp/amnezia-fo/watch.json}"
 TIMEOUT="${TIMEOUT:-timeout}"
+# Exclusion list: domains the auto-worker must never auto-add (override for tests).
+EXCLUDE_LIST="${AMNEZIA_AT_EXCLUDE:-/etc/amnezia/autotunnel-exclude.list}"
+
+# ---------------------------------------------------------------------------
+# _is_excluded <domain>
+# Returns 0 if domain matches any suffix entry in $EXCLUDE_LIST, 1 otherwise.
+# Suffix semantics: entry "apple.com" matches "apple.com" and "*.apple.com"
+# at a label boundary — "notapple.com" does NOT match.
+# Case-insensitive.  Missing file -> nothing excluded (returns 1).
+# ---------------------------------------------------------------------------
+_is_excluded() {
+  _ie_d=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  [ -f "$EXCLUDE_LIST" ] || return 1
+  while IFS= read -r _ie_line; do
+    # Strip inline comments.
+    _ie_e="${_ie_line%%#*}"
+    # Strip whitespace and leading dot.
+    _ie_e=$(printf '%s' "$_ie_e" | tr -d ' \t\r')
+    _ie_e="${_ie_e#.}"
+    [ -n "$_ie_e" ] || continue
+    _ie_e=$(printf '%s' "$_ie_e" | tr '[:upper:]' '[:lower:]')
+    # Exact match.
+    [ "$_ie_d" = "$_ie_e" ] && return 0
+    # Suffix match at label boundary.
+    case "$_ie_d" in
+      *."$_ie_e") return 0 ;;
+    esac
+  done < "$EXCLUDE_LIST"
+  return 1
+}
 
 # ---------------------------------------------------------------------------
 # _validate_domain <domain>
@@ -332,6 +362,12 @@ cmd_add() {
   _domain="$1"
   _force="${2:-}"
   _validate_domain "$_domain"
+
+  # Exclusion list gate: refuse auto-add unless --force is given.
+  if [ "$_force" != "--force" ] && _is_excluded "$_domain"; then
+    printf 'excluded by %s (use --force to override)\n' "$EXCLUDE_LIST" >&2
+    return 1
+  fi
 
   # Master gate.
   if command -v amz_master_enabled >/dev/null 2>&1; then
@@ -633,11 +669,22 @@ cmd_status() {
   _pending=0
   [ -f "$STATE_DIR/pending" ] && _pending=1
 
-  printf '{"enabled":%s,"routing_mode":"%s","loadavg":%s,"added_count":%d,"added":[%s],"verdict_count":%d,"hour_count":%d,"apply_interval":%s,"pending":%d}\n' \
+  # Count non-comment non-empty lines in the exclude list.
+  _exclude_count=0
+  if [ -f "$EXCLUDE_LIST" ]; then
+    while IFS= read -r _excl; do
+      _excl_e="${_excl%%#*}"
+      _excl_e=$(printf '%s' "$_excl_e" | tr -d ' \t\r')
+      _excl_e="${_excl_e#.}"
+      [ -n "$_excl_e" ] && _exclude_count=$((_exclude_count + 1))
+    done < "$EXCLUDE_LIST"
+  fi
+
+  printf '{"enabled":%s,"routing_mode":"%s","loadavg":%s,"added_count":%d,"added":[%s],"verdict_count":%d,"hour_count":%d,"apply_interval":%s,"pending":%d,"exclude_count":%d}\n' \
     "$_enabled" "$_rmode" "$_loadavg" \
     "$_added_count" "$_added_list" \
     "$_verdict_count" "$_hour_count" \
-    "$_apply_interval" "$_pending"
+    "$_apply_interval" "$_pending" "$_exclude_count"
   exit 0
 }
 
@@ -736,6 +783,12 @@ cmd_auto() {
     case "$_candidate" in
       *.ru) continue ;;
     esac
+
+    # Skip excluded domains (auto-adds only; --force not available in auto path).
+    if _is_excluded "$_candidate"; then
+      amz_log "autotunnel auto: skip $_candidate (excluded by $EXCLUDE_LIST)"
+      continue
+    fi
 
     # Skip if in ru4 nft set (RU IP range).
     _ru_skip=0
@@ -913,6 +966,12 @@ _pp_add_host() {
   _pah_list="$FORCE_DIR/force-tunnel.list"
   _pah_cap=$(uci -q get amnezia.config.autotunnel_list_cap 2>/dev/null \
     || printf '200')
+  # Exclusion list gate (auto-add path — no --force available here).
+  if _is_excluded "$_pah_d"; then
+    amz_log "autotunnel probe-page: skip $_pah_d (excluded by $EXCLUDE_LIST)"
+    _pp_add_result="excluded"
+    return 0
+  fi
   # Already-present check.
   if [ -f "$_pah_list" ]; then
     while IFS= read -r _pah_l; do
