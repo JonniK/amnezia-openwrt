@@ -1,0 +1,28 @@
+# autotunnel-exclude.list — domains the auto-learning worker must NEVER auto-add.
+#
+# Suffix semantics: an entry of "apple.com" excludes apple.com itself AND every
+# subdomain (api.apple.com, amp-api-edge.apps.apple.com, etc.) at a label
+# boundary — "notapple.com" is NOT excluded.  Leading dots are stripped.
+#
+# This list gates AUTOMATIC adds only.  Manual `amnezia-autotunnel add <d> --force`
+# still works and bypasses this exclusion.
+#
+# App Store incident (2026-07): autotunnel auto-added api.smoot.apple.com,
+# api2.smoot.apple.com, and amp-api-edge.apps.apple.com on flappy "throttled"
+# verdicts.  Apple LBs do not answer through the tunnel at all (tunnel-down),
+# so force-tunneling them broke App Store search entirely.  Removing them did
+# not stick — the worker re-added them within a minute from cached verdicts.
+#
+# Rule of thumb: add LB / CDN / infrastructure apex domains here whenever
+# force-tunneling any subdomain would cause tunnel-down (site unreachable through
+# the tunnel) rather than throttled (site reachable but slow).
+
+# Apple — App Store, iCloud, software update, Akamai LB aliases
+apple.com
+mzstatic.com
+aaplimg.com
+cdn-apple.com
+apple-dns.net
+icloud.com
+# Akamai — generic LB CNAMEs; force-tunneling a LB apex is always wrong
+akadns.net

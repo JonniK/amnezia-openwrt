@@ -138,16 +138,18 @@ cp "$SRC/sysctl.d/99-amnezia-resilience.conf" \
    "$PBR_PKG/etc/sysctl.d/99-amnezia-resilience.conf"
 
 # Reference data and config.
-cp "$SRC/seed-must-tunnel.list"    "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
-cp "$SRC/seed-sticky-domains.list" "$PBR_PKG/etc/amnezia/seed-sticky-domains.list"
-cp "$SRC/force-tunnel.list"        "$PBR_PKG/etc/amnezia/force-tunnel.list"
-cp "$SRC/ru-dns-bypass.list"       "$PBR_PKG/etc/amnezia/ru-dns-bypass.list"
-cp "$SRC/config/amnezia"           "$PBR_PKG/etc/config/amnezia"
+cp "$SRC/seed-must-tunnel.list"        "$PBR_PKG/etc/amnezia/seed-must-tunnel.list"
+cp "$SRC/seed-sticky-domains.list"     "$PBR_PKG/etc/amnezia/seed-sticky-domains.list"
+cp "$SRC/force-tunnel.list"            "$PBR_PKG/etc/amnezia/force-tunnel.list"
+cp "$SRC/ru-dns-bypass.list"           "$PBR_PKG/etc/amnezia/ru-dns-bypass.list"
+cp "$SRC/autotunnel-exclude.list"      "$PBR_PKG/etc/amnezia/autotunnel-exclude.list"
+cp "$SRC/config/amnezia"               "$PBR_PKG/etc/config/amnezia"
 chmod 0644 \
 	"$PBR_PKG/etc/amnezia/seed-must-tunnel.list" \
 	"$PBR_PKG/etc/amnezia/seed-sticky-domains.list" \
 	"$PBR_PKG/etc/amnezia/force-tunnel.list" \
 	"$PBR_PKG/etc/amnezia/ru-dns-bypass.list" \
+	"$PBR_PKG/etc/amnezia/autotunnel-exclude.list" \
 	"$PBR_PKG/etc/config/amnezia"
 # force.d/ directory is seeded empty (managed at runtime by amnezia-force-update).
 # The .gitkeep keeps the empty dir tracked in git; removed at runtime if needed.
