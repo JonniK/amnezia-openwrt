@@ -1038,9 +1038,21 @@ _probe_page_run() {
   _prun_pf="$_prun_tmpd/pp-pairs-$$.tmp"
   _prun_cf="$_prun_tmpd/pp-cands-$$.tmp"
 
-  # 1. Fetch HTML (capped at 512 KB via head; avoids --max-filesize portability).
-  "$CURL" -s --max-time 15 -L --max-redirs 3 \
-    "$_prun_url" 2>/dev/null | head -c 524288 > "$_prun_hf" || true
+  # 1. Fetch HTML through the active tunnel first (DPI-blocked pages are RST on
+  #    the direct WAN path; tunnel fetch returns HTTP 200 and full HTML).
+  #    Fall back to direct if no tunnel is available or the tunnel fetch yields
+  #    an empty file (tunnel down, etc.).
+  : > "$_prun_hf"
+  _pick_tunnel
+  if [ -n "$_tunnel_if" ]; then
+    "$CURL" -s --max-time 15 -L --max-redirs 3 \
+      --interface "$_tunnel_if" \
+      "$_prun_url" 2>/dev/null | head -c 524288 > "$_prun_hf" || true
+  fi
+  if [ ! -s "$_prun_hf" ]; then
+    "$CURL" -s --max-time 15 -L --max-redirs 3 \
+      "$_prun_url" 2>/dev/null | head -c 524288 > "$_prun_hf" || true
+  fi
 
   # 2. Extract "host<TAB>sample_url" pairs from HTML.
   #    Prefers asset extensions (.js/.css/img/font) as the sample URL per host.
@@ -1060,6 +1072,9 @@ _probe_page_run() {
     host=(slash>0) ? substr(h,1,slash-1) : h
     sub(/[?#].*/, "", host)
     if (host=="") next
+    if (host ~ /[^A-Za-z0-9.-]/) next          # invalid char (e.g. &quot; JSON)
+    if (host !~ /\./) next                      # must be dotted
+    if (host ~ /^[.-]/ || host ~ /[.-]$/) next  # no leading/trailing . or -
     is_a=(url ~ /\.(js|css|png|jpg|jpeg|webp|svg|woff2?)([?#].*)?$/)
     if (!(host in fu)) { fu[host]=url; ord[++n]=host }
     if (is_a && !(host in au)) { au[host]=url }
