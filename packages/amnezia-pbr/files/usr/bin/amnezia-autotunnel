@@ -25,6 +25,10 @@ NSLOOKUP="${NSLOOKUP:-nslookup}"
 NFT="${NFT:-nft}"
 PROBE_MAXTIME="${PROBE_MAXTIME:-8}"
 DNSMASQ_HUP="${DNSMASQ_HUP:-1}"
+# Below this body size (bytes) a direct "ok" root probe is untrustworthy:
+# TSPU throttles by volume, so a small body can't reveal throttling. Triggers
+# the volume-escalation second stage in _do_probe.
+VOLUME_MIN="${VOLUME_MIN:-65536}"
 
 # ---------------------------------------------------------------------------
 # Auto-worker configuration — all paths/commands are overridable for tests.
@@ -241,12 +245,12 @@ _probe_curl() {
 }
 
 # ---------------------------------------------------------------------------
-# _do_probe <domain> [<sample_url>]
+# _do_probe_core <domain> [<sample_url>]
 # Runs the full probe sequence.
 # Sets: _verdict, _ip, _d_code, _d_ms, _d_exit, _d_speed, _d_size,
 #       _t_if, _t_code, _t_ms, _t_exit, _t_speed, _t_size
 # ---------------------------------------------------------------------------
-_do_probe() {
+_do_probe_core() {
   _dp_domain="$1"
   _dp_url="${2:-}"
 
@@ -329,6 +333,111 @@ _do_probe() {
         _verdict="throttled"
       else
         _verdict="ok"
+      fi
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# _harvest_sample_url <domain>
+# Fetches the domain's root page (tunnel-first, direct-fallback — same
+# pattern as _probe_page_run) and picks ONE same-host, non-root URL to use
+# as a larger sample for volume-escalation. Prefers an asset-extension URL
+# (incl. .json — API specs are frequently the first same-host resource on
+# doc pages); falls back to the first same-host non-root URL. Third-party
+# hosts are never selected (never blame this domain for someone else's
+# throttled asset).
+# Sets: _harvested_url (empty if none qualify).
+# ---------------------------------------------------------------------------
+_harvest_sample_url() {
+  _hsu_domain="$1"
+  _harvested_url=""
+  _hsu_tmpd="/tmp/amnezia-fo"
+  mkdir -p "$_hsu_tmpd" 2>/dev/null || true
+  _hsu_hf="$_hsu_tmpd/esc-html-$$.tmp"
+
+  : > "$_hsu_hf"
+  _pick_tunnel
+  if [ -n "$_tunnel_if" ]; then
+    "$CURL" -s --max-time 15 -L --max-redirs 3 \
+      --interface "$_tunnel_if" \
+      "https://${_hsu_domain}/" 2>/dev/null | head -c 524288 > "$_hsu_hf" || true
+  fi
+  if [ ! -s "$_hsu_hf" ]; then
+    "$CURL" -s --max-time 15 -L --max-redirs 3 \
+      "https://${_hsu_domain}/" 2>/dev/null | head -c 524288 > "$_hsu_hf" || true
+  fi
+
+  _harvested_url=$(grep -oE \
+    'https?://[^[:space:]"<>)]+|//[A-Za-z0-9][A-Za-z0-9._-]*/[^[:space:]"<>)]*' \
+    "$_hsu_hf" 2>/dev/null | \
+  awk -v tdomain="$_hsu_domain" '
+  {
+    url=$0
+    h=url
+    sub(/^https?:\/\//, "", h)
+    sub(/^\/\//, "", h)
+    if (match(h, /:[0-9]+/)) {
+      h = substr(h,1,RSTART-1) substr(h,RSTART+RLENGTH)
+    }
+    slash=index(h,"/")
+    host=(slash>0) ? substr(h,1,slash-1) : h
+    sub(/[?#].*/, "", host)
+    if (host=="") next
+    if (host ~ /[^A-Za-z0-9.-]/) next          # invalid char (e.g. &quot; JSON)
+    if (host !~ /\./) next                      # must be dotted
+    if (host ~ /^[.-]/ || host ~ /[.-]$/) next  # no leading/trailing . or -
+    if (host != tdomain) next                   # same-host only
+    if (slash <= 0) next                        # need a path component
+    path=substr(h,slash)
+    if (path == "/" || path == "") next         # root only -> not useful
+    is_a=(url ~ /\.(js|css|png|jpg|jpeg|webp|svg|woff2?|json)([?#].*)?$/)
+    if (is_a && asset=="") asset=url
+    if (first=="") first=url
+  }
+  END {
+    if (asset!="") print asset
+    else if (first!="") print first
+  }' 2>/dev/null)
+  rm -f "$_hsu_hf" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# _do_probe <domain> [<sample_url>]
+# Public entry point. Runs _do_probe_core, then — ONLY on the bare-root path
+# (no explicit sample_url) when the root came back "ok" on a small body —
+# escalates once to a larger same-host resource harvested from the page, to
+# defeat TSPU volume-based throttling that a tiny root/redirect can't reveal.
+# The escalated verdict is adopted ONLY when it is "throttled"; any other
+# result restores the original probe so escalation can never downgrade a
+# healthy domain or introduce spurious tunnel-down/unresolved.
+# Sets the same vars as _do_probe_core.
+# ---------------------------------------------------------------------------
+_do_probe() {
+  _sample_url_arg="${2:-}"
+  _do_probe_core "$1" "$_sample_url_arg"
+
+  if [ -z "$_sample_url_arg" ] && [ "$_verdict" = "ok" ] && \
+     [ "${_d_size:-0}" -lt "$VOLUME_MIN" ] && [ "$_d_code" != "000" ]; then
+    _harvest_sample_url "$1"
+    if [ -n "$_harvested_url" ]; then
+      # Save the original result before the escalated re-probe overwrites it.
+      _sv_verdict="$_verdict"; _sv_ip="$_ip"
+      _sv_d_code="$_d_code"; _sv_d_ms="$_d_ms"; _sv_d_sec="$_d_sec"
+      _sv_d_exit="$_d_exit"; _sv_d_speed="$_d_speed"; _sv_d_size="$_d_size"
+      _sv_t_if="$_t_if"; _sv_t_code="$_t_code"; _sv_t_ms="$_t_ms"
+      _sv_t_sec="$_t_sec"; _sv_t_exit="$_t_exit"; _sv_t_speed="$_t_speed"
+      _sv_t_size="$_t_size"
+
+      _do_probe_core "$1" "$_harvested_url"
+
+      if [ "$_verdict" != "throttled" ]; then
+        _verdict="$_sv_verdict"; _ip="$_sv_ip"
+        _d_code="$_sv_d_code"; _d_ms="$_sv_d_ms"; _d_sec="$_sv_d_sec"
+        _d_exit="$_sv_d_exit"; _d_speed="$_sv_d_speed"; _d_size="$_sv_d_size"
+        _t_if="$_sv_t_if"; _t_code="$_sv_t_code"; _t_ms="$_sv_t_ms"
+        _t_sec="$_sv_t_sec"; _t_exit="$_sv_t_exit"; _t_speed="$_sv_t_speed"
+        _t_size="$_sv_t_size"
       fi
     fi
   fi
