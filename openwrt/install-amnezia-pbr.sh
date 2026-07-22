@@ -332,6 +332,27 @@ _amz_wire_force_engine() {
     amz_log "force-tunnel.list already present"
   fi
 
+  # Seed /etc/amnezia/direct-tunnel.list (direct-override set; idempotent —
+  # never clobbers user edits on upgrade). See
+  # docs/superpowers/specs/2026-07-22-direct-override-set-design.md.
+  if [ ! -f "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" ]; then
+    _afe_dtl=$(resolve_dep \
+      "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" \
+      direct-tunnel.list \
+      direct-tunnel.list) || true
+    if [ -n "$_afe_dtl" ] && \
+       [ "$_afe_dtl" != "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" ]; then
+      cp "$_afe_dtl" "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" 2>/dev/null || true
+    else
+      touch "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" 2>/dev/null || true
+      chmod 0644 "${CONF_DIR:-/etc/amnezia}/direct-tunnel.list" 2>/dev/null || true
+    fi
+    amz_log "direct-tunnel.list seeded"
+  else
+    amz_log "direct-tunnel.list already present"
+  fi
+
   # Seed /etc/amnezia/ru-dns-bypass.list (idempotent — never clobbers user edits on upgrade).
   if [ ! -f "${CONF_DIR:-/etc/amnezia}/ru-dns-bypass.list" ]; then
     _rdbl=$(resolve_dep \
