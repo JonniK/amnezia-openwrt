@@ -11,7 +11,7 @@
 # docs/superpowers/specs/2026-07-22-direct-override-set-design.md.
 #
 # Restart dnsmasq only once, when either set's domain list changed.
-# Usage: amnezia-force-load [--flush] [save-manual <content>]
+# Usage: amnezia-force-load [--flush] [--flush-direct] [save-manual <content>]
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
   # shellcheck disable=SC1091
@@ -37,21 +37,32 @@ AMZ_DNSMASQ_CONFDIR="${AMZ_DNSMASQ_CONFDIR:-/etc/amnezia/dnsmasq.d}"
 SET_FORCE4=amnezia_force4
 SET_DIRECT4=amnezia_direct4
 
-# Parse --flush flag: must appear as the first argument when specified.
+# Parse --flush / --flush-direct flags: each SET-SCOPED, and each must appear
+# as a leading argument (in any order relative to each other) when specified.
 # By default force-load is add-only: runtime dnsmasq-resolved entries (CDN IPs
 # placed into amnezia_force4/amnezia_direct4 by nftset directives when domains
 # are resolved) must survive reloads.  The classifier marks traffic per-packet
-# with no conntrack restore, so flushing the set instantly strips the fwmark
+# with no conntrack restore, so flushing a set instantly strips the fwmark
 # from ESTABLISHED flows to those IPs — causing a mid-flow route flip and
 # killing TLS sessions.  Stale entries are acceptable; the volatile sets are
 # cleared on the next fw4 reload or boot (fw4 re-declares them empty from the
-# .nft classifier include).  Pass --flush only for user-initiated list
-# refreshes where removals must take effect.
-_do_flush=0
-if [ "$1" = "--flush" ]; then
-  _do_flush=1
+# .nft classifier include).
+#
+# --flush        flush ONLY amnezia_force4 (existing callers: force-update,
+#                 app-ctl, set-routing-mode — all intend the force set).
+# --flush-direct  flush ONLY amnezia_direct4 (direct-remove).
+#
+# The two flags are independent: a caller flushing one set must NOT flush the
+# other (H1: direct-remove --flush used to evict amnezia_force4 too).
+_do_flush_force=0
+_do_flush_direct=0
+while [ "$1" = "--flush" ] || [ "$1" = "--flush-direct" ]; do
+  case "$1" in
+    --flush) _do_flush_force=1 ;;
+    --flush-direct) _do_flush_direct=1 ;;
+  esac
   shift
-fi
+done
 
 # Capture save-manual arguments before entering the subshell.
 _save_manual=0
@@ -69,18 +80,19 @@ if ! mkdir -p "$_lock_dir" 2>/dev/null && [ ! -d "$_lock_dir" ]; then
   FORCE_LOCK="$FORCE_DIR/amnezia-force.lock"
 fi
 
-# _amz_populate_set <set_name> <conf_basename> <hash_basename> <source_file>...
+# _amz_populate_set <set_name> <conf_basename> <hash_basename> <flush_this_set> <source_file>...
 #
 # Merges the given source files (nonexistent paths are silently skipped, so
 # callers can pass an unexpanded glob), classifies each entry into IP/CIDR vs
 # domain, batch-loads IP/CIDR into the nft set (flushing first only when
-# _do_flush=1), and — only when the domain list's hash changed from the
-# persisted <hash_basename> — writes byte-chunked nftset= directives for the
-# domains into $AMZ_DNSMASQ_CONFDIR/<conf_basename> and sets
+# <flush_this_set>=1 — SET-SCOPED, passed in per call so --flush/--flush-direct
+# never cross-affect the other set), and — only when the domain list's hash
+# changed from the persisted <hash_basename> — writes byte-chunked nftset=
+# directives for the domains into $AMZ_DNSMASQ_CONFDIR/<conf_basename> and sets
 # _amz_set_changed=1 (never resets it to 0, so the caller can OR the result
 # across multiple sets and fire a single shared dnsmasq restart).
 _amz_populate_set() {
-  _aps_set="$1"; _aps_conf="$2"; _aps_hash="$3"; shift 3
+  _aps_set="$1"; _aps_conf="$2"; _aps_hash="$3"; _aps_flush="$4"; shift 4
 
   mkdir -p "$FORCE_DIR/force.d"
   _tmp_merged=$(mktemp "$FORCE_DIR/force.d/.amz-merged.XXXXXX" 2>/dev/null \
@@ -166,8 +178,9 @@ _amz_populate_set() {
   fi
 
   # Load IPs/CIDRs into the nft set (batch like amnezia-ru-cidr).
-  # Flush only when --flush was requested; see comment at top for rationale.
-  if [ "$_do_flush" = 1 ]; then
+  # Flush only when THIS set's flush flag was requested (set-scoped; see
+  # comment at top for rationale and the H1 cross-set flush bug this fixes).
+  if [ "$_aps_flush" = 1 ]; then
     nft flush set inet fw4 "$_aps_set" 2>/dev/null || true
   fi
   _n=0; _buf=""
@@ -237,12 +250,14 @@ _amz_populate_set() {
   # Behaviour is byte-identical to before the direct-override refactor.
   # shellcheck disable=SC2086
   _amz_populate_set "$SET_FORCE4" amnezia-force.conf .force-domains.hash \
+    "$_do_flush_force" \
     "$FORCE_DIR/force.d/"*.list "$FORCE_DIR/force-tunnel.list"
 
   # amnezia_direct4: direct-override list only (see design doc header comment).
   # Consulted FIRST in the classifier so listed domains always route direct
   # even when also matched by a broad force range.
   _amz_populate_set "$SET_DIRECT4" amnezia-direct.conf .direct-domains.hash \
+    "$_do_flush_direct" \
     "$FORCE_DIR/direct-tunnel.list"
 
   # Fire a single dnsmasq restart if EITHER set's domain list changed.

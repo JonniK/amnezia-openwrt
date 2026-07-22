@@ -34,14 +34,40 @@ _restart_monitor() {
 # Direct-override list (see docs/superpowers/specs/2026-07-22-direct-override-set-design.md).
 FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
 
-# True when $1 is a non-empty domain/IP/CIDR token with no whitespace or
-# shell-metacharacters (rejects empty/garbage input; accepts plain domains
-# as well as IPv4/CIDR, which amnezia-force-load classifies automatically).
+# True when $1 is a plausible domain or IPv4/CIDR token: non-empty, no
+# whitespace/shell-metacharacters, no leading '-' or '/' (rejects flag-like
+# input such as "-x" that would otherwise reach `nslookup -x` or emit a
+# malformed nftset=/-x/... directive — force-load's dnsmasq restart has no
+# health-check/rollback, so a bad directive is a DNS-outage vector), and
+# shaped like either a domain (at least one '.', dot-separated labels of
+# [A-Za-z0-9-] with no leading/trailing '-' per label) or an IPv4/CIDR
+# (dotted-quad, optional /prefix — amnezia-force-load re-validates octets and
+# prefix numerically; this is just a coarse shape gate).
 _ctl_direct_valid() {
   case "$1" in
     '') return 1 ;;
+    -*|/*) return 1 ;;
     *[!A-Za-z0-9.:/_-]*) return 1 ;;
   esac
+  case "$1" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  _cdv_rest="$1"
+  while [ -n "$_cdv_rest" ]; do
+    _cdv_label="${_cdv_rest%%.*}"
+    case "$_cdv_rest" in
+      *.*) _cdv_rest="${_cdv_rest#*.}" ;;
+      *) _cdv_rest="" ;;
+    esac
+    # A label may itself carry a trailing "/prefix" (last label of a CIDR);
+    # strip it before checking dash placement.
+    _cdv_label="${_cdv_label%%/*}"
+    case "$_cdv_label" in
+      '') return 1 ;;
+      -*|*-) return 1 ;;
+    esac
+  done
   return 0
 }
 
@@ -245,9 +271,14 @@ case "$1" in
       printf '%s\n' "$_dom" >> "$_dtl"
       _result=added
     fi
-    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
-    # Resolve once so the domain's current IPs land in amnezia_direct4 immediately.
-    timeout 5 nslookup "$_dom" 127.0.0.1 >/dev/null 2>&1 || true
+    if [ "$_result" = added ]; then
+      # Only run force-load (+ the one-shot resolve) when something actually
+      # changed; the hash is unchanged on already-present so force-load would
+      # be wasted work.
+      ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+      # Resolve once so the domain's current IPs land in amnezia_direct4 immediately.
+      timeout 5 nslookup "$_dom" 127.0.0.1 >/dev/null 2>&1 || true
+    fi
     printf '{"domain":"%s","result":"%s"}\n' "$_dom" "$_result"
     ;;
   direct-remove)
@@ -259,12 +290,17 @@ case "$1" in
       grep -vxF "$_dom" "$_dtl" > "$_dtl_tmp" 2>/dev/null || true
       mv "$_dtl_tmp" "$_dtl"
       _result=removed
+      # --flush-direct so the removal takes effect (SET-SCOPED: flushes ONLY
+      # amnezia_direct4, never amnezia_force4 — see H1 fix in
+      # amnezia-force-load.sh; the old global --flush evicted runtime-resolved
+      # force4 CDN IPs and stripped the fwmark from ESTABLISHED flows to
+      # RU-blocked hosts on every direct-remove call).
+      ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush-direct
     else
+      # Not-found is a pure no-op: nothing changed, so don't even invoke
+      # force-load (no wasted work, no incidental flush of anything).
       _result=not-found
     fi
-    # --flush so the removal takes effect (mirrors force-removal semantics):
-    # evict is handled by the flush + repopulate from the updated list.
-    ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush
     printf '{"domain":"%s","result":"%s"}\n' "$_dom" "$_result"
     ;;
   direct-list)

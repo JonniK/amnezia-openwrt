@@ -117,7 +117,7 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "direct-remove removes the matching line and invokes force-load --flush" {
+@test "direct-remove removes the matching line and invokes force-load --flush-direct" {
   printf 'chat.google.com\nmail.google.com\n' > "$FORCE_DIR/direct-tunnel.list"
   run sh "$CTL" direct-remove chat.google.com
   [ "$status" -eq 0 ]
@@ -125,7 +125,7 @@ setup() {
   run grep -qx 'chat.google.com' "$FORCE_DIR/direct-tunnel.list"
   [ "$status" -ne 0 ] || { echo "domain was not removed"; false; }
   grep -q '^mail\.google\.com$' "$FORCE_DIR/direct-tunnel.list"
-  grep -q 'amnezia-force-load --flush' "$STUB_LOG"
+  grep -q 'amnezia-force-load --flush-direct' "$STUB_LOG"
 }
 
 @test "direct-remove on absent domain reports not-found" {
@@ -133,6 +133,52 @@ setup() {
   run sh "$CTL" direct-remove chat.google.com
   [ "$status" -eq 0 ]
   grep -q '"result":"not-found"' <<< "$output"
+}
+
+# ---------------------------------------------------------------------------
+# H1 regression: --flush is SET-SCOPED. direct-remove must never flush
+# amnezia_force4, amnezia-force-load --flush must never flush amnezia_direct4,
+# and a not-found direct-remove must not invoke force-load at all.
+# ---------------------------------------------------------------------------
+@test "H1: direct-remove flushes ONLY amnezia_direct4, never amnezia_force4" {
+  printf 'chat.google.com\nmail.google.com\n' > "$FORCE_DIR/direct-tunnel.list"
+  # Route through the REAL force-load script (not the force-load stub) so we
+  # can observe the actual nft flush calls it issues.
+  AMNEZIA_FORCE_LOAD="sh $FORCE_LOAD_SCRIPT" run sh "$CTL" direct-remove chat.google.com
+  [ "$status" -eq 0 ]
+  grep -q 'nft flush set inet fw4 amnezia_direct4' "$STUB_LOG" \
+    || { echo "expected amnezia_direct4 to be flushed"; cat "$STUB_LOG"; false; }
+  ! grep -q 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "amnezia_force4 must NOT be flushed by direct-remove"; cat "$STUB_LOG"; false; }
+}
+
+@test "H1: amnezia-force-load --flush flushes ONLY amnezia_force4, not amnezia_direct4" {
+  printf '8.8.8.8\n' > "$FORCE_DIR/force.d/x.list"
+  printf '9.9.9.9\n' > "$FORCE_DIR/direct-tunnel.list"
+  run sh "$FORCE_LOAD_SCRIPT" --flush
+  [ "$status" -eq 0 ]
+  grep -q 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG" \
+    || { echo "expected amnezia_force4 to be flushed"; cat "$STUB_LOG"; false; }
+  ! grep -q 'nft flush set inet fw4 amnezia_direct4' "$STUB_LOG" \
+    || { echo "amnezia_direct4 must NOT be flushed by --flush"; cat "$STUB_LOG"; false; }
+}
+
+@test "H1: direct-remove on not-found domain does not invoke force-load at all" {
+  printf 'mail.google.com\n' > "$FORCE_DIR/direct-tunnel.list"
+  run sh "$CTL" direct-remove chat.google.com
+  [ "$status" -eq 0 ]
+  grep -q '"result":"not-found"' <<< "$output"
+  ! grep -q 'amnezia-force-load' "$STUB_LOG" \
+    || { echo "force-load must not run on a not-found direct-remove"; cat "$STUB_LOG"; false; }
+}
+
+@test "_ctl_direct_valid rejects a leading-dash token like -x" {
+  run sh "$CTL" direct-add "-x"
+  [ "$status" -ne 0 ]
+  [ ! -f "$FORCE_DIR/direct-tunnel.list" ] || {
+    run grep -qx -- "-x" "$FORCE_DIR/direct-tunnel.list"
+    [ "$status" -ne 0 ]
+  }
 }
 
 @test "direct-list prints entries, skipping comments and blank lines" {
