@@ -10,8 +10,11 @@ revision addresses cycle 2 and, crucially, replaces every claim that
 was previously asserted from memory with one read out of the upstream
 source or measured on the router. **Prerequisite spike PASSED
 2026-09-03** (see below) — the headless creator does create calls
-unattended and draws no VK challenge over 3 consecutive runs. One live
-gate remains open (joiner against a headless-created call).
+unattended and draws no VK challenge over 3 consecutive runs. **Second
+gate also PASSED** — the iPhone joiner attached to a headless-created
+call and relayed real traffic (22 497 bytes over 4 completed
+connections), in both DC and video modes. Both feasibility gates are
+closed; the design is ready for the implementation plan.
 
 > **Correction — a credential-handling mistake in the previous
 > revision of this document.** The earlier Prerequisite told the user
@@ -66,12 +69,52 @@ the rate under an attached joiner passing real traffic is still
 unmeasured and is the number that actually sizes the wrapper — measure
 it during the first supervised live run.
 
-**Still NOT proven by this spike** (do not let the PASS overstate itself):
-- That the iOS/Mac joiner attaches to a **headless-created** call and
-  relays through it. Phase 0 only proved it against a GUI-created call.
-  This needs the phone and remains a live gate.
-- Long-run stability — runs were 45 s; the production service runs for
-  days.
+### Second gate — joiner against a headless-created call: **PASSED 2026-09-03**
+
+Ran the creator on the Mac, handed the join link to the iPhone app (via
+clipboard — the link is key material and was never printed), and browsed.
+
+Hard evidence from the creator's own log, i.e. completed round trips
+rather than "it connected":
+```
+TUNNEL CONNECTED
+[relay] tunnel DC open (readyState=open)
+[dc] CONNECT 15 -> 8.8.x.x:443
+[dc] CONNECTED 15 -> 8.8.x.x:443
+[dc] conn 15 closed, sent 4018 bytes
+[dc] conn 18 closed, sent 10460 bytes
+```
+**4 completed connections, 22 497 bytes relayed** (10 CONNECTs issued,
+4 reached CONNECTED; the rest were genuine upstream refusals, e.g. an
+IMAP attempt answered `connection refused`). This is the exact signal
+that was *absent* in Phase 0's broken Telemost run, where 884 CONNECT
+attempts produced **zero** completion lines — so it discriminates a
+working tunnel from a connected-but-dead one.
+
+**Both tunnel modes work.** The log shows `mode=dc` and `mode=video`
+state transitions, and the user confirmed functional browsing in both.
+Precision on the evidence: byte-level accounting (`closed, sent N
+bytes`) is emitted only on the `[dc]` path, so DC mode is attested by
+measured bytes while video mode is attested by connection-state
+transitions plus the user's functional observation — not by a byte
+count.
+
+**Self-healing confirmed, and it validates a design decision.** The
+tunnel dropped once (`Participant … hung up`) and the creator
+re-established it unattended (`connection state: connecting → connected`,
+3 connect transitions over the session, 257 log lines total). This is
+the empirical basis for P1 shipping **no watchdog verb** — procd
+respawn plus the binary's own reconnect is sufficient.
+
+**Incidental finding relevant to P2:** the phone resolved DNS via
+**DoH to 8.8.x.x:443 through the tunnel**. When P2 routes creator
+egress into the amnezia policy plane, client-side DoH will bypass that
+policy — the same failure mode already recorded in project memory as
+"Browser Secure DNS breaks direct-default". P2 must account for it.
+
+**Still NOT proven** (do not let the PASS overstate itself):
+- Long-run stability — the spike runs were 45 s and the joiner session
+  a few minutes; the production service runs for days.
 - Anything about arm64/the router. This was a host (darwin/arm64) build.
 - Whether sustained call creation over days draws challenges; 3 calls
   in ~2.5 minutes did not. Note those 3 calls are now abandoned on the
@@ -759,7 +802,8 @@ test 1's assertion is unobservable:
 - The creator, running as `amnezia-covert`, can resolve DNS (proving the
   port-53 accept works) but **cannot** reach `192.168.1.1:80` or
   `:2323` (proving the reject works).
-- Joiner attaches to the router-created call and loads a page.
+- Joiner attaches to the router-created call and loads a page (proven
+  on the Mac 2026-09-03; re-confirm once the creator runs on the router).
 - `MemAvailable` under sustained joiner traffic, foreground-supervised.
 - Reboot with the feature enabled → comes back up unattended.
 
@@ -796,14 +840,13 @@ revision deferred several things that were readable in source; those are
 now inline above):
 
 - ~~The Prerequisite spike's counts~~ — **done, PASSED**, see above.
-- ~~Steady-state log line rate~~ — **measured at idle (0.8 lines/s)**;
-  wrapper needs no marker-only filtering. Still to measure: the rate
-  **with a joiner attached under real traffic**, during the first
-  supervised live run — that is the number that actually sizes it.
+- ~~Steady-state log line rate~~ — **measured**: 0.8 lines/s idle;
+  ~257 lines over a few-minute joiner session (≈1–2 lines/s under
+  traffic). Well below any level that would need marker-only filtering.
+- ~~Joiner attachment to a headless-created call~~ — **done, PASSED**,
+  both DC and video modes; see above.
 - `MemAvailable` threshold and the readiness-gate timeout — pinned
-  against live measurement.
-- Joiner attachment to a **headless-created** call — the one remaining
-  feasibility gate; needs the phone, not the router.
+  against live measurement on the router.
 - The state-file staleness window for `unknown`.
 - Whether the LuCI-over-HTTP cookie transport is acceptable, or the
   `scp` path is used instead.
