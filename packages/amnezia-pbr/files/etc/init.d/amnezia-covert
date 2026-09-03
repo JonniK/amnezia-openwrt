@@ -29,8 +29,9 @@
 # stdout/stderr here would route output around the wrapper and defeat both
 # the redaction and the state.json readiness tracking.
 #
-# Respawn exhaustion (5 deaths inside the 120s window, `respawn 300 120 5`)
-# leaves covert_enabled='1' untouched -- "on but visibly broken" is
+# Respawn exhaustion (`respawn 300 120 5` = up to 5 retries, 120s between
+# attempts, 300s healthy-uptime threshold) leaves covert_enabled='1'
+# untouched -- "on but visibly broken" is
 # preferred over silently disabling a user's explicit opt-in -- and
 # `amnezia-covert-ctl status` reports state=crashed with a reason naming
 # respawn exhaustion, never idle.

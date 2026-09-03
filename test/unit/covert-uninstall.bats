@@ -46,3 +46,78 @@ load '../lib/harness.bash'
   echo "$output" | grep -q "uninstall:deluser"
   echo "$output" | grep -q "uninstall:delgroup"
 }
+
+@test "uninstall ACL removal repairs a dangling trailing comma (covert grants LAST)" {
+  _acl_fixture="$BATS_TEST_TMPDIR/luci-app-amnezia.json"
+  cat > "$_acl_fixture" <<'JSON'
+{
+  "amnezia": {
+    "description": "Grant UCI access for luci-app-amnezia",
+    "read": {
+      "uci": [ "amnezia" ]
+    },
+    "write": {
+      "uci": [ "amnezia" ],
+      "file": {
+        "/usr/bin/amnezia-tunnel-ctl": [ "exec" ],
+        "/usr/bin/amnezia-autotunnel": [ "exec" ],
+        "/usr/bin/amnezia-covert-ctl": [ "exec" ],
+        "/etc/amnezia/covert/vk-cookies.json": [ "read", "write" ]
+      }
+    }
+  }
+}
+JSON
+
+  AMZ_COVERT_ACL="$_acl_fixture" \
+    AMNEZIA_COVERT_INIT=amnezia-covert-init \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --uninstall
+  [ "$status" -eq 0 ]
+
+  # Must still parse as valid JSON (a dangling trailing comma before "}"
+  # would make json-c -- and python's json module -- reject the file).
+  run python3 -m json.tool "$_acl_fixture"
+  [ "$status" -eq 0 ]
+
+  # Neither covert grant remains.
+  run grep -c "amnezia-covert-ctl" "$_acl_fixture"
+  [ "$status" -eq 1 ]
+  run grep -c "vk-cookies.json" "$_acl_fixture"
+  [ "$status" -eq 1 ]
+
+  # The preceding (non-covert) grant survives with no trailing comma.
+  run grep -c "amnezia-autotunnel" "$_acl_fixture"
+  [ "$status" -eq 0 ]
+}
+
+@test "uninstall ACL removal is a no-op repair when covert grants are NOT last" {
+  _acl_fixture="$BATS_TEST_TMPDIR/luci-app-amnezia-notlast.json"
+  cat > "$_acl_fixture" <<'JSON'
+{
+  "amnezia": {
+    "write": {
+      "file": {
+        "/usr/bin/amnezia-tunnel-ctl": [ "exec" ],
+        "/usr/bin/amnezia-covert-ctl": [ "exec" ],
+        "/etc/amnezia/covert/vk-cookies.json": [ "read", "write" ],
+        "/usr/bin/amnezia-autotunnel": [ "exec" ]
+      }
+    }
+  }
+}
+JSON
+
+  AMZ_COVERT_ACL="$_acl_fixture" \
+    AMNEZIA_COVERT_INIT=amnezia-covert-init \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --uninstall
+  [ "$status" -eq 0 ]
+
+  # Still valid JSON -- the repair must not damage an already-valid file.
+  run python3 -m json.tool "$_acl_fixture"
+  [ "$status" -eq 0 ]
+
+  run grep -c "amnezia-covert-ctl" "$_acl_fixture"
+  [ "$status" -eq 1 ]
+  run grep -c "amnezia-autotunnel" "$_acl_fixture"
+  [ "$status" -eq 0 ]
+}

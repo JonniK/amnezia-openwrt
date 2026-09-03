@@ -342,13 +342,28 @@ if [ "${1:-}" = "--uninstall" ]; then
     fi
 
     # 5. Remove the ACL grants (exec on the CLI + write on the cookie file)
-    #    from the installed rpcd ACL file.
+    #    from the installed rpcd ACL file. The two covert grants are the
+    #    LAST entries in the write.file object -- deleting them can leave
+    #    the preceding grant line with a dangling trailing comma, which
+    #    json-c (rpcd's parser) rejects, dropping ALL grants for the still-
+    #    installed amnezia app (empty/dead LuCI panel). So the delete is
+    #    followed by a comma repair: strip a "," that ends up immediately
+    #    before a closing "}" (across a line break), which a valid JSON
+    #    object never legally has -- this is a no-op when the covert grants
+    #    were NOT last (another grant follows, no dangling comma results).
+    #    Written via a temp-file + mv rather than `sed -i` for portability
+    #    (BSD sed's `-i` requires a backup-extension argument that GNU/
+    #    BusyBox sed do not accept the same way).
     if [ "$_un_dry" = 1 ]; then
       echo "uninstall:acl-removed"
     else
-      _un_acl=/usr/share/rpcd/acl.d/luci-app-amnezia.json
+      _un_acl="${AMZ_COVERT_ACL:-/usr/share/rpcd/acl.d/luci-app-amnezia.json}"
       if [ -f "$_un_acl" ]; then
-        sed -i '/amnezia-covert-ctl/d; /vk-cookies\.json/d' "$_un_acl" 2>/dev/null || true
+        sed -e '/amnezia-covert-ctl/d' -e '/vk-cookies\.json/d' "$_un_acl" 2>/dev/null \
+          | sed -e ':a' -e 'N' -e '$!ba' -e 's/,\([[:space:]]*}\)/\1/g' \
+          > "$_un_acl.tmp" 2>/dev/null \
+          && mv "$_un_acl.tmp" "$_un_acl" \
+          || rm -f "$_un_acl.tmp"
       fi
       amz_log "uninstall:acl-removed"
     fi
