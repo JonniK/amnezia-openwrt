@@ -2,24 +2,25 @@
 
 **Date:** 2026-09-03
 **Branch:** `feat/covert-creator-router`
-**Status:** design-review cycles 1–4 complete (2 internal opus each; an
-external codex ran cycles 1–2 and declined cycles 3–4 on a content
-filter). Cycle 1: 8 C / 15 H. Cycle 2: ~15 C / ~28 H. Cycle 3:
-1 C / 2 H / 6 M / 6 L. **Cycle 4: 2 C / 3 H / 5 M / 6 L — again mostly
-defects introduced by cycle 3's own fixes** (the documented "fix rounds
-introduce defects at a high rate" pattern), with both lenses converging
-on the same root fix. Cycle-4 highlights, all addressed in this revision:
-the egress restriction now rejects by **output interface** (`oifname
-"lo"`/LAN), which simultaneously closes cycle-3's v6-GUA hole **and** the
-v4-WAN-IP hole cycle 4 found (the joiner's own egress IP reached the admin
-plane) **and** un-bricks the SFU dial that a blanket v6 reject would have
-killed; the launcher captures the creator PID via a **FIFO + `trap`** so
-stop/`disable` cannot leave an orphaned unrestricted relay; redaction is
-now **generic** (`, response:`), covering all nine body-dump sites incl.
-the self-healing rejoin path; and the flash `covert.log` is
-installer-pre-created because the unprivileged wrapper cannot create it in
-a `0750 root` dir. Every claim is read from upstream source or measured on
-the router, not asserted from memory. **Prerequisite spike PASSED
+**Status:** design-review cycles 1–5 complete (2 internal opus each; an
+external codex ran cycles 1–2 and declined 3–5 on a content filter).
+Cycle 1: 8 C / 15 H. Cycle 2: ~15 C / ~28 H. Cycle 3: 1 C / 2 H / 6 M / 6 L.
+Cycle 4: 2 C / 3 H / 5 M / 6 L. **Cycle 5: 0 C / 2 H / 2 M / 4 L** — the
+criticals are gone and the two HIGHs were again cycle-4-fix regressions
+(the "fix rounds introduce defects" pattern, now converging: 8→15→1→2→0
+criticals). Cycle-5 fixes in this revision: the egress rule keeps **both**
+destination rejects (RFC1918/CGNAT/link-local — the coverage cycle 4
+accidentally dropped, re-exposing the upstream ISP CPE/modem and second
+bridges) **and** the `oifname` rejects (the router's own WAN-IP/GUA); the
+flash `covert.log` cap now **truncates in place** (file-write only) because
+the blackbox `>$LOG.tmp && mv` pattern needs dir-write the unprivileged
+wrapper lacks — left unfixed it would grow the log until flash exhaustion;
+`disable` reaps by uid **before** removing the fragment (fragment outlives
+the relay), with the SIGKILL residual reaped in `apply`/boot; and the false
+"`-debug` suppresses `[vk-ws]` chatter" claim is corrected (those dumps are
+unconditional and carry peer-IP metadata, now an accepted trusted-LAN
+residual). Every claim is read from upstream source or measured on the
+router, not asserted from memory. **Prerequisite spike PASSED
 2026-09-03** (see below) — the headless creator does create calls
 unattended and draws no VK challenge over 3 consecutive runs. **Second
 gate also PASSED** — the iPhone joiner attached to a headless-created
@@ -403,29 +404,44 @@ already in this repo (fw4 rules installed by `enable`, removed by
   ```
   chain amnezia_covert_egress {
       type filter hook output priority filter; policy accept;
-      # loopback DNS to the router's own resolver — must precede the lo reject
+      # loopback DNS to the router's own resolver — must precede every reject
       meta skuid @@COVERT_UID@@ oifname "lo" ip  daddr 127.0.0.1 udp dport 53 accept
       meta skuid @@COVERT_UID@@ oifname "lo" ip  daddr 127.0.0.1 tcp dport 53 accept
       meta skuid @@COVERT_UID@@ oifname "lo" ip6 daddr ::1       udp dport 53 accept
       meta skuid @@COVERT_UID@@ oifname "lo" ip6 daddr ::1       tcp dport 53 accept
-      # anything else the kernel delivers locally — every one of the router's
-      # own addresses (loopback, LAN IP, WAN IP, GUAs), any stack, any port:
+      # (1) destination-based rejects — private/CGNAT/link-local/multicast,
+      #     both stacks: catches the upstream ISP CPE/modem (100.64/10, a
+      #     192.168 modem panel), any OTHER internal bridge, and private
+      #     tunnel-peer subnets, none of which egress `lo` or the LAN bridge:
+      meta skuid @@COVERT_UID@@ ip  daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } reject
+      meta skuid @@COVERT_UID@@ ip6 daddr { fc00::/7, fe80::/10 } reject
+      # (2) interface-based rejects — everything the kernel delivers locally
+      #     (the router's OWN addresses incl. the public WAN IP and any GUA,
+      #     any stack) routes out `lo`; other LAN hosts route out the bridge:
       meta skuid @@COVERT_UID@@ oifname "lo" reject
-      # other hosts on the LAN segment, any stack:
       meta skuid @@COVERT_UID@@ oifname "@@LAN_IFNAME@@" reject
   }
   ```
-  `policy accept` then permits genuine internet egress out the WAN
-  interface(s) on **both** v4 and v6 — so the SFU dial works whichever
-  stack the resolver picks, and the whole admin/LAN plane is closed on
-  both stacks by the two `oifname` rejects. This is verified by `fw4 check`
-  plus a live gate that proves all four directions (see Testing): DNS
-  resolves, `<router-any-IP>:2323`/`:80` is refused on both stacks, a LAN
-  host is unreachable, and the SFU/WAN path is reachable. **Caveat named:**
-  `oif=lo` for locally-destined traffic and the single-LAN-bridge
+  **Cycle-5 correction — belt AND braces, not either/or.** Cycle 4
+  *replaced* the destination-set rejects with the `oifname` rejects; cycle
+  5 caught that this dropped the RFC1918/CGNAT/link-local coverage cycle 2
+  had deliberately added, re-exposing the upstream ISP CPE / double-NAT
+  modem and any second internal bridge to a joiner (they egress a WAN
+  interface, so neither `oifname` reject catches them). The corrected rule
+  keeps **both**: destination rejects (1) close private/CGNAT/other-bridge
+  targets stack-agnostically; interface rejects (2) close the router's own
+  addresses that a destination list cannot enumerate (the dynamic WAN IP,
+  every GUA). `policy accept` then permits only genuine **public** internet
+  egress out the WAN interface on **both** v4 and v6 — so the SFU dial
+  works whichever stack the resolver picks. Verified by `fw4 check` plus a
+  live gate that proves all directions (see Testing): DNS resolves,
+  `<router-any-IP>:2323`/`:80` and a private/CGNAT target are refused on
+  both stacks, and the SFU/public-WAN path is reachable. **Caveats named:**
+  `oif=lo` for locally-destined traffic and the single-`@@LAN_IFNAME@@`
   assumption are the two facts the live gate must confirm on the real
-  kernel; if a deployment has additional internal bridges (guest/IoT
-  VLANs) each needs its own `oifname … reject` line.
+  kernel; if a deployment has additional internal bridges (guest/IoT VLANs)
+  each needs its own `oifname … reject` line, though the destination
+  rejects (1) already cover their private ranges as a backstop.
 - Coverage rationale: every flow the joiner asks for is dialled **by the
   creator process itself** (`relay/tunnel/relay_bridge.go` uses
   `net.DialTimeout`/`net.DialUDP` in-process), so those sockets carry the
@@ -435,12 +451,21 @@ already in this repo (fw4 rules installed by `enable`, removed by
   host-candidate checks toward LAN peers. Irrelevant here — the joiner
   is remote and reaches the router via the SFU, never as a LAN peer.
 - Threat model, stated plainly: anyone with the link gets **router-IP
-  internet egress**. Link secrecy is the only admission control in P1.
-  The link is additionally **key material** — `main.go:718` derives the
-  tunnel obfuscation secret from it via
+  internet egress**. Link secrecy is the only admission control in P1, and
+  because the LuCI `status` JSON returns the link, **LuCI/rpcd access ==
+  relay-join capability** — acceptable for the single-admin home-router
+  target, stated not assumed. The link is additionally **key material** —
+  `main.go:718` derives the tunnel obfuscation secret from it via
   `tunnel.DeriveSecretFromJoinLink` — so it is handled as a secret
   everywhere it is stored (see Secrets). A dedicated/disposable VK
   account is recommended over the user's primary one.
+- **Peer-IP metadata in the flash log (cycle-5, accepted):** the
+  unconditional `[vk-ws]` SFU-message dumps put unmasked ICE-candidate /
+  joiner peer-IP data into `covert.log`. No VK credential leaks this way,
+  and the log is `0640` in a `0750` dir — for the trusted-LAN / single-admin
+  target this metadata exposure is accepted; a later phase may extend
+  `MaskAddr` to the `[vk-ws]` path or drop those lines via marker-only
+  filtering.
 
 ---
 
@@ -522,7 +547,7 @@ it as `write: function(path, data, mode)`. That is the mechanism.
 - **Ownership model (cycle-2 CRITICAL fix).** The previous revision
   specified `0700 root:root` dir + `0600 root:root` file *and* ran the
   process as unprivileged `amnezia-covert` — mutually exclusive; the
-  process would get EACCES and `common.LoadCookies` (`relay/common/http.go:13`)
+  process would get EACCES and `common.LoadCookies` (`relay/common/http.go:14`)
   would `log.Fatalf("Cannot read cookies: %v")` into a respawn loop.
   Corrected: directory `/etc/amnezia/covert/` is **0750 root:amnezia-covert**,
   the cookie file **0640 root:amnezia-covert**. rpcd writes as root;
@@ -596,16 +621,27 @@ POSIX sh, sources `amnezia-common.sh`, `uci -q get` throughout.
   not-yet-enabled procd service is a silent no-op, a bug this project
   has already shipped once with stubby/https-dns-proxy) →
   `( sleep 1 && fw4 reload ) &`.
-- **`disable`** → stop + init-disable the service, remove the nft
-  fragment, backgrounded `fw4 reload`, remove state/link files,
-  `covert_enabled='0'`, commit. Idempotent: disabling an
+- **`disable`** → stop + init-disable the service, then **confirm no
+  creator survives before removing the fragment** (cycle-5: the egress
+  fragment must outlive the relay, never the reverse). Because only the
+  launcher and creator run as the fixed covert uid, that confirmation is
+  precise: `pkill -u <covert-uid>; ` wait briefly; if any process with that
+  uid remains, `pkill -9 -u <covert-uid>` and re-verify. **Only then**
+  remove the nft fragment, backgrounded `fw4 reload`, remove state/link
+  files, `covert_enabled='0'`, commit. Idempotent: disabling an
   already-disabled feature is exit 0. Cookie file is **not** deleted.
+  Residual, stated: if procd SIGKILLs the launcher on `term_timeout`
+  (default 5 s) the launcher's `trap` never runs — so the reap-by-uid here
+  (and in `apply`/`start_service`, below) is what actually guarantees no
+  orphan, not the `trap` alone.
 - **`apply`** → idempotent reconcile used by boot init and `enable`.
-  `covert_enabled=0` ⇒ ensure stopped, exit 0. `covert_enabled=1` ⇒
-  same preflight; on failure, log the specific reason, leave
-  `covert_enabled` untouched, do not start, and make `status` report it
-  (never a silent no-op). Missing binary ⇒ loud, distinct failure whose
-  text names the dev-deploy-only caveat.
+  **First reaps any orphan by uid** (`pkill -u <covert-uid>` for a creator
+  left by a prior SIGKILL) so a stale relay never runs alongside a fresh
+  fragment. `covert_enabled=0` ⇒ ensure stopped (reap included), exit 0.
+  `covert_enabled=1` ⇒ same preflight; on failure, log the specific
+  reason, leave `covert_enabled` untouched, do not start, and make
+  `status` report it (never a silent no-op). Missing binary ⇒ loud,
+  distinct failure whose text names the dev-deploy-only caveat.
 - **`status`** → reads `/var/run/amnezia-covert/state.json` plus procd's
   running bit; emits exactly one JSON object on stdout:
   ```json
@@ -706,8 +742,13 @@ Corrected order:
    there is no group to kill; and with no signal handler procd's SIGTERM
    reaches only the launcher, leaving the 11 MB creator **orphaned to
    init and still running** — while `disable` has just removed the egress
-   fragment, so the orphan becomes an *unrestricted* relay. Instead:
+   fragment, so the orphan becomes an *unrestricted* relay. Instead
+   (`$PIPE` lives in the writable service dir — `/var/run/amnezia-covert/covert.fifo`
+   — never the `0750` flash dir, where `mkfifo` would EACCES exactly like
+   `covert.log`; a leftover FIFO from a prior generation is harmless and
+   reused):
    ```sh
+   PIPE=/var/run/amnezia-covert/covert.fifo
    mkfifo "$PIPE" 2>/dev/null || :
    amnezia-covert-logwrap.sh < "$PIPE" &  LW=$!
    /usr/bin/amnezia-covert-creator -resources moderate -cookies ... -write-file ... > "$PIPE" 2>&1 &  CR=$!
@@ -727,23 +768,58 @@ Corrected order:
    it does not stall the serial rc boot sequence or the LuCI `enable` click
    under rpcd's RPC timeout. On success it `wait "$CR"` (so procd sees the
    service alive for the creator's whole life, and the `trap` still fires
-   on eventual stop). On timeout it **kills `$CR` first, confirms it is
-   dead, then** writes `state: "not-started"` — the monitor is the single
-   writer of that terminal state, so the still-draining `logwrap` cannot
-   race it back to `starting`/`connected` — and exits so procd respawns.
+   on eventual stop). On timeout it **kills `$CR`, then `$LW` (or `wait`s
+   it out) so no draining writer remains, confirms both are dead, then**
+   writes `state: "not-started"` last — otherwise a `logwrap` still
+   draining buffered lines could emit a `starting` (from a buffered
+   `CALL CREATED`) *after* the monitor's write and flap the terminal state
+   (cycle-5 LOW). Belt-and-braces: `logwrap` also refuses to downgrade a
+   terminal `not-started`/`crashed` state. Then the monitor exits so procd
+   respawns.
 
 `amnezia-covert-logwrap.sh` appends to a capped, dedicated
-`/etc/amnezia/covert/covert.log` (flash, like the blackbox logger — not
-tmpfs, so it survives reboot for diagnosis; capped in the same
-size-capped way) and rewrites `state.json` atomically (tmp + `mv`).
+`/etc/amnezia/covert/covert.log` (flash — not tmpfs, so it survives reboot
+for diagnosis) and rewrites `state.json` atomically (tmp + `mv`, in the
+service-owned `/var/run/amnezia-covert/`).
+
+**Capping must use FILE-write only, never DIR-write (cycle-5 HIGH).** The
+blackbox logger caps with `tail -n N "$LOG" > "$LOG.tmp" && mv "$LOG.tmp"
+"$LOG"` (`amnezia-blackbox.sh:18`) — but that creates a temp file **and
+renames over the original**, both of which need **write on the
+directory**. Blackbox gets away with it because it runs as **root**; the
+covert wrapper runs as `amnezia-covert` and the flash dir is
+`0750 root:amnezia-covert` (group `r-x`, **no write**), so the blackbox
+pattern EACCESes and — if the exit status is swallowed — `covert.log`
+grows unbounded on ~48.9 MB of flash until UCI commits / DNS break (the
+top "never break client internet" constraint). The wrapper therefore caps
+by **truncating the file it owns in place**, staging the trimmed copy in
+the writable service dir:
+```sh
+tail -n 2000 covert.log > /var/run/amnezia-covert/logcap && cat /var/run/amnezia-covert/logcap > covert.log
+```
+The final `>` truncates the existing owned file (needs file-write, which
+the wrapper has as owner) — no temp-in-dir, no rename, no unlink. The
+blackbox `>$LOG.tmp && mv` pattern is explicitly **forbidden** for this
+file; a bats test caps a large `covert.log` in a `0750 root`-owned dir and
+asserts success (blackbox-style cap → EACCES → red).
+
 **Bounded cost** (cycle-2 finding — the wrapper must not become the new
 autolearn): the state file is rewritten **at most once per second**
-regardless of marker rate, the cap check runs periodically rather than
-per line, and `-debug` stays **off** so the per-SFU-message chatter
-(`[vk-ws] <- notification`, `<- response seq=`) is not emitted at all.
-The Prerequisite spike's run gives the real steady-state line rate;
-if it is high enough to matter, the wrapper filters to marker lines
-only and drops the rest.
+regardless of marker rate, and the cap check runs periodically rather than
+per line. **Correction (cycle-5):** an earlier draft claimed "`-debug` off
+suppresses the `[vk-ws]` chatter" — false. `common.Debug` gates only the
+`tunnel_relay.go` lines; the `[vk-ws] <- notification` / `<- response
+seq=` / `unhandled` dumps (`main.go:371,449,440`) are logged
+**unconditionally** (the Prerequisite's 0.8 lines/s idle rate already
+includes them). The CPU conclusion survives because that rate was
+*measured*, not assumed. But those `[vk-ws]` lines emit raw SFU/SDP JSON
+that can carry **ICE-candidate / joiner peer-IP** metadata **unmasked**
+(the `[p2p]`/`[dc]` paths use `MaskAddr`; the raw `[vk-ws]` JSON does not)
+into the flash log. No VK credential leaks this way (tokens come from the
+HTTP auth bodies, which the `, response:` filter covers) — but see the
+threat-model note on peer-IP metadata. If the measured rate ever warrants
+it, the wrapper filters to marker lines only and drops the rest, which
+also drops these dumps.
 
 **Markers are read from source, not deferred** (they were an
 unnecessary deferral — cycle 2):
@@ -946,7 +1022,13 @@ Delivery, following the repo's actual staging convention (cycle 2:
    four-surface convention. On `install.sh`/`.ipk` the feature installs
    **inert**: no binary ⇒ `apply` fails loudly with text naming the
    dev-deploy-only caveat, and the nft fragment is a template that
-   `enable` never gets far enough to activate.
+   `enable` never gets far enough to activate. **Inert-path user/log
+   creation (cycle-5):** the `.ipk` postinst and `install.sh` **also**
+   create the fixed-uid `amnezia-covert` user + the pre-created
+   `covert.log` (harmless — an unused system user and an empty owned log),
+   so a later binary-only dev-deploy onto a `.ipk` base finds them already
+   present; `enable`'s "user exists" preflight then passes rather than
+   failing on a base that shipped without them.
 
 **Live-router caveat.** `dev/deploy-openwrt-safe.sh` runs
 `install-amnezia-pbr.sh` on the router, and CLAUDE.md's live-router rule
@@ -979,7 +1061,11 @@ test 1's assertion is unobservable:
    enable/restart → must go red.*
 3. `enable` when `fw4 check` fails → fragment removed, no UCI mutation,
    non-zero exit, firewall untouched. *Mutation: skip the check → red.*
-4. `disable` idempotent; removes fragment + state + link; leaves cookies.
+4. `disable` idempotent; removes fragment + state + link; leaves cookies;
+   **confirms no covert-uid process survives BEFORE removing the fragment**
+   (fragment outlives the relay). *Mutation: remove the fragment before the
+   reap → a test asserting the fragment is still present while a fake
+   creator lives must go red.*
 5. Cookie structural validator: rejects non-JSON, non-array, and
    elements missing `name`/`value`; accepts the real shape. *Mutation:
    accept-anything → red.*
@@ -1000,6 +1086,10 @@ test 1's assertion is unobservable:
 8. Log wrapper truncates state+link on **launcher** start, so a
    simulated respawn cannot surface the previous generation's link.
    *Mutation: move truncation back to `start_service` → red.*
+8b. **Log cap uses file-write only:** capping a large `covert.log` inside a
+   `0750 root:amnezia-covert` dir, running as `amnezia-covert`, **succeeds**
+   and leaves the file trimmed. *Mutation: use the blackbox
+   `>$LOG.tmp && mv` pattern → EACCES on the dir → red.*
 9. Call-creation gap enforced in the launcher, reading a **dedicated
    `last-call.ts`** that launcher-start truncation does **not** touch.
    *Mutations: (a) remove the sleep → red; (b) point the timestamp at
@@ -1051,8 +1141,10 @@ test 1's assertion is unobservable:
   the router's own addresses, either stack**: `127.0.0.1`, `::1`, the LAN
   IP `192.168.1.1`, **the router's own public WAN IP** (cycle-4: this is
   the joiner's egress IP — the most important probe), and any router GUA,
-  on `:2323` and `:80`, must all be **refused**; and a **LAN host** must
-  be unreachable.
+  on `:2323` and `:80`, must all be **refused**; a **LAN host** must be
+  unreachable; and a **private/CGNAT target** off-box — the upstream
+  gateway / `100.64.0.0/10` / a `192.168.100.1`-style modem panel
+  (cycle-5) — must be **refused** on both stacks.
 - **Control-plane IPv4/IPv6 (cycle-4):** the creator's own SFU/TURN dial
   (not just relayed joiner traffic) completes and the tunnel comes up —
   confirming WAN egress is permitted on whichever stack the resolver picks
@@ -1083,8 +1175,10 @@ test 1's assertion is unobservable:
 | **Headless creator has zero captcha handling — a VK challenge is terminal** (verified: no captcha code in `headless/vk/`; it exists only in the joiner package) | Blocking Prerequisite spike; if challenges appear, P1 does not proceed in this shape |
 | Spike/service log can contain an `access_token` or `session_key` on auth-failure and self-healing rejoin paths (nine `response: %s` dumps: `main.go:264/286/289` + `authAndJoin` `:133/145/156/159/180/197`) | Prerequisite reports only derived counts, never raw logs; log wrapper **redacts generically** on the substring `, response:` (masks the tail), covering all nine + any future site, on all surfacing lines (`:704`/`:699`/`[rejoin] :606`) |
 | Join link is the tunnel obfuscation secret, not just an admission token (`main.go:718`) | Treated as a secret everywhere: `0640 amnezia-covert:amnezia-covert` files, no world-readable `-write-file` default; the link **is** logged in clear at `:554`/`:722` (marker lines) so it is protected by **file mode + `0750` parent dir**, not redaction |
-| **Admin plane reachable via the router's OWN addresses — v6-GUA (cycle-3) AND the v4 WAN IP = the joiner's egress IP (cycle-4)** — because packets to any local address route out `lo`, bypassing the WAN-input reject | Egress restriction rejects by **output interface**, not address set: `oifname "lo" reject` (after loopback-DNS accepts) covers every router-own address on both stacks incl. GUA + WAN IP; `oifname "<LAN>" reject` covers LAN hosts; `policy accept` still permits WAN egress. Live gate probes the WAN IP + a GUA on both stacks |
-| A blanket `meta nfproto ipv6 reject` would brick the SFU dial (pinned `ips[0]`, no v4 fallback — `main.go:479`/`wtsignal.go:75`) | Not used — the oif-based rule **allows** WAN egress on both stacks, so the SFU dial works whichever stack the resolver picks; only local/LAN egress is denied |
+| **Admin plane / private targets reachable** — v6-GUA (cycle-3), the v4 WAN IP = joiner's egress IP (cycle-4), and the upstream ISP CPE / other bridges (cycle-5, after the oif rewrite dropped the address rejects) | Egress rule uses **both**: destination rejects (RFC1918/CGNAT/link-local/multicast, both stacks) close private/CGNAT/other-bridge targets that egress WAN; `oifname "lo"`/`"<LAN>"` rejects close the router's own addresses (WAN IP + GUA, any stack) + LAN hosts. `policy accept` permits only public WAN egress. Live gate probes the WAN IP, a GUA, and a private/CGNAT target on both stacks |
+| Flash `covert.log` grows unbounded — the blackbox `>$LOG.tmp && mv` cap needs dir-write the unprivileged wrapper lacks in the `0750 root` dir → EACCES → flash exhaustion breaks UCI/DNS | Wrapper caps by **truncate-in-place** (`tail > /var/run/…/logcap && cat logcap > covert.log`) — file-write only, no temp-in-dir/rename; bats test caps in a `0750 root` dir and asserts success |
+| Orphan window during `disable` (fragment removed before creator dies) + SIGKILL bypasses the launcher `trap` | `disable` reaps by covert-uid and confirms dead **before** removing the fragment; `apply`/boot reap any SIGKILL-left orphan by uid; SIGKILL residual stated, not assumed away |
+| A blanket `meta nfproto ipv6 reject` would brick the SFU dial (pinned `ips[0]`, no v4 fallback — `main.go:479`/`wtsignal.go:75`) | Not used — the rule **allows** public WAN egress on both stacks (only the router's own addresses, LAN, and private/CGNAT destinations are denied), so the SFU dial works whichever stack the resolver picks |
 | Unresolvable `meta skuid <name>` / ifname would break the **entire** fw4 ruleset | Numeric uid **and** real LAN ifname substituted at `enable` time (both parse-safe); template never shipped into `/etc/nftables.d/`; `fw4 check` gate with fragment rollback; backgrounded reload |
 | Egress rule blocking loopback would kill the creator's own DNS | Explicit `oifname "lo"` port-53 accepts (v4 `127.0.0.1` **and** v6 `::1`) ahead of the `lo` reject; live gate proves DNS resolves and admin plane is refused |
 | uid drift silently voids the whole egress restriction | Installer pins a **fixed uid** with an `id` precheck (idempotent, collision-loud); `enable`/`apply`/boot re-resolve, re-substitute, and **fail closed** (abort/stop) on running-uid ≠ fragment-uid — not a status color |
@@ -1099,7 +1193,7 @@ test 1's assertion is unobservable:
 | **Slow-drip** respawn (one death per >300 s) resets procd's retry counter → unbounded calls over days | Named residual: the binary self-heals *without* process exit (Prerequisite), so a process-exit cadence is the unbounded case; if live runs show it, add a persistent daily call counter that trips `crashed` past a ceiling — specified then, not pre-built |
 | Binary runs at 128 MB GOMEMLIMIT instead of the 64 MB the Memory section is sized for | `-resources moderate` is an explicit part of the launcher exec contract + a `status` assertion that the running command line carries it |
 | `limits as=` is virtual address space, not RSS, and can block Go startup | Dropped; GOMEMLIMIT + `MemAvailable` preflight + supervised first run, with the residual stated plainly |
-| Log wrapper becoming the new autolearn-style CPU sink | `-debug` off, ≤1 state rewrite/sec, periodic (not per-line) cap check, marker-only filtering if the spike shows high line rates |
+| Log wrapper becoming the new autolearn-style CPU sink | ≤1 state rewrite/sec, periodic (not per-line) cap check, measured-low line rate (0.8/s idle); marker-only filtering if a live rate warrants it. (`-debug` off matters for the `[relay]` chatter but does **not** gate the unconditional `[vk-ws]` dumps — those are already in the measured rate) |
 | Stale `connected` + dead link surviving a respawn | Truncation in the launcher (which procd *does* re-exec), not `start_service` |
 | Harness green while not covering the new module | **9** wiring edits (the 8 grep-matched sites **plus** the positional `fn(...)` argument the grep cannot find, treated as one atomic `names`↔`fn(...)` edit) + the `d.covert = load(...)` line + `DATA` index 14 |
 | `status` hashing an 11 MB binary every 5 s | Manifest installed to the router; `status` reads it, never recomputes |
