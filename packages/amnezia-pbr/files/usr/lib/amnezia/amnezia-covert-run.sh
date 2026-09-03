@@ -90,6 +90,7 @@ AMZ_COVERT_LOG="${_log_override:-${AMZ_COVERT_LOG:-/etc/amnezia/covert/covert.lo
 export AMZ_COVERT_LOG
 
 mkdir -p "$RUN_DIR" 2>/dev/null || :
+chmod 0750 "$RUN_DIR" 2>/dev/null || :
 
 _json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -158,6 +159,7 @@ date +%s > "$LASTCALL" 2>/dev/null || echo 0 > "$LASTCALL"
 # Step 3 -- launch creator+logwrap via a FIFO, both pids captured.
 # ---------------------------------------------------------------------------
 mkfifo "$PIPE" 2>/dev/null || :
+chmod 0600 "$PIPE" 2>/dev/null || :
 
 "$AMZ_COVERT_LOGWRAP" < "$PIPE" &
 LW=$!

@@ -26,6 +26,15 @@ INIT_FILE="$HARNESS_DIR/../openwrt/amnezia-covert.init"
   [ "$status" -eq 0 ]
 }
 
+@test "init_restricts_runtime_dir_mode: start_service chmods /var/run/amnezia-covert to 0750, never world-traversable" {
+  # Static/structural check like its siblings above (no functional procd
+  # harness off-device) -- the run dir holds logcap (join-link-bearing log
+  # copy) and covert.fifo (pre-redaction raw creator stream), so a 0755 dir
+  # would leave both world-readable regardless of their own file modes.
+  run grep -E 'chmod[[:space:]]+0750[[:space:]]+/var/run/amnezia-covert' "$INIT_FILE"
+  [ "$status" -eq 0 ]
+}
+
 @test "init_calls_apply_reconcile: start_service calls amnezia-covert-ctl apply" {
   run grep -E 'amnezia-covert-ctl[[:space:]]+apply' "$INIT_FILE"
   [ "$status" -eq 0 ]

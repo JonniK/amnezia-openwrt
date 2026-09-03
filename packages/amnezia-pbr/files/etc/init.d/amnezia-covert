@@ -52,6 +52,7 @@ start_service() {
 
   mkdir -p /var/run/amnezia-covert
   chown amnezia-covert:amnezia-covert /var/run/amnezia-covert
+  chmod 0750 /var/run/amnezia-covert
 
   amnezia-covert-ctl apply || return 1
 

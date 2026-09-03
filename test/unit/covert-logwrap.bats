@@ -183,6 +183,23 @@ _wait_for_state() {
   [ "$perm" = "640" ]
 }
 
+@test "logcap_mode_0640: logcap (a full copy of the join-link-bearing log) is chmodded 0640, never umask-default 0644" {
+  awk 'BEGIN{for(i=0;i<10;i++) print "line " i}' > "$LOG"
+  run "$WRAP" --cap-once
+  [ "$status" -eq 0 ]
+  [ -f "$RUN_DIR/logcap" ]
+  perm="$(stat -c %a "$RUN_DIR/logcap" 2>/dev/null || stat -f %Lp "$RUN_DIR/logcap" 2>/dev/null)"
+  [ "$perm" = "640" ]
+}
+
+@test "run_dir_mode_0750: the run dir the wrapper creates is not world-traversable" {
+  rm -rf "$RUN_DIR"
+  printf '  CALL CREATED\n' | "$WRAP"
+  [ -d "$RUN_DIR" ]
+  perm="$(stat -c %a "$RUN_DIR" 2>/dev/null || stat -f %Lp "$RUN_DIR" 2>/dev/null)"
+  [ "$perm" = "750" ]
+}
+
 # ---------------------------------------------------------------------------
 @test "no_terminal_downgrade: a buffered CALL CREATED does not flip a not-started state back to starting" {
   printf '{"state":"not-started","link":null,"reason":"readiness-timeout"}\n' > "$STATE"

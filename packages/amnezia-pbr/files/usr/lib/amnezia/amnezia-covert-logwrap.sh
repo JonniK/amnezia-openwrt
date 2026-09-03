@@ -38,7 +38,11 @@ CAP_LINES=2000
 CAP_EVERY=200
 
 _cap_log() {
-  tail -n "$CAP_LINES" "$LOG" > "$RUN_DIR/logcap" && cat "$RUN_DIR/logcap" > "$LOG"
+  # logcap is a full copy of covert.log (join-link-bearing) staged in the
+  # run dir for the truncate-in-place below -- chmod it 0640 like
+  # state.json/covert-link so it is never world-readable.
+  tail -n "$CAP_LINES" "$LOG" > "$RUN_DIR/logcap" && chmod 0640 "$RUN_DIR/logcap" 2>/dev/null || :
+  cat "$RUN_DIR/logcap" > "$LOG"
 }
 
 # --cap-once: run a single cap pass and exit. The launcher never invokes
@@ -185,6 +189,7 @@ _maybe_flush_state() {
 }
 
 mkdir -p "$RUN_DIR" 2>/dev/null || :
+chmod 0750 "$RUN_DIR" 2>/dev/null || :
 _flush_state
 
 _line_n=0

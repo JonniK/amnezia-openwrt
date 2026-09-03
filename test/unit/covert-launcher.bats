@@ -157,6 +157,24 @@ EOF
   [ -p "$RUN_DIR/covert.fifo" ]
 }
 
+@test "fifo_mode_0600: covert.fifo carries the creator's pre-redaction raw stream, never left umask-default 0644" {
+  export AMZ_FAKE_CREATOR_MODE=quick
+  _write_fake_creator
+  run "$RUN_SH"
+  [ -p "$RUN_DIR/covert.fifo" ]
+  perm="$(stat -c %a "$RUN_DIR/covert.fifo" 2>/dev/null || stat -f %Lp "$RUN_DIR/covert.fifo" 2>/dev/null)"
+  [ "$perm" = "600" ]
+}
+
+@test "run_dir_mode_0750: the run dir the launcher creates is not world-traversable" {
+  export AMZ_FAKE_CREATOR_MODE=quick
+  _write_fake_creator
+  run "$RUN_SH"
+  [ -d "$RUN_DIR" ]
+  perm="$(stat -c %a "$RUN_DIR" 2>/dev/null || stat -f %Lp "$RUN_DIR" 2>/dev/null)"
+  [ "$perm" = "750" ]
+}
+
 # ---------------------------------------------------------------------------
 @test "readiness_connected: fake creator reaches CALL CREATED + Connected, status ends connected" {
   export AMZ_FAKE_CREATOR_MODE=connect
