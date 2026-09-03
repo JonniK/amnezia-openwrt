@@ -1,0 +1,14 @@
+#!/bin/sh
+# Stub for `id -u amnezia-covert` (installer's user-precheck).
+#
+# STUB_ID_UID set -> echo it, exit 0 (drives the "user already present at
+# the correct/wrong uid" precheck branches). Unset -> exit 1 (drives the
+# "user absent -> reach the awk/AMNEZIA_PASSWD collision check" branch).
+# NOT unconditional exit 0/1 -- both branches of the installer's precheck
+# must be reachable from tests.
+echo "id $*" >> "${STUB_LOG:-/dev/null}"
+if [ -n "${STUB_ID_UID:-}" ]; then
+  echo "$STUB_ID_UID"
+  exit 0
+fi
+exit 1

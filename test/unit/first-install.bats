@@ -68,3 +68,42 @@ load '../lib/harness.bash'
   # Only one uci batch call (for awg1), not two.
   [ "$(grep -c "^uci batch" "$STUB_LOG")" -eq 1 ]
 }
+
+# Phase 9 (covert-creator-router plan): fixed-uid user creation.
+@test "first-install creates amnezia-covert via addgroup+adduser at the fixed uid/gid" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  AMNEZIA_PASSWD="$_passwd" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  grep -qE "^addgroup .*-g 391.*amnezia-covert" "$STUB_LOG"
+  grep -qE "^adduser .*-u 391.*amnezia-covert" "$STUB_LOG"
+}
+
+@test "first-install id-precheck skips creation when amnezia-covert already exists at the fixed uid" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  AMNEZIA_PASSWD="$_passwd" STUB_ID_UID=391 UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  ! grep -q "^addgroup" "$STUB_LOG"
+  ! grep -q "^adduser" "$STUB_LOG"
+}
+
+@test "first-install refuses and creates nothing when the fixed uid is held by a different user" {
+  AMNEZIA_PASSWD="$HARNESS_DIR/../test/fixtures/passwd-uid-collision" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  ! grep -q "^addgroup" "$STUB_LOG"
+  ! grep -q "^adduser" "$STUB_LOG"
+  grep -q "held by user 'nobody'" "$STUB_LOG"
+}
+
+@test "first-install pre-creates covert.log 0640 owned by amnezia-covert:amnezia-covert" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  _covert_dir="$BATS_TEST_TMPDIR/covert"
+  AMNEZIA_PASSWD="$_passwd" AMZ_COVERT_DIR="$_covert_dir" AMZ_COVERT_LOG="$_covert_dir/covert.log" \
+    UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  [ -f "$_covert_dir/covert.log" ]
+  _mode=$(stat -f %Lp "$_covert_dir/covert.log" 2>/dev/null || stat -c %a "$_covert_dir/covert.log" 2>/dev/null)
+  [ "$_mode" = "640" ]
+}

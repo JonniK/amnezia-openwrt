@@ -119,3 +119,52 @@ load '../lib/harness.bash'
   grep -q "amnezia-dns" "$S"            # init
   grep -q "99-amnezia-dns" "$S"         # hotplug
 }
+
+# Phase 9 (covert-creator-router plan): explicit per-file cp-line greps --
+# a never-added cp line yields a *clean* diff (file absent from both trees),
+# so only an explicit name-grep catches the omission.
+@test "sync maps amnezia-covert-ctl.sh to /usr/bin" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-covert-ctl" "$F"
+}
+@test "sync maps amnezia-covert-run.sh to /usr/lib/amnezia" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-covert-run.sh" "$F"
+}
+@test "sync maps amnezia-covert-logwrap.sh to /usr/lib/amnezia" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-covert-logwrap.sh" "$F"
+}
+@test "sync maps amnezia-covert.init to /etc/init.d/amnezia-covert" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "amnezia-covert.init" "$F"
+}
+@test "sync maps 40-amnezia-covert-egress.nft into the sync script" {
+  F="$HARNESS_DIR/../dev/sync-to-packages.sh"
+  grep -q "40-amnezia-covert-egress.nft" "$F"
+}
+@test "packages contain amnezia-covert-ctl in /usr/bin after sync" {
+  run sh "$HARNESS_DIR/../dev/sync-to-packages.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/bin/amnezia-covert-ctl" ]
+}
+@test "packages contain amnezia-covert-run.sh and amnezia-covert-logwrap.sh in /usr/lib/amnezia after sync" {
+  run sh "$HARNESS_DIR/../dev/sync-to-packages.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/lib/amnezia/amnezia-covert-run.sh" ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/lib/amnezia/amnezia-covert-logwrap.sh" ]
+  # Both are EXECUTED (procd command / exec'd by the launcher) -- must ship executable.
+  [ -x "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/lib/amnezia/amnezia-covert-run.sh" ]
+  [ -x "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/lib/amnezia/amnezia-covert-logwrap.sh" ]
+}
+@test "packages contain amnezia-covert init at /etc/init.d/amnezia-covert after sync" {
+  run sh "$HARNESS_DIR/../dev/sync-to-packages.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/etc/init.d/amnezia-covert" ]
+}
+@test "template_not_in_etc_nftables: covert egress template ships ONLY to /usr/share, never /etc/nftables.d" {
+  run sh "$HARNESS_DIR/../dev/sync-to-packages.sh"
+  [ "$status" -eq 0 ]
+  [ -f "$HARNESS_DIR/../packages/amnezia-pbr/files/usr/share/amnezia/nftables.d/40-amnezia-covert-egress.nft" ]
+  [ ! -f "$HARNESS_DIR/../packages/amnezia-pbr/files/etc/nftables.d/40-amnezia-covert-egress.nft" ]
+}
