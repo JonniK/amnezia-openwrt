@@ -42,6 +42,7 @@ Source of truth is `openwrt/`; `dev/sync-to-packages.sh` mirrors into `packages/
 - `openwrt/amnezia-covert.init` → `/etc/init.d/amnezia-covert` — procd init (START=99).
 - `openwrt/luci-app-amnezia/amnezia/section/covert.js` — LuCI section module.
 - bats: `test/unit/covert-ctl.bats`, `test/unit/covert-launcher.bats`, `test/unit/covert-logwrap.bats`, `test/unit/covert-egress-nft.bats`, `test/unit/covert-reap.bats`.
+- stubs: `test/stubs/amnezia-covert-init` (CLI→init, Phase 6), `test/stubs/adduser` + `test/stubs/addgroup` (installer, CI-portable, Phase 9). Phase 5 uses an inline PATH-shadowed logwrap stub.
 
 **Modify:**
 - `.gitignore` — add `build/`.
@@ -50,10 +51,11 @@ Source of truth is `openwrt/`; `dev/sync-to-packages.sh` mirrors into `packages/
 - `openwrt/luci-app-amnezia/amnezia/util.js` — add `covertStateColor()`.
 - `openwrt/luci-app-amnezia/view/main.js` — require + `Object.assign` + `refresh()` + `main.load()` index 14 + master-strip untouched.
 - `openwrt/luci-app-amnezia/acl/luci-app-amnezia.json` — add `exec` + `write` grants.
-- `openwrt/install-amnezia-pbr.sh` — create user/group (fixed uid), dir, pre-create `covert.log`, place binary+manifest, verify sha256, remove staged copy.
-- `dev/deploy-openwrt-safe.sh` — stage binary + manifest to `/tmp`.
-- `dev/sync-to-packages.sh` — include the new files (verify it globs them; add explicit entries if not).
-- `test/lib/luci-harness.js` — wire the `covert` module (9 sites, see Phase 8).
+- `openwrt/install-amnezia-pbr.sh` — create user/group (fixed uid, BusyBox `adduser`/`addgroup`), dir, pre-create `covert.log`, place binary+manifest, verify sha256, remove staged copy; add the reverse-order `uninstall` path.
+- `dev/deploy-openwrt-safe.sh` — stage binary + manifest to `/tmp` (explicit entries).
+- `dev/sync-to-packages.sh` — add **explicit `cp` entries** (this script uses hand-maintained lists, not globs): CLI, launcher+wrapper (into `/usr/lib/amnezia/`), init, and the nft template into `/usr/share/amnezia/nftables.d/` **only** (never `/etc/nftables.d/`). LuCI `covert.js` ships automatically.
+- `test/lib/luci-harness.js` — wire the `covert` module: module-load sites + the two handler-coverage sites (`WIRING` map + `buildView` `Object.assign`), see Phase 8.
+- `test/unit/shellcheck-phaseF.bats` — register `amnezia-covert-{ctl,run,logwrap}.sh` + `amnezia-covert.init` (explicit file list, `-s sh`).
 
 ---
 
@@ -63,7 +65,12 @@ Source of truth is `openwrt/`; `dev/sync-to-packages.sh` mirrors into `packages/
 - **Wave B** (consume Wave A contracts): Phase 4 (logwrap), Phase 5 (launcher), Phase 6 (CLI).
 - **Wave C** (consume Wave B): Phase 7 (init), Phase 8 (LuCI + harness), Phase 9 (installer + delivery).
 
-Commit between waves; git is the handoff. Each phase ends with `test/run.sh` (or the repo's bats entrypoint) green for its new file.
+**Same-wave dependencies are stub-satisfied in unit tests** (real integration is the live gate) — the parallelism is real only because each phase's bats shadow its same/later-wave collaborators on `PATH`, mirroring the repo's existing `test/stubs/amnezia-{dnsleak,failover}-init` convention:
+- **Phase 5 (launcher) stubs Phase 4's logwrap:** the launcher's readiness test execs a sibling that writes `state.json`. Phase 5's bats provide a **minimal PATH-shadowed `amnezia-covert-logwrap.sh` stub** (writes a scripted `state.json` sequence) — it never requires Phase 4's real artifact. (H2, sonnet-lens.)
+- **Phase 6 (CLI) stubs Phase 7's init:** `enable`/`disable`/`apply` drive `/etc/init.d/amnezia-covert`. Phase 6's bats add a new **`test/stubs/amnezia-covert-init`** (mirroring `test/stubs/amnezia-dnsleak-init`) so the CLI tests never need the real init. (L8, sonnet-lens.)
+- **Phase 9 is the one Wave-C step that is NOT independently completable and MUST run after Phase 7:** its `dev/sync-to-packages.sh` gate issues an unconditional `cp` for `openwrt/amnezia-covert.init` (Phase 7's artifact) under `set -eu` — a missing source aborts the whole script. Sequence Phase 9 last in Wave C. (H3, sonnet-lens.)
+
+Commit between waves; git is the handoff. Each phase ends with its bats green — run a single new file with `bats test/unit/<file>.bats` (the hardware-free entrypoint used by `dev/test-integration.sh`; CI runs `sudo bats test/integration test/unit`). There is no `test/run.sh`. (M7, sonnet-lens.)
 
 ---
 
@@ -87,8 +94,8 @@ Commit between waves; git is the handoff. Each phase ends with `test/run.sh` (or
 | check | asserts | how it fails |
 |---|---|---|
 | build produces an ELF | `file …/amnezia-covert-creator` matches `ELF.*aarch64` | omit `GOOS/GOARCH` → Mach-O → assertion red |
-| manifest present | all three fields non-empty | — |
-| pinned SHA | `git rev-parse HEAD` == pin | — |
+| manifest present | all three fields (`upstream_sha`/`go_version`/`artifact_sha256`) non-empty | blank any manifest field before the non-empty check → red |
+| pinned SHA | `git rev-parse HEAD` == pin | check out a different upstream ref → SHA mismatch → red (script aborts before build) |
 
 **Steps:**
 - [ ] **1.** Add `build/` to `.gitignore`; `git status` shows `build/` untracked-ignored.
@@ -107,7 +114,7 @@ Commit between waves; git is the handoff. Each phase ends with `test/run.sh` (or
 - `amz_covert_enabled` → rc 0 iff `uci -q get amnezia.config.covert_enabled` == `1`.
 - `amz_covert_reap <signal>` → `/proc`-scan: for each `/proc/<pid>/status`, if the `Uid:` line's **real-uid column** (`$2` under awk default split — `$1` is the `Uid:` label) equals `amz_covert_uid`, `kill -<signal>` it (default TERM); `2>/dev/null` absorbs pid-vanish races. Reads `/proc` as root (callers are root).
 
-**Contract:** UCI option `option covert_enabled '0'` added to `config amnezia 'config'` (line ~10), following the `dot_enabled '0'` sibling formatting.
+**Contract:** UCI option `option covert_enabled '0'` added to `config amnezia 'config'`, placed next to the `dot_enabled '0'` sibling (~line 31) and matching its formatting. (The `config amnezia 'config'` section opens at line 10; the option goes beside `dot_enabled`, not at the section head. L4, opus-lens.)
 
 **Known traps:** `pkill`/`pgrep -u`/`ps -o` are ABSENT on the target — the reap MUST be the `/proc`-scan (a stub providing `pkill` would pass green while the router can't reap: mirror the real absence in the test). `awk` at `/usr/bin/awk`.
 
@@ -203,7 +210,8 @@ Loopback-DNS accepts precede all rejects; destination rejects (private/CGNAT/lin
 - [ ] **1.** Write `covert-logwrap.bats` (5 assertions); run → fails.
 - [ ] **2.** Write the wrapper to contract.
 - [ ] **3.** bats green; each mutation red; revert.
-- [ ] **4.** Commit `feat(covert): log wrapper — generic redaction, truncate-in-place cap, state.json`.
+- [ ] **4.** Register the wrapper in `test/unit/shellcheck-phaseF.bats` (`-s sh`). (M2, opus-lens.)
+- [ ] **5.** Commit `feat(covert): log wrapper — generic redaction, truncate-in-place cap, state.json`.
 
 ---
 
@@ -213,8 +221,11 @@ Loopback-DNS accepts precede all rejects; destination rejects (private/CGNAT/lin
 
 **Interfaces — Consumes:** `amnezia-common.sh` helpers; the logwrap path; the creator binary path. **Produces:** the running creator (PID captured), a live readiness monitor writing `state.json`.
 
+**Testing note (H2, sonnet-lens):** the launcher's bats provide a **minimal PATH-shadowed `amnezia-covert-logwrap.sh` stub** that writes a scripted `state.json` sequence — Phase 5 never requires Phase 4's real artifact, keeping Wave B truly parallel (mirrors the `test/stubs/amnezia-*-init` convention).
+
 **Contract — ordered steps (design "Run wrapper" section):**
 0. `amz_covert_enabled || exit 0` — first act (procd re-execs the instance on respawn, bypassing `start_service`'s guard; a disable-race respawn must not mint a call).
+0.5. **uid-match fail-closed (design §New CLI "the boot start path ... fail-closed", lines 400/1035; C1, sonnet-lens).** Re-resolve `amz_covert_uid`; read the numeric `meta skuid` operand from the active fragment `/etc/nftables.d/40-amnezia-covert-egress.nft`. On mismatch OR unresolvable uid OR missing fragment, write `state.json`=`not-started` (reason `uid-mismatch`) and `exit 1` — **never launch the creator**. This is the respawn-safe checkpoint: procd re-execs the launcher (not `start_service`), so after a `--migrate` reallocates the uid, only a check *here* prevents the creator running under a new uid while the persisted fragment still restricts the old one — which would silently void the entire egress control. (`start_service` also reconciles via `apply` at cold boot — Phase 7 — but respawn bypasses it; the fragment is world-readable, the launcher runs as `amnezia-covert` and can read it.)
 1. Truncate `state.json` + link file. Do **not** truncate `last-call.ts`.
 2. Call-creation gap: read `last-call.ts`; sleep the remainder of 120 s; stamp `last-call.ts` just before launch.
 3. Launch via FIFO (both PIDs captured), `$PIPE=/var/run/amnezia-covert/covert.fifo`:
@@ -228,6 +239,8 @@ Loopback-DNS accepts precede all rejects; destination rejects (private/CGNAT/lin
 | test | asserts | mutation → red |
 |---|---|---|
 | `disabled_respawn_exits` | with `covert_enabled=0`, running the launcher exits 0 without launching | remove the `amz_covert_enabled \|\| exit 0` → red |
+| `launcher_uid_mismatch_fail_closed` | active fragment's `skuid` ≠ current `amz_covert_uid` → launcher writes `not-started`/`uid-mismatch` and exits non-zero, fake creator NEVER exec'd | drop the step-0.5 check → creator launches under mismatched uid → red |
+| `fifo_lives_in_var_run` | the `mkfifo` target is under `/var/run/amnezia-covert/`, not the 0750 flash dir | point `$PIPE` at `/etc/amnezia/covert/` → mkfifo EACCES as `amnezia-covert` → red |
 | `readiness_connected` | fake creator emits `CALL CREATED`+`[vk-ws] Connected`, status reaches `connected` | order the readiness wait before the launch → times out → red |
 | `readiness_timeout_not_started` | fake creator never emits → `not-started`, and NO fake-creator process survives | use `creator \| logwrap &` (so `$!`=logwrap) → surviving process → red |
 | `sigterm_no_orphan` | SIGTERM the launcher → the `trap` kills the fake creator, none survives | remove the `trap` → red |
@@ -235,10 +248,11 @@ Loopback-DNS accepts precede all rejects; destination rejects (private/CGNAT/lin
 | `call_gap_uses_dedicated_ts` | a simulated respawn still waits the 120 s gap | point the timestamp at `state.json` (truncated in step 1) → gap defeated → red |
 
 **Steps:**
-- [ ] **1.** Write `covert-launcher.bats` (6 assertions) with a fake creator; run → fails.
-- [ ] **2.** Write the launcher to contract.
+- [ ] **1.** Write `covert-launcher.bats` (8 assertions) with a fake creator + a PATH-shadowed stub logwrap; run → fails.
+- [ ] **2.** Write the launcher to contract (incl. the step-0.5 uid-match fail-closed guard).
 - [ ] **3.** bats green; mutations red; revert.
-- [ ] **4.** Commit `feat(covert): procd launcher — FIFO PID capture, trap teardown, readiness monitor, call-gap`.
+- [ ] **4.** Register the launcher in `test/unit/shellcheck-phaseF.bats` (`-s sh`). (M2, opus-lens.)
+- [ ] **5.** Commit `feat(covert): procd launcher — FIFO PID capture, trap teardown, readiness monitor, call-gap, uid fail-closed`.
 
 ---
 
@@ -257,10 +271,10 @@ Loopback-DNS accepts precede all rejects; destination rejects (private/CGNAT/lin
 **Contract — verbs (design §New CLI, exact ordering):**
 - `enable`: preflight (binary present; user exists; cookie structural check; `MemAvailable` ≥ threshold) with **no `uci set` before it completes** → install fragment with numeric-uid + LAN-ifname substitution → `fw4 check` → on fail remove + abort non-zero, firewall untouched → `uci set covert_enabled='1'; uci commit` → init `enable` **then** `restart` → `( sleep 1 && fw4 reload ) &`.
 - `disable`: stop + init-disable → `amz_covert_reap TERM`; wait; if scan non-empty `amz_covert_reap KILL`; re-verify empty → **then** remove fragment, backgrounded `fw4 reload`, remove state/link, `covert_enabled='0'`, commit. Idempotent. Cookie kept.
-- `apply`: reconcile; reap only on the (re)start path (procd reports not-running), never a healthy running creator; on preflight fail leave `covert_enabled` untouched + `status` reports the reason. Missing binary → loud dev-deploy-only error.
+- `apply`: **idempotent reconcile — this is the verb `start_service` (Phase 7 boot init) calls.** Re-resolve the uid and **re-substitute + revalidate the fragment** (numeric uid + LAN ifname → `fw4 check`), fail-closed on mismatch/unresolvable (design §New CLI lines 400/651/1035) — this is what heals a `--migrate`-reallocated uid at cold boot. Reap only on the (re)start path (procd reports not-running), never a healthy running creator; on preflight fail leave `covert_enabled` untouched + `status` reports the reason. Missing binary → loud dev-deploy-only error.
 - `status`: per the schema; reads state.json + `/etc/init.d/amnezia-covert running` bit.
 
-Also: cookie structural validator (file exists, non-empty, JSON array, each element non-empty `name`+`value` — structural only, never dials VK); `apply` re-asserts `chown root:amnezia-covert` + `chmod 0640` on the cookie after any rpcd write; uid-match **fail-closed** (abort/stop on running-uid ≠ fragment-uid).
+Also: cookie structural validator (file exists, non-empty, JSON array, each element non-empty `name`+`value` — structural only, never dials VK); `apply` re-asserts `chown root:amnezia-covert` + `chmod 0640` on the cookie after any rpcd write (rpcd `fs.write` sets mode but leaves group `root` — without the re-chown the unprivileged process can't read the cookie → `LoadCookies` fatal → silent auth-failed respawn loop); uid-match **fail-closed** (abort/stop on running-uid ≠ fragment-uid).
 
 **Assertion table** (`covert-ctl.bats` — uci stub in EXACT real quoted format, modelling `set` staged vs `commit`):
 
@@ -272,17 +286,21 @@ Also: cookie structural validator (file exists, non-empty, JSON array, each elem
 | `disable_reaps_before_fragment` | reap (real `/proc`-scan, not stubbed pkill) confirms empty BEFORE fragment removal | remove fragment before reap → red; implement reap via `pkill -u` on a pkill-less PATH → red |
 | `disable_idempotent` | disabling an already-disabled feature → exit 0, cookie kept | — |
 | `cookie_validator` | rejects non-JSON/non-array/missing name·value; accepts real shape | accept-anything → red |
-| `status_truth_table` | every row incl. `not-started`/`unknown`; `link` `null` not `""` | `running=false,enabled=true`→`idle` → red |
+| `enable_low_mem_refuses` | `/proc/meminfo` stubbed below the `MemAvailable` threshold → `enable` refuses, no `uci set`, `status` reports the reason | remove the MemAvailable check → starts anyway → red (M3, opus-lens) |
+| `apply_rechowns_cookie` | after a simulated rpcd `fs.write` leaves the cookie group `root`, `apply` runs `chown root:amnezia-covert`+`chmod 0640` on it | drop the re-chown → cookie stays group-root → red (M4, opus-lens) |
+| `apply_resubstitutes_fragment_fail_closed` | with the active fragment carrying a stale uid, `apply` re-substitutes it to the current uid (or fail-closes if unresolvable) | make `apply` skip fragment re-substitution → stale-uid fragment survives → red (C1 boot-reconcile) |
+| `status_truth_table` | per-state fixtures for all seven states incl. the three `(enabled=true,running=false)` states (`auth-failed`/`crashed`/`not-started`) discriminated by state-file+reason; `link` `null` not `""` | `running=false,enabled=true`→`idle` → red; AND collapse `crashed`→`not-started` (drop the reason discriminator) → red (M5, opus-lens) |
 | `status_reads_manifest` | build_sha/hash from BUILD_MANIFEST, not recomputed | recompute (sha the binary) → red (assert no hashing of the 11 MB file) |
 | `uid_mismatch_fail_closed` | running-uid ≠ fragment-uid → abort/stop, non-zero | downgrade to status-only warning → red |
 
-**Known traps:** UCI values are quoted in `uci show` — use `uci -q get`. Fragment lifecycle mirrors `amnezia-dnsleak-ctl.sh` (read it first). `status` must never hash the binary.
+**Known traps:** UCI values are quoted in `uci show` — use `uci -q get`. The **enable/disable UCI lifecycle** (staged set → preflight → commit) mirrors `amnezia-dnsleak-ctl.sh` (read it first). But the **template→active nft substitution** (read template, `sed` the `@@…@@`, write the active `.nft`, `fw4 check`) has NO dnsleak precedent — dnsleak installs UCI firewall *sections*, not substituted fragment files; the substitution/copy precedent is the **classifier** (`lib/amnezia-routing.sh` `sed s/@@LAN_IFNAME@@/…`, `amnezia-failover-ctl.sh` `mv … /etc/nftables.d/`). **`fw4 check` is new-to-repo** (`grep -rln "fw4 check" openwrt/` is empty) — no sibling to mirror; validate the assembled ruleset per the design's known-trap. `status` must never hash the binary. CLI tests stub the init via a new `test/stubs/amnezia-covert-init`. (L1/L8.)
 
 **Steps:**
-- [ ] **1.** Write `covert-ctl.bats` (9 assertions), uci stub real-format; run → fails.
-- [ ] **2.** Write the CLI to contract (mirror `amnezia-dnsleak-ctl.sh` for the fragment dance).
+- [ ] **1.** Add `test/stubs/amnezia-covert-init` (mirror `test/stubs/amnezia-dnsleak-init`); write `covert-ctl.bats` (12 assertions), uci stub real-format; run → fails.
+- [ ] **2.** Write the CLI to contract (dnsleak for the UCI lifecycle; classifier for the substitution/copy; `fw4 check` new).
 - [ ] **3.** bats green; mutations red; revert.
-- [ ] **4.** Commit `feat(covert): amnezia-covert-ctl (enable/disable/apply/status) with fail-closed reap+uid`.
+- [ ] **4.** Register the CLI in `test/unit/shellcheck-phaseF.bats` (`-s sh`). (M2, opus-lens.)
+- [ ] **5.** Commit `feat(covert): amnezia-covert-ctl (enable/disable/apply/status) with fail-closed reap+uid`.
 
 ---
 
@@ -292,22 +310,25 @@ Also: cookie structural validator (file exists, non-empty, JSON array, each elem
 
 **Interfaces — Consumes:** launcher path, common helpers. **Produces:** the procd service `amnezia-covert`.
 
-**Contract (design §procd init):** `USE_PROCD=1`, `START=99`, sources `amnezia-common.sh`. `start_service`: `amz_covert_enabled` guard (return if `0`); create `/var/run/amnezia-covert/` **owned by `amnezia-covert`**; open the instance with `command /usr/lib/amnezia/amnezia-covert-run.sh`, `user amnezia-covert`, `respawn 300 120 5`; **do NOT set `stdout`/`stderr`** (output must go to the wrapper, not logd). Respawn exhaustion leaves `covert_enabled='1'` and `status` reports `crashed`.
+**Contract (design §procd init):** `USE_PROCD=1`, `START=99`, sources `amnezia-common.sh`. `start_service`: `amz_covert_enabled` guard (return if `0`); create `/var/run/amnezia-covert/` **owned by `amnezia-covert`** (`mkdir -p` + `chown amnezia-covert:amnezia-covert` — else `status` reads `unknown` forever, design §procd); **call `amnezia-covert-ctl apply`** (the idempotent reconcile: re-resolve uid, re-substitute+revalidate the fragment fail-closed — design line 651 "apply → used by boot init") and **on non-zero apply, do NOT open the instance** (fail-closed cold-boot half of C1); then open the instance with `command /usr/lib/amnezia/amnezia-covert-run.sh`, `user amnezia-covert`, `respawn 300 120 5`; **do NOT set `stdout`/`stderr`** (output must go to the wrapper, not logd). Respawn exhaustion leaves `covert_enabled='1'` and `status` reports `crashed`. (The launcher's own step-0.5 uid check is the respawn-path backstop, since procd re-execs the instance, not `start_service`.)
 
-**Known traps:** init `enable` must precede `restart` (a bare `restart` on a not-yet-enabled procd service is a silent no-op — the stubby/https-dns-proxy bug). Setting `stdout`/`stderr` defeats the whole log-starvation mitigation.
+**Known traps:** init `enable` must precede `restart` (a bare `restart` on a not-yet-enabled procd service is a silent no-op — the stubby/https-dns-proxy bug). Setting `stdout`/`stderr` defeats the whole log-starvation mitigation. `apply` invoked from `start_service` must reconcile the fragment only — it must not itself `restart` the service from within `start_service` (procd opens the instance), avoiding a start recursion.
 
-**Assertion table:** bats coverage of an init is thin; gate is a real `/etc/init.d/amnezia-covert running` bit on the live gate + a static check:
+**Assertion table:** bats coverage of an init is thin; gate is a real `/etc/init.d/amnezia-covert running` bit on the live gate + static checks:
 
 | test | asserts | mutation → red |
 |---|---|---|
 | `init_no_stdout_stderr` (grep the init file) | the init does NOT `procd_set_param stdout`/`stderr` | add `stdout 1` → red |
 | `init_start_guarded` (grep) | `start_service` calls `amz_covert_enabled` and returns on false | remove the guard → red |
+| `init_creates_runtime_dir_owned` (grep) | `start_service` `mkdir`s `/var/run/amnezia-covert/` and `chown`s it to `amnezia-covert` | drop the chown → red (M6, opus-lens) |
+| `init_calls_apply_reconcile` (grep) | `start_service` calls `amnezia-covert-ctl apply` before opening the instance and bails on non-zero | remove the apply call → red (C1 boot-reconcile) |
 
 **Steps:**
-- [ ] **1.** Write the two static-grep assertions; run → fails.
+- [ ] **1.** Write the four static-grep assertions; run → fails.
 - [ ] **2.** Write the init to contract (mirror `amnezia-dnsleak.init` / `amnezia-dns.init` structure).
 - [ ] **3.** bats green; mutations red; revert.
-- [ ] **4.** Commit `feat(covert): procd init (START=99, enabled-guard, no logd routing)`.
+- [ ] **4.** Register the init in `test/unit/shellcheck-phaseF.bats` (`-s sh`). (M2, opus-lens.)
+- [ ] **5.** Commit `feat(covert): procd init (START=99, enabled-guard, apply-reconcile, no logd routing)`.
 
 ---
 
@@ -322,7 +343,10 @@ Also: cookie structural validator (file exists, non-empty, JSON array, each elem
 - `main.js`: add `covert` to the require list + `Object.assign` handler map; fold `refresh()` into `Promise.all`; `main.load()` entry at **index 14**; all exec calls `L.resolveDefault`-wrapped. Render the covert block outside `#amz-accordion`.
 - `util.js`: `covertStateColor(state)` → colour per state.
 - ACL (`write.file` block): add `"/usr/bin/amnezia-covert-ctl":["exec"]` AND `"/etc/amnezia/covert/vk-cookies.json":["write"]`.
-- **Harness (`luci-harness.js`) — 9 edits, atomic `names`↔`fn(...)` pairing:** add `covert` to the `names` DI array (~L77); add `deps.covert` at the matching position in the positional `fn(baseclass, …, deps.dns, uciStub)` call (~L80 — the grep-invisible site); add `d.covert = load('amnezia/section/covert.js', d)` in the module-load block; add index 14 to the `DATA` fixture (~L72); plus the remaining grep-matched wiring sites. Re-derive line numbers at execute time.
+- **Harness (`luci-harness.js`) — module-load wiring (the "9 edits"), atomic `names`↔`fn(...)` pairing:** add `covert` to the `names` DI array (~L77); add `deps.covert` at the matching position in the positional `fn(baseclass, …, deps.dns, uciStub)` call (~L80 — grep-invisible); add `d.covert = load('amnezia/section/covert.js', d)` in the module-load block; add index 14 to the `DATA` fixture (~L72); plus the remaining grep-matched wiring sites. Re-derive line numbers at execute time.
+- **Harness (`luci-harness.js`) — handler-coverage wiring (H1, opus-lens — TWO grep-invisible sites the module-load edits DON'T touch; without them the `handler-argorder`/`handlers_resolve` teeth never execute for covert and pass vacuously):**
+  1. Merge `(dv.covert && dv.covert.handlers) || {}` into the `buildView` `Object.assign` (L221-225, alongside failover/routing/zapret/dns) — and into every parallel assembled/repaint env the harness builds (the `av` env at ~L271 and any `dr`/`dv2` sub-env that reuses `WIRING`).
+  2. Add every covert handler to the `WIRING` map (L187-208) with its exact extra-arg signature: `handleCovertToggle: ['1']` (extra-arg toggle, `function(state, ev)`, like `handleMasterToggle`), `handleCovertApply: []` (no extra arg, reads `ev.target`). This is what drives `createHandlerFn` event-last through the covert handlers under both succeeding and rejecting fs stubs.
 
 **Known traps:** `createHandlerFn` passes the event LAST — an extra-arg handler is `function(extraArg, ev)`. Render-time `getElementById` is `null` on the device — paint synchronously in the returned tree; use `getElementById` only in `refresh()`/handlers. Missing the `names`↔`fn(...)` pairing shifts every binding and blanks panels silently. LuCI static JS is browser-cached — the live smoke-test is in a private window.
 
@@ -333,12 +357,13 @@ Also: cookie structural validator (file exists, non-empty, JSON array, each elem
 | `harness_wires_covert` | full require graph loads, every module `render()` + `main.render()` runs, no module binds `undefined` | add `covert` to `names` but not the `fn(...)` call → a different module binds `undefined` → harness self-test red |
 | `no_action_panel_open` (existing self-test) | no covert action panel carries `open` | — |
 | `handlers_resolve` (existing self-test) | every named handler resolves (never rejects) under succeeding AND rejecting fs stubs; no event object leaks as a backend arg | wire a handler `function(ev, extraArg)` → event leaks to `fs.exec` → red |
+| `covert_handlers_exercised` | `handleCovertToggle`/`handleCovertApply` are present in `WIRING` AND merged into the assembled view, so the arg-order/resolve teeth actually run for covert | add `covert` to module-load but NOT to `WIRING`+`Object.assign` → `handleCovertToggle` never invoked → the `function(ev, extraArg)` mutation stays green → red (H1, opus-lens) |
 | `acl_has_exec_and_write` | ACL contains both grants | drop either → red |
 
 **Steps:**
-- [ ] **1.** Extend the harness (9 sites) + `luci-js.bats` assertions; run → fails (module absent).
+- [ ] **1.** Extend the harness — module-load sites AND the two handler-coverage sites (`WIRING` + `Object.assign`) — plus `luci-js.bats` assertions incl. `covert_handlers_exercised`; run → fails (module absent).
 - [ ] **2.** Write `covert.js`, `covertStateColor()`, wire `main.js` (index 14), add ACL grants.
-- [ ] **3.** bats + `luci-js.bats` green; mutations red; revert.
+- [ ] **3.** bats + `luci-js.bats` green; mutations red (incl. the "WIRING-omitted → arg-order mutation stays green" check); revert.
 - [ ] **4.** Commit `feat(covert): LuCI section (toggle, cookie fs.write, live status) + harness + ACL`.
 
 ---
@@ -347,25 +372,32 @@ Also: cookie structural validator (file exists, non-empty, JSON array, each elem
 
 **Files:** Modify `openwrt/install-amnezia-pbr.sh`, `dev/deploy-openwrt-safe.sh`, `dev/sync-to-packages.sh`.
 
-**Contract (design §Installer):**
-- Installer creates `amnezia-covert` user/group with a **fixed uid/gid** (choose a value OpenWrt leaves free; document it) via an `id`-precheck: exists-with-correct-uid → skip; exists-with-different-uid or uid-taken-by-another-name → **fail loudly**. Creates `/etc/amnezia/covert/` `0750 root:amnezia-covert`; **pre-creates `covert.log` `0640 amnezia-covert:amnezia-covert`** (the wrapper cannot create it in the 0750 dir). Places binary + `BUILD_MANIFEST`, verifies sha256 against the manifest, `chmod +x`, removes the staged `/tmp` copy. All user/dir/log creation **before** anything can load the nft fragment. On `.ipk`/`install.sh` the user + empty log are still created (harmless, inert); the binary is absent → `apply` fails loud.
-- `deploy-openwrt-safe.sh`: add explicit entries staging `build/covert/dist/amnezia-covert-creator` and `BUILD_MANIFEST` to `/tmp/`.
-- `sync-to-packages.sh`: confirm the new CLI/init/lib/template/LuCI files are mirrored to `packages/` (add explicit entries if the globs miss them). CI checks `openwrt/ ↔ packages/` parity.
+**Runs after Phase 7** (its `sync-to-packages.sh` gate `cp`s Phase 7's init under `set -eu`). 
 
-**Known traps:** `install-amnezia-pbr.sh` is postinst-style (reads from `/tmp/<staged>`) — for the manually-cutover live router, apply the delta **surgically** (not a full installer re-run), snapshotting each replaced file, verifying WAN+DNS+handshake after each step. Uninstall/rollback sequence is documented in the design (§Uninstall/rollback) — implement it as the reverse.
+**Contract (design §Installer):**
+- **User/group creation — first user-creation code in this repo (`grep -rn "adduser\|useradd" openwrt/ packages/` is empty; genuinely new ground, H5 sonnet-lens).** Create `amnezia-covert` group+user with a **fixed uid/gid** (choose a value OpenWrt leaves free; document it) using **BusyBox applets** (NOT Debian `adduser` — the target is BusyBox ash): `addgroup -g <GID> amnezia-covert` then `adduser -D -H -s /bin/false -u <UID> -G amnezia-covert amnezia-covert` (`-D` no-password, `-H` no home, `-s /bin/false` no shell). Guard idempotent + collision-loud via an `id`-precheck FIRST: `id -u amnezia-covert` == fixed uid → skip; exists-with-different-uid, or the uid is held by another name (`awk -F: -v u=<UID> '$3==u{print $1}' /etc/passwd` returns a different name) → **fail loudly, create nothing**. CI runs on Ubuntu (Debian `adduser` — different flags), so the unit test MUST use a stub, not the host's real applet (see below); real BusyBox creation is proven only on the VM/live gate.
+- Creates `/etc/amnezia/covert/` `0750 root:amnezia-covert`; **pre-creates `covert.log` `0640 amnezia-covert:amnezia-covert`** (the wrapper cannot create it in the 0750 dir). Places binary + `BUILD_MANIFEST`, verifies sha256 against the manifest, `chmod +x`, removes the staged `/tmp` copy. All user/dir/log creation **before** anything can load the nft fragment. On `.ipk`/`install.sh` the user + empty log are still created (harmless, inert); the binary is absent → `apply` fails loud.
+- **Uninstall/rollback (design §Uninstall/rollback — a resolved requirement, H2 opus-lens).** Add an `uninstall` path (a function in the installer, or a dedicated `amnezia-covert-ctl uninstall` verb — pick the installer function, matching sibling teardown style) that reverses the install **in reverse order**: `amnezia-covert-ctl disable` (stop + reap + remove fragment + backgrounded `fw4 reload` + state/link + `covert_enabled='0'`) → remove `/etc/init.d/amnezia-covert` (after `disable`) → remove binary + manifest → remove `/etc/amnezia/covert/` (cookie included) → remove the ACL grants → `deluser amnezia-covert` + `delgroup amnezia-covert` (BusyBox applets) LAST. Each step idempotent (absent → skip, never error).
+- `deploy-openwrt-safe.sh`: add **explicit** entries staging `build/covert/dist/amnezia-covert-creator` and `BUILD_MANIFEST` to `/tmp/`.
+- `sync-to-packages.sh` (**hand-maintained explicit `cp` lists, NOT globs — L2 opus-lens; verified L44-52/L76-79/L109-113**): these four non-LuCI entries are ALWAYS required — the CLI `amnezia-covert-ctl`, the launcher `amnezia-covert-run.sh` + wrapper `amnezia-covert-logwrap.sh` (bespoke `cp` into `/usr/lib/amnezia/`, since their source is `openwrt/` root not `openwrt/lib/`), and the init `amnezia-covert.init`. **The nft template `40-amnezia-covert-egress.nft` is copied ONLY to `packages/.../usr/share/amnezia/nftables.d/`, NEVER to `/etc/nftables.d/` (H4 sonnet-lens).** The classifier block at `sync-to-packages.sh:89-101` dual-copies its `.nft` to BOTH dirs — do **not** mirror that pattern here: a copy into `/etc/nftables.d/` ships an active fragment with unsubstituted `@@COVERT_UID@@`/`@@LAN_IFNAME@@` → parse error that takes the whole firewall down on reload, and `sync_parity` (checks every source has *a* mirror) will NOT catch an *extra* wrong copy. The LuCI `covert.js` ships automatically (all four surfaces `cp -r` `amnezia/section/` — no edit needed). CI checks `openwrt/ ↔ packages/` parity.
+
+**Known traps:** `install-amnezia-pbr.sh` is postinst-style (reads from `/tmp/<staged>`) — for the manually-cutover live router, apply the delta **surgically** (not a full installer re-run), snapshotting each replaced file, verifying WAN+DNS+handshake after each step. BusyBox `adduser`/`deluser` flags differ from Debian's — the invocation above is BusyBox-specific.
 
 **Assertion table:**
 
 | test | asserts | mutation → red |
 |---|---|---|
-| `first-install.bats` (extend) | after install, `id amnezia-covert` succeeds with the fixed uid; `/etc/amnezia/covert/covert.log` exists `0640 amnezia-covert:amnezia-covert` | drop the pre-create → red (first-start wrapper create would EACCES) |
+| `first-install.bats` (extend, `adduser`/`addgroup`/`id` stubbed for CI portability) | install invokes `addgroup -g <GID>`+`adduser … -u <UID> …`, the `id`-precheck skips on correct-uid and fails loud on a uid collision; `/etc/amnezia/covert/covert.log` exists `0640 amnezia-covert:amnezia-covert` | drop the pre-create → red (first-start wrapper create would EACCES); drop the collision check → a taken uid silently reused → red |
+| `uninstall_reverses` (new) | `uninstall` calls `disable` before removing the init, and `deluser` LAST (after files/dir/ACL gone) | reorder `deluser` before `disable` → red |
+| `template_not_in_etc_nftables` (new, greps the synced `packages/` tree) | `40-amnezia-covert-egress.nft` exists under `packages/.../usr/share/amnezia/nftables.d/` and is ABSENT from `packages/.../etc/nftables.d/` | add an `/etc/nftables.d/` sync line for it → red |
 | `sync_parity` (existing CI check) | every new `openwrt/` file has its `packages/` mirror | omit a file from sync → parity check red |
 
 **Steps:**
-- [ ] **1.** Extend `first-install.bats` for the user + pre-created log; run → fails.
-- [ ] **2.** Implement the installer delta, deploy staging, and sync entries.
-- [ ] **3.** bats green; run `dev/sync-to-packages.sh` + the parity check green; mutation red; revert.
-- [ ] **4.** Commit `feat(covert): installer (fixed-uid user, pre-created log, binary placement) + deploy staging + sync`.
+- [ ] **1.** Add `test/stubs/adduser`, `test/stubs/addgroup` (mirror real BusyBox arg-echo behaviour); extend `first-install.bats` for the stubbed user creation + collision check + pre-created log; add `uninstall_reverses` + `template_not_in_etc_nftables`; run → fails.
+- [ ] **2.** Implement the installer delta (BusyBox `adduser`/`addgroup`, id-precheck), the `uninstall` reverse path, deploy staging, and the explicit sync entries (template → `/usr/share` only).
+- [ ] **3.** bats green; run `dev/sync-to-packages.sh` + the parity check green; mutations red; revert.
+- [ ] **4.** **Real BusyBox gate:** run `dev/vm/test-all.sh` (QEMU OpenWrt) — the CI stubs prove wiring, not that BusyBox `adduser`/`deluser` accept these flags; user creation + uninstall must be proven on real OpenWrt (CLAUDE.md: "a green stubbed/VM run is not proof" — this is the class of installer risk the VM harness exists for).
+- [ ] **5.** Commit `feat(covert): installer (fixed-uid user, pre-created log, binary placement, uninstall) + deploy staging + sync`.
 
 ---
 
@@ -387,7 +419,8 @@ Not plan tasks — a checklist for the supervised first deploy (design §Testing
 
 ## Self-Review
 
-- **Spec coverage:** every design section maps to a phase — build (1), UCI/helpers (2), egress rule (3), logwrap+redaction+cap (4), launcher+FIFO+gap (5), CLI+status+reap (6), init (7), LuCI+harness+ACL (8), installer+delivery (9), live gates (checklist). ✓
+- **Spec coverage:** every design section maps to a phase — build (1), UCI/helpers (2), egress rule (3), logwrap+redaction+cap (4), launcher+FIFO+gap+uid-fail-closed (5), CLI+status+reap+apply-reconcile (6), init+apply-boot-reconcile (7), LuCI+harness+ACL (8), installer+uninstall+delivery (9), live gates (checklist). The design's three-checkpoint uid promise (enable/apply/**boot+respawn**, fail-closed) is now covered at all three: `enable`+`apply` (Phase 6), `start_service`→`apply` cold boot (Phase 7), launcher step-0.5 respawn backstop (Phase 5). ✓
 - **Type/name consistency:** `amz_covert_reap`/`amz_covert_enabled`/`amz_covert_uid` (Phase 2) are consumed by Phases 5/6/7; the `status` JSON schema (Phase 6) is consumed by the LuCI module (Phase 8); the state.json contract (Phase 4) is consumed by the launcher monitor (Phase 5) and CLI status (Phase 6). Paths are the fixed constants in Global Constraints. ✓
 - **No unexecutable code bodies** beyond the fixed nft rule, the JSON schema, and helper signatures — per the project rule; the executor writes and runs the sh/JS test-first. ✓
-- **Phase independence:** Wave A phases share no input; Wave B consume only Wave-A contracts; Wave C consume Wave-B artifacts. ✓
+- **Phase independence:** Wave A phases share no input; Wave B consume only Wave-A contracts; Wave C consume Wave-B artifacts. Same-wave collaborators (Phase 5→4 logwrap, Phase 6→7 init) are **stub-satisfied** in units per the Waves section; the one genuine ordering constraint (Phase 9 after Phase 7 for `sync-to-packages.sh`) is called out. ✓
+- **Grep-invisible harness sites** (`WIRING` + `Object.assign`) are named explicitly so the arg-order teeth actually cover covert (H1). Uninstall/rollback is a real task with an assertion (H2). The nft template's `/usr/share`-only delivery is pinned against the classifier's dual-copy sibling (H4). ✓
