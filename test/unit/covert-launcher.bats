@@ -213,6 +213,16 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+@test "state_json_mode_0640: step-1 truncate + the timeout writer both leave state.json 0640" {
+  export AMZ_FAKE_CREATOR_MODE=quick
+  _write_fake_creator
+  run "$RUN_SH"
+  [ -f "$STATE" ]
+  perm="$(stat -c %a "$STATE" 2>/dev/null || stat -f %Lp "$STATE" 2>/dev/null)"
+  [ "$perm" = "640" ]
+}
+
+# ---------------------------------------------------------------------------
 @test "resources_flag_present: the exec'd creator command line carries -resources moderate" {
   export AMZ_FAKE_CREATOR_MODE=quick
   _write_fake_creator

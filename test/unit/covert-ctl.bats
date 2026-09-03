@@ -124,6 +124,14 @@ _uci_set_lines() {
   printf 'Name:\tsh\nUid:\t%s\t%s\t%s\t%s\n' "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" \
     > "$AMZ_PROC_DIR/$pid/status"
 
+  # A real /proc entry disappears the instant its process dies -- this
+  # fixture is a manually-created directory that would otherwise persist
+  # forever, which would make the fail-safe re-scan (M2) see a "surviving"
+  # process even after the real one is confirmed dead. Model real /proc:
+  # remove the fixture as soon as the underlying process is actually gone.
+  ( while kill -0 "$pid" 2>/dev/null; do sleep 0.02; done; rm -rf "$AMZ_PROC_DIR/$pid" ) &
+  watcher_pid=$!
+
   BAD_ORDER="$BATS_TEST_TMPDIR/bad-order"
   rm -f "$BAD_ORDER"
   "$CLI" disable &
@@ -136,6 +144,7 @@ _uci_set_lines() {
   done
   wait "$disable_pid"
   status=$?
+  wait "$watcher_pid" 2>/dev/null || true
 
   [ "$status" -eq 0 ]
   [ ! -f "$BAD_ORDER" ]
@@ -327,6 +336,57 @@ EOF
   echo "$output" | grep -q '"build_sha":"89d7a474"'
   echo "$output" | grep -q '"build_hash":"ab12cd34"'
   ! grep -q 'POISONED-' "$STUB_LOG"
+}
+
+@test "apply_drift_check_fail_restores_fragment: fw4 check failure restores the on-disk fragment byte-for-byte" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_FW4_CHECK_FAIL=1
+  printf 'chain amnezia_covert_egress {\n    meta skuid 9999 oifname "lo" reject\n}\n' > "$AMZ_COVERT_FRAGMENT"
+  ORIGINAL="$(cat "$AMZ_COVERT_FRAGMENT")"
+
+  run "$CLI" apply
+  [ "$status" -ne 0 ]
+
+  NEW="$(cat "$AMZ_COVERT_FRAGMENT")"
+  [ "$ORIGINAL" = "$NEW" ]
+  grep -q "meta skuid 9999" "$AMZ_COVERT_FRAGMENT"
+  ! grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+}
+
+@test "apply_drift_reload_fail_restores_fragment: fw4 reload failure restores the on-disk fragment byte-for-byte" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_FW4_RELOAD_FAIL=1
+  printf 'chain amnezia_covert_egress {\n    meta skuid 9999 oifname "lo" reject\n}\n' > "$AMZ_COVERT_FRAGMENT"
+  ORIGINAL="$(cat "$AMZ_COVERT_FRAGMENT")"
+
+  run "$CLI" apply
+  [ "$status" -ne 0 ]
+
+  NEW="$(cat "$AMZ_COVERT_FRAGMENT")"
+  [ "$ORIGINAL" = "$NEW" ]
+  grep -q "meta skuid 9999" "$AMZ_COVERT_FRAGMENT"
+  ! grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+}
+
+@test "disable_keeps_fragment_when_reap_cannot_confirm_empty: fail-safe -- a surviving covert-uid process keeps the fragment, non-zero" {
+  _install_fw4_stub
+  printf 'meta skuid %s oifname "lo" reject\n' "$AMZ_COVERT_UID" > "$AMZ_COVERT_FRAGMENT"
+
+  # Fabricate a /proc entry for the covert uid that the reap's kill cannot
+  # actually remove (no real process behind it -- kill is a silent no-op),
+  # simulating a genuine survivor after TERM+KILL.
+  fakepid=999999
+  mkdir -p "$AMZ_PROC_DIR/$fakepid"
+  printf 'Name:\tghost\nUid:\t%s\t%s\t%s\t%s\n' "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" "$AMZ_COVERT_UID" \
+    > "$AMZ_PROC_DIR/$fakepid/status"
+
+  run "$CLI" disable
+  [ "$status" -ne 0 ]
+  [ -f "$AMZ_COVERT_FRAGMENT" ]
+  grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+  grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
 }
 
 @test "uid_mismatch_fail_closed: running-uid != fragment-uid aborts/stops, non-zero" {

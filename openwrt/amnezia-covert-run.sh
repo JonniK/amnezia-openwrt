@@ -89,11 +89,15 @@ _json_escape() {
 }
 
 # Atomic tmp+mv write, mirroring the log wrapper's own state.json writer.
+# chmod the tmp file BEFORE the mv (mv preserves mode) so there is never a
+# 0644 window on state.json, which carries the secret join link.
 _write_state() {
   _st="$1"; _rs="${2:-}"
   _tmp="$RUN_DIR/state.json.tmp.$$"
   printf '{"state":"%s","link":null,"reason":"%s"}\n' \
-    "$(_json_escape "$_st")" "$(_json_escape "$_rs")" > "$_tmp" 2>/dev/null && mv "$_tmp" "$STATE" 2>/dev/null
+    "$(_json_escape "$_st")" "$(_json_escape "$_rs")" > "$_tmp" 2>/dev/null \
+    && { chmod 0640 "$_tmp" 2>/dev/null || :; } \
+    && mv "$_tmp" "$STATE" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -120,6 +124,7 @@ fi
 # last-call.ts here.
 # ---------------------------------------------------------------------------
 : > "$STATE" 2>/dev/null
+chmod 0640 "$STATE" 2>/dev/null || :
 : > "$LINK_FILE" 2>/dev/null
 chmod 0640 "$LINK_FILE" 2>/dev/null || :
 

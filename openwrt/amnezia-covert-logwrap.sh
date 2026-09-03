@@ -60,6 +60,25 @@ _redact() {
   printf '%s\n' "$1" | sed 's/\(, response:\).*/\1***/'
 }
 
+# ---- multi-line body suppression ------------------------------------------
+# The upstream `r` dumped after ", response:" is a raw HTTP body and CAN
+# contain embedded newlines (JSON/HTML) -- the creator's stdout+stderr is
+# read line-by-line, so a multi-line body would otherwise defeat the
+# single-line _redact above on every continuation line. Once a
+# ", response:" line is seen, every SUBSEQUENT line is masked wholesale
+# until one is unmistakably a fresh log line: either the Go `log` package's
+# default timestamp prefix (present because the upstream code never calls
+# log.SetFlags -- verified against headless/vk/*.go), or one of the
+# creator's own un-prefixed fmt.Print* markers. Erring toward
+# over-suppression is correct -- never leak a body line.
+_is_fresh_log_line() {
+  case "$1" in
+    [0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]\ *) return 0 ;;
+    *"  CALL CREATED"*|*"  join_link: "*|*"[vk-ws]"*|*"Failed"*|*"Cannot"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---- state classification ------------------------------------------------
 # Classifies off the ORIGINAL (unredacted) line's surfacing prefix -- the
 # auth-failed/rejoin signal lives there and is unaffected by redaction, but
@@ -136,6 +155,10 @@ _flush_state() {
   fi
   printf '{"state":"%s","link":%s,"reason":"%s"}\n' \
     "$(_json_escape "$CUR_STATE")" "$_link_json" "$(_json_escape "$CUR_REASON")" > "$_tmp"
+  # chmod the TMP file before the mv -- mv preserves mode, so there is never
+  # a window where state.json (carrying the secret join link) sits at the
+  # umask-default 0644.
+  chmod 0640 "$_tmp" 2>/dev/null || :
   mv "$_tmp" "$STATE"
   DIRTY=0
   LAST_WRITE=$(date +%s 2>/dev/null || echo 0)
@@ -154,8 +177,25 @@ mkdir -p "$RUN_DIR" 2>/dev/null || :
 _flush_state
 
 _line_n=0
+IN_BODY=0
 while IFS= read -r line || [ -n "$line" ]; do
   _line_n=$((_line_n + 1))
+
+  if [ "$IN_BODY" -eq 1 ]; then
+    if _is_fresh_log_line "$line"; then
+      IN_BODY=0
+      # Fall through -- process this line normally below.
+    else
+      # Still inside a suppressed multi-line body: never write the raw
+      # line, whole-line mask it instead.
+      printf '***\n' >> "$LOG"
+      _maybe_flush_state
+      if [ $((_line_n % CAP_EVERY)) -eq 0 ]; then
+        _cap_log 2>/dev/null || :
+      fi
+      continue
+    fi
+  fi
 
   _classify "$line"
   if [ -n "$_NEW_STATE" ]; then
@@ -167,6 +207,10 @@ while IFS= read -r line || [ -n "$line" ]; do
     CUR_LINK="$(_join_link_value "$line")"
     DIRTY=1
   fi
+
+  case "$line" in
+    *", response:"*) IN_BODY=1 ;;
+  esac
 
   printf '%s\n' "$(_redact "$line")" >> "$LOG"
 

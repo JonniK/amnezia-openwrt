@@ -216,18 +216,30 @@ cmd_disable() {
   "$AMNEZIA_COVERT_INIT" disable 2>/dev/null || true
 
   # Confirm no creator survives BEFORE the egress fragment is removed -- the
-  # fragment must outlive the relay, never the reverse.
+  # fragment must outlive the relay, never the reverse. Re-verify empty
+  # AFTER the TERM+KILL reap (the reap itself is best-effort and always
+  # returns 0): if a covert-uid process still exists, this is a fail-SAFE
+  # teardown -- KEEP the restrictive fragment rather than fail open, log
+  # loudly, and report non-zero. The feature is still disabled (UCI +
+  # init already stopped above) so no NEW creator starts under the kept
+  # fragment; only the fragment removal + reload are skipped.
   _covert_reap_and_confirm
 
-  rm -f "$AMZ_COVERT_FRAGMENT"
-  ( sleep 1 && fw4 reload ) &
+  _rc=0
+  if _covert_uid_procs_present; then
+    amz_log "amnezia-covert-ctl: disable: covert-uid process(es) survived TERM+KILL -- keeping the egress fragment restrictive (fail-safe), refusing to remove it"
+    _rc=1
+  else
+    rm -f "$AMZ_COVERT_FRAGMENT"
+    ( sleep 1 && fw4 reload ) &
+  fi
 
   rm -f "$AMZ_COVERT_RUN_DIR/state.json" "$AMZ_COVERT_RUN_DIR/covert-link" 2>/dev/null
 
   uci set amnezia.config.covert_enabled=0
   uci commit amnezia
 
-  return 0
+  return "$_rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -295,9 +307,29 @@ cmd_apply() {
     # No drift -- the common case. No reload.
     rm -f "$_new"
   else
+    # H-A: snapshot the current on-disk fragment BEFORE the mv, so a
+    # fw4-check or fw4-reload failure can restore it -- never leave the file
+    # showing the new (unloaded) uid while the kernel still enforces the
+    # old one. No prior fragment -> restore means "remove", matching
+    # enable's own "firewall untouched" semantics for the no-prior case.
+    _snapshot=""
+    _had_prior=0
+    if [ -f "$AMZ_COVERT_FRAGMENT" ]; then
+      _had_prior=1
+      _snapshot="$(mktemp 2>/dev/null || echo "/tmp/amnezia-covert-apply-snapshot.$$")"
+      cp "$AMZ_COVERT_FRAGMENT" "$_snapshot" 2>/dev/null
+    fi
+
     mv "$_new" "$AMZ_COVERT_FRAGMENT"
+
     if ! fw4 check >/dev/null 2>&1; then
-      amz_log "amnezia-covert-ctl: apply: fw4 check failed after re-substituting the egress fragment"
+      if [ "$_had_prior" -eq 1 ]; then
+        cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
+      else
+        rm -f "$AMZ_COVERT_FRAGMENT"
+      fi
+      rm -f "$_snapshot"
+      amz_log "amnezia-covert-ctl: apply: fw4 check failed after re-substituting the egress fragment -- restored the previously-loaded fragment"
       return 1
     fi
     # H-A: SYNCHRONOUS reload, never backgrounded -- the launcher's step-0.5
@@ -306,9 +338,16 @@ cmd_apply() {
     # instance. No interactive SSH session to protect on the boot/reconcile
     # path, unlike enable's backgrounded reload.
     if ! fw4 reload >/dev/null 2>&1; then
-      amz_log "amnezia-covert-ctl: apply: synchronous fw4 reload failed after fragment drift"
+      if [ "$_had_prior" -eq 1 ]; then
+        cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
+      else
+        rm -f "$AMZ_COVERT_FRAGMENT"
+      fi
+      rm -f "$_snapshot"
+      amz_log "amnezia-covert-ctl: apply: synchronous fw4 reload failed after fragment drift -- restored the previously-loaded fragment"
       return 1
     fi
+    rm -f "$_snapshot"
   fi
 
   # Reap only on the (re)start path -- procd reports the instance NOT

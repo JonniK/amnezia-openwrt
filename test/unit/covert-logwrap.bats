@@ -147,6 +147,37 @@ _wait_for_state() {
 }
 
 # ---------------------------------------------------------------------------
+@test "redact_multiline_body_suppresses_secret_until_next_marker: a newline inside the response body cannot smuggle a secret past redaction" {
+  token="SECRETTOKEN999"
+  printf 'Failed to create call: empty VK token, response: {\n  "access_token": "%s"\n}\n[vk-ws] <- notification chatter\n' \
+    "$token" | "$WRAP"
+
+  # NOTE: `run` + explicit status check, never a bare `! cmd` that isn't the
+  # test's LAST statement -- bash's `set -e` does not fire on a `!`-negated
+  # command's failure, so a non-final `! grep ...` silently swallows a red
+  # assertion (verified against this exact test while mutation-testing H2).
+  run grep -qF "$token" "$LOG"
+  [ "$status" -ne 0 ]
+  run grep -qF "Failed to create call: empty VK token, response:***" "$LOG"
+  [ "$status" -eq 0 ]
+  # Continuation lines are wholesale-masked, never written raw.
+  run grep -qF '***' "$LOG"
+  [ "$status" -eq 0 ]
+  run grep -q '"access_token"' "$LOG"
+  [ "$status" -ne 0 ]
+
+  run grep -o '"state":"[^"]*"' "$STATE"
+  [ "$status" -eq 0 ]
+  [ "$output" = '"state":"auth-failed"' ]
+}
+
+@test "state_json_mode_0640: state.json is written 0640, never the umask-default 0644" {
+  printf '  CALL CREATED\n' | "$WRAP"
+  perm="$(stat -c %a "$STATE" 2>/dev/null || stat -f %Lp "$STATE" 2>/dev/null)"
+  [ "$perm" = "640" ]
+}
+
+# ---------------------------------------------------------------------------
 @test "no_terminal_downgrade: a buffered CALL CREATED does not flip a not-started state back to starting" {
   printf '{"state":"not-started","link":null,"reason":"readiness-timeout"}\n' > "$STATE"
   printf '  CALL CREATED\n' | "$WRAP"
