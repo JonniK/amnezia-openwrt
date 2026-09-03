@@ -17,9 +17,13 @@ rather than a stubbed `pkill` (the "stubs must mirror real tools" trap).
 The lens also confirmed the other cycle-5 fixes hold on the router
 (combined egress rule, truncate-in-place cap, readiness-timeout ordering).
 Criticals across cycles: 8→15→1→2→0→1, each a smaller, more localized
-defect in the prior cycle's fix. **A cycle 7 is required** to confirm the
-`/proc`-scan swap introduced nothing. Every claim is read from upstream
-source or measured on the router, not asserted from memory. **Prerequisite spike PASSED
+defect in the prior cycle's fix. **Cycle 7: 0 C / 0 H / 0 M / 1 L —
+CONVERGED.** The opus lens verified the `/proc`-scan swap against the live
+router (`Uid:` field, glob, `id -u`, the `apply` running-path guard's lack
+of a healthy-kill TOCTOU, `pkill` genuinely absent) and confirmed it
+introduced nothing new; the lone LOW was a wording tidy, applied. Design
+review is complete. Every claim is read from upstream source or measured on
+the router, not asserted from memory. **Prerequisite spike PASSED
 2026-09-03** (see below) — the headless creator does create calls
 unattended and draws no VK challenge over 3 consecutive runs. **Second
 gate also PASSED** — the iPhone joiner attached to a headless-created
@@ -627,10 +631,11 @@ POSIX sh, sources `amnezia-common.sh`, `uci -q get` throughout.
   "stubs must mirror real tools" trap, since a bats stub providing `pkill`
   would pass green while the router cannot reap at all. Reaping is therefore
   a shared `amz_covert_reap` helper in `amnezia-common.sh` that scans
-  `/proc/<pid>/status` for the covert uid (the `Uid:` line's first field;
-  `awk` is present at `/usr/bin/awk`) and `kill`s matches with the given
-  signal. Only the launcher and creator run as the fixed covert uid, so a
-  uid scan is precise.
+  `/proc/<pid>/status` for the covert uid — the **real-uid column**, which
+  is `$2` under awk's default whitespace split (`awk '/^Uid:/{print $2}'`),
+  since `$1` is the literal `Uid:` label (`awk` is present at
+  `/usr/bin/awk`) — and `kill`s matches with the given signal. Only the
+  launcher and creator run as the fixed covert uid, so a uid scan is precise.
 - **`disable`** → stop + init-disable the service, then **confirm no
   creator survives before removing the fragment** (cycle-5: the egress
   fragment must outlive the relay, never the reverse): `amz_covert_reap TERM`;
