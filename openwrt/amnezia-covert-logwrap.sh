@@ -1,0 +1,183 @@
+#!/bin/sh
+# amnezia-covert-logwrap.sh -> /usr/lib/amnezia/amnezia-covert-logwrap.sh
+#
+# Reads the covert creator's combined stdout+stderr on stdin (piped in by the
+# launcher via /var/run/amnezia-covert/covert.fifo). Jobs:
+#
+#   1. Maintain /var/run/amnezia-covert/state.json (atomic tmp+mv, same dir)
+#      from a small set of marker lines the binary logs unconditionally.
+#   2. Append every line to the flash covert.log, GENERICALLY redacting any
+#      ", response:" tail -- the binary dumps a raw VK auth-response body
+#      (access_token / session_key) at nine call sites, including the
+#      self-healing rejoin path, and enumerating fixed shapes would miss
+#      some of them. Never drop the whole line -- that loses the state
+#      signal that lives in the kept prefix.
+#   3. Periodically cap covert.log to its last 2000 lines, truncating the
+#      file IN PLACE. The wrapper runs as the unprivileged amnezia-covert
+#      user: it can only APPEND/truncate covert.log (file-write, granted by
+#      its 0640 amnezia-covert:amnezia-covert mode) -- it has no write on
+#      the 0750 root:amnezia-covert parent dir, so a blackbox-style
+#      `tail ... > $LOG.tmp && mv $LOG.tmp $LOG` cap (which needs dir-write
+#      to create/rename the tmp file) would EACCES. The cap therefore
+#      stages the trimmed copy in the writable service-owned run dir and
+#      truncates covert.log via a plain `>` redirect onto the existing file.
+#
+# Never creates covert.log -- the installer pre-creates it 0640. Never
+# downgrades a terminal state.json ("not-started"/"crashed"): a buffered
+# marker line this same process is still draining after the launcher (or a
+# future generation) declared a terminal outcome must not flip it back.
+set -eu
+
+LOG="${AMZ_COVERT_LOG:-/etc/amnezia/covert/covert.log}"
+RUN_DIR="${AMZ_COVERT_RUN_DIR:-/var/run/amnezia-covert}"
+STATE="$RUN_DIR/state.json"
+
+CAP_LINES=2000
+# Cap check cadence: every N processed lines -- bounded cost, never a
+# per-line stat+rewrite (the design's "cap runs periodically, not per-line").
+CAP_EVERY=200
+
+_cap_log() {
+  tail -n "$CAP_LINES" "$LOG" > "$RUN_DIR/logcap" && cat "$RUN_DIR/logcap" > "$LOG"
+}
+
+# --cap-once: run a single cap pass and exit. The launcher never invokes
+# this -- it exists so the truncate-in-place mechanism can be exercised
+# directly (no live FIFO needed).
+if [ "${1:-}" = "--cap-once" ]; then
+  _cap_log
+  exit 0
+fi
+
+# ---- generic redaction --------------------------------------------------
+# On ANY line containing ", response:" keep everything up to and including
+# "response:" and replace the remainder with ***. Prefix-agnostic: it does
+# not matter which "empty X" produced it, nor which wrapper surfaced it
+# ("Failed to create call:", "Failed to join existing call:", or
+# "[rejoin] Failed:") -- covers all nine upstream body-dump sites and any
+# future one, without enumerating fixed shapes.
+_redact() {
+  printf '%s\n' "$1" | sed 's/\(, response:\).*/\1***/'
+}
+
+# ---- state classification ------------------------------------------------
+# Classifies off the ORIGINAL (unredacted) line's surfacing prefix -- the
+# auth-failed/rejoin signal lives there and is unaffected by redaction, but
+# classifying before masking keeps the two concerns explicitly ordered per
+# the design ("classify off the wrapper prefix first, then mask the tail").
+# Sets _NEW_STATE/_NEW_REASON directly (called un-substituted, so it mutates
+# the caller's shell -- no subshell, no need to thread two return values
+# through a subshell's single stdout). Reason is always a fixed short label,
+# never the raw line -- the raw line before its ", response:" marker never
+# carries a secret, but keeping state.json free of any dynamic auth text is
+# the simpler invariant to hold.
+_classify() {
+  _l="$1"
+  _NEW_STATE=""
+  _NEW_REASON=""
+  case "$_l" in
+    *"  CALL CREATED"*) _NEW_STATE=starting ;;
+    *"[vk-ws] Connected"*) _NEW_STATE=connected ;;
+    *"Failed to create call:"*) _NEW_STATE=auth-failed; _NEW_REASON=failed-to-create-call ;;
+    *"Failed to join existing call:"*) _NEW_STATE=auth-failed; _NEW_REASON=failed-to-join-call ;;
+    *"[rejoin] Failed:"*) _NEW_STATE=auth-failed; _NEW_REASON=rejoin-failed ;;
+    *"Cannot read cookies:"*) _NEW_STATE=auth-failed; _NEW_REASON=cannot-read-cookies ;;
+    *"Cannot parse cookies:"*) _NEW_STATE=auth-failed; _NEW_REASON=cannot-parse-cookies ;;
+  esac
+}
+
+_is_join_link() {
+  case "$1" in
+    *"  join_link: "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_join_link_value() {
+  printf '%s' "${1##*"  join_link: "}" | tr -d '\n'
+}
+
+_json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+_is_terminal() {
+  case "$1" in
+    not-started|crashed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_disk_state() {
+  [ -f "$STATE" ] || { printf 'idle'; return 0; }
+  sed -n 's/.*"state":"\([^"]*\)".*/\1/p' "$STATE" | head -n1
+}
+
+# ---- in-memory snapshot, flushed to state.json (throttled) --------------
+CUR_STATE=idle
+CUR_LINK=""
+CUR_REASON=""
+DIRTY=1     # force the very first flush, unconditionally (establishes "idle").
+LAST_WRITE=0
+
+_flush_state() {
+  _on_disk="$(_disk_state)"
+  if _is_terminal "$_on_disk"; then
+    # Refuse to downgrade a terminal state -- even from a buffered marker
+    # this same process is still draining after a terminal write landed.
+    DIRTY=0
+    return 0
+  fi
+  _tmp="$RUN_DIR/state.json.tmp.$$"
+  if [ -n "$CUR_LINK" ]; then
+    _link_json="\"$(_json_escape "$CUR_LINK")\""
+  else
+    _link_json=null
+  fi
+  printf '{"state":"%s","link":%s,"reason":"%s"}\n' \
+    "$(_json_escape "$CUR_STATE")" "$_link_json" "$(_json_escape "$CUR_REASON")" > "$_tmp"
+  mv "$_tmp" "$STATE"
+  DIRTY=0
+  LAST_WRITE=$(date +%s 2>/dev/null || echo 0)
+}
+
+# State rewrite <= once/sec regardless of marker rate (bounded cost).
+_maybe_flush_state() {
+  [ "$DIRTY" -eq 1 ] || return 0
+  _now=$(date +%s 2>/dev/null || echo 0)
+  if [ "$LAST_WRITE" -eq 0 ] || [ $(( _now - LAST_WRITE )) -ge 1 ]; then
+    _flush_state
+  fi
+}
+
+mkdir -p "$RUN_DIR" 2>/dev/null || :
+_flush_state
+
+_line_n=0
+while IFS= read -r line || [ -n "$line" ]; do
+  _line_n=$((_line_n + 1))
+
+  _classify "$line"
+  if [ -n "$_NEW_STATE" ]; then
+    CUR_STATE="$_NEW_STATE"
+    CUR_REASON="$_NEW_REASON"
+    DIRTY=1
+  fi
+  if _is_join_link "$line"; then
+    CUR_LINK="$(_join_link_value "$line")"
+    DIRTY=1
+  fi
+
+  printf '%s\n' "$(_redact "$line")" >> "$LOG"
+
+  _maybe_flush_state
+
+  if [ $((_line_n % CAP_EVERY)) -eq 0 ]; then
+    _cap_log 2>/dev/null || :
+  fi
+done
+
+# Final flush on EOF (creator exited / pipe closed) so nothing pending is lost.
+if [ "$DIRTY" -eq 1 ]; then
+  _flush_state
+fi
