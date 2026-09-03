@@ -2,49 +2,96 @@
 
 **Date:** 2026-09-03
 **Branch:** `feat/covert-creator-router`
-**Status:** design-review cycle 1 complete (2 internal opus + 1 external
-codex). **8 CRITICAL / 15 HIGH found, all addressed in this revision**
-except one that cannot be resolved by design alone — see Prerequisite
-below. Ready for a second review pass once the prerequisite spike
-result is in.
+**Status:** design-review cycles 1 and 2 complete (2 internal opus + 1
+external codex each). Cycle 1: 8 C / 15 H. Cycle 2: **~15 C / ~28 H —
+most of them defects introduced by cycle 1's own fixes**, which is the
+documented "fix rounds introduce defects at a high rate" pattern. This
+revision addresses cycle 2 and, crucially, replaces every claim that
+was previously asserted from memory with one read out of the upstream
+source or measured on the router. **Not ready for implementation** —
+see Prerequisite.
+
+> **Correction — a credential-handling mistake in the previous
+> revision of this document.** The earlier Prerequisite told the user
+> to paste the spike's raw log output, asserting "the binary's own log
+> never echoes the cookie value." That assertion was made from memory
+> and is **wrong on exactly the failure path the spike is designed to
+> trigger**: `headless/vk/main.go:264` logs
+> `fmt.Errorf("empty VK token, response: %s", string(r))` where `r` is
+> the raw body of `https://login.vk.ru/?act=web_token` — the response
+> that carries `access_token`; `main.go:287` does the same for
+> `calls.start`. Both reach stdout via `log.Fatalf` (`main.go:704`) and
+> neither is wrapped in `common.MaskError`, which the code *does* use
+> elsewhere (`main.go:579,592`). Separately, the join link is not just
+> an admission token — it is the **tunnel obfuscation secret**
+> (`main.go:718`: `tunnel.NewTunnelObfuscator(tunnel.DeriveSecretFromJoinLink(callInfo.JoinLink))`)
+> and is logged in the clear at `main.go:722`. The Prerequisite below
+> is rewritten to report **only redacted, derived facts**. No raw log
+> is to be pasted anywhere.
 
 ## Prerequisite — must pass before any Phase 1 build work starts
 
-Three independent reviewers flagged the same critical gap: **Phase 0
-never actually ran `headless/vk` in creator mode.** It ran
+**Phase 0 never ran `headless/vk` in creator mode.** It ran
 `relay/main.go --mode vk-video-creator` (browser-bridged) on the Mac
-and the native iOS app (which uses the *joiner* path). The native
-headless *creator* — what this whole design packages — has never been
-executed by anyone in this project. The proposal's own July analysis
-records a known blocker for exactly this binary: *"VK's known
-headless-CLI limitation (interactive captcha)"* — a blocker Phase 0
-sidestepped only because it used the GUI Creator app, which this
-design removes.
+and the native iOS app (the *joiner* path). The native headless
+*creator* — what this whole design packages — has never been executed
+by anyone in this project.
 
-This is a credential-gated fact I cannot verify myself (per this
-project's hard credential rule, I never handle the VK session cookie).
-**Before any packaging/procd/LuCI work starts, run this once, on your
-own machine, with your own cookies:**
+**Newly established by reading the source (was previously an open
+risk):** `headless/vk/` contains **no captcha handling whatsoever** —
+`grep -rn captcha headless/vk/` returns nothing. The captcha flow
+(`StartCaptchaProxy`, the `CAPTCHA:http://127.0.0.1:<port>/` prompt)
+exists only in `relay/pion/headless-joiner-common/{vk_auth,captcha_proxy}.go`,
+i.e. the **joiner** package. So if VK challenges the creator's
+`calls.start`/`web_token` request, `CallID` comes back empty →
+`log.Fatalf` → process exit, with no interactive recovery path in this
+binary at this SHA. The consequence is therefore **terminal, not
+merely reshaping**: procd would respawn, fail identically, and give up.
+
+The spike is what decides whether VK actually challenges this account,
+which is a per-account/per-behaviour fact no amount of source reading
+can settle.
+
+### How to run it safely
 
 ```sh
 cd /Users/jonnik/amnezia-external/whitelist-bypass/headless/vk
-go build -o /tmp/headless-vk-creator .
-/tmp/headless-vk-creator -cookies /path/to/your/vk-cookies.json -write-file /tmp/vk-link.txt
+go build -o /tmp/hvk .
+/tmp/hvk -cookies /path/to/your/vk-cookies.json > /tmp/hvk.log 2>&1
+# let it run ~60s, then Ctrl-C
 ```
 
-Watch for: does it print `WAITING_FOR_COOKIES`-style prompts only (fine
-— that's just the no-cookie-supplied path, not relevant here since
-`-cookies` is given), does it create a call and print a link within a
-reasonable time, or does it hang / print something indicating a
-captcha/verification challenge? Run it **at least 3 times** (respawn
-will do this routinely in production) to see if repeated call-creation
-from the same account triggers anything. Paste back the **log output**
-(not the cookies file) so I can read the actual behavior — the
-binary's own log never echoes the cookie value.
+**Report back only these derived facts — never the log itself:**
 
-If this hits a captcha wall, Phase 1's entire shape changes (the
-headless creator can't run unattended, full stop — see Risks). If it
-doesn't, the rest of this design is what to build.
+```sh
+# 1. did it create a call?
+grep -c "CALL CREATED" /tmp/hvk.log
+# 2. did it reach the SFU websocket?
+grep -c "vk-ws\] Connected" /tmp/hvk.log
+# 3. any challenge/captcha/rate-limit signal?
+grep -ic "captcha\|challenge\|too many\|flood\|rate" /tmp/hvk.log
+# 4. did it die, and on what class of error? (error TEXT only, no response bodies)
+grep -oE "Failed to create call|Cannot read cookies|Cannot parse cookies|empty (VK token|call_id|ok_join_link)" /tmp/hvk.log | sort | uniq -c
+```
+
+Those four counts are all I need. **Do not paste the log**, and note
+that `/tmp/hvk.log` itself now contains an access token if run #4
+matched `empty VK token` — delete it (`rm -f /tmp/hvk.log`) when done.
+
+Run the whole thing **3 times** (a crash loop would do this in
+production) to see whether repeated call creation from the same
+account starts drawing challenges.
+
+**One more step, which closes a second unknown for free:** Phase 0
+proved the iOS/Mac joiner works against a **GUI-created** call. Whether
+it attaches to a **headless-created** call is independent and currently
+scheduled as a post-build live gate. Since you have both halves on hand:
+take the `join_link` the spike printed, paste it into the existing
+joiner app, and load a page. If that works, the end-to-end question is
+settled before any packaging work starts rather than after.
+
+If the spike shows challenges, Phase 1 does not proceed in this shape
+— the headless creator cannot run unattended, full stop.
 
 ## Goal
 
@@ -147,496 +194,521 @@ the creator; after this phase the joiner works whenever the router is up
 
 ---
 
-## Egress restriction (new section — resolves the LAN-exposure finding)
+## Egress restriction
 
 The creator is, by construction, an unauthenticated exit relay: anyone
-holding the VK call link (displayed in LuCI, copy-pasted between
-devices) can join and route traffic through it. Left unrestricted, that
-traffic reaches not just the internet but the router's own admin plane
-and the whole LAN — SSH on `:2323`, LuCI, dnsmasq, every LAN host.
+holding the VK call link can join and route traffic through it. Left
+unrestricted that traffic reaches not just the internet but the
+router's own admin plane and the whole LAN — SSH on `:2323`, LuCI,
+dnsmasq, every LAN host.
 
-P1 mitigation, kept minimal (full policy-routing integration is P2):
-- The creator runs as a **dedicated system user** `amnezia-covert`
-  (procd `procd_set_param user amnezia-covert`), not root. It does not
-  need root — it binds ephemeral UDP ports for WebRTC/ICE, nothing
-  privileged.
-- One new fw4 rule, in its own file
-  `/etc/nftables.d/40-amnezia-covert-egress.nft` (validated with
-  `fw4 check`, per the project's nftables.d convention — never
-  `nft -c -f` on a fragment):
+**Cycle-2 correction.** The previous revision's rule was wrong in four
+independent ways, all verified: it rejected `127.0.0.0/8`, which is
+where this router's own resolver lives (`/etc/resolv.conf` on the
+device reads `nameserver 127.0.0.1` + `nameserver ::1`, confirmed by
+inspection), so the creator could never resolve `login.vk.ru` and the
+feature could not start at all; it was IPv4-only while LuCI, dropbear
+and dnsmasq all bind dual-stack; it omitted CGNAT (`100.64.0.0/10`,
+common on RU ISPs) and link-local; and it used `meta skuid` with a
+**name** that nothing in this repo creates — an unresolvable name is a
+ruleset **parse error**, and `/etc/nftables.d/*.nft` fragments load
+atomically inside `table inet fw4`, so it would have taken the
+classifier and the whole firewall down with it. That is a direct
+"never break client internet" violation, on a feature that is supposed
+to be inert when disabled.
+
+Corrected design, following the **`amnezia-dnsleak-ctl` precedent**
+already in this repo (fw4 rules installed by `enable`, removed by
+`disable`, never shipped statically):
+
+- The creator runs as a dedicated system user `amnezia-covert`, created
+  explicitly at install time (see Installer — this repo has **no**
+  existing user-creation infrastructure; `grep -rn "adduser\|useradd" openwrt/ packages/`
+  returns nothing, so it is a new, named install step, not an
+  assumption).
+- The fragment lives as a **template** at
+  `/usr/share/amnezia/nftables.d/40-amnezia-covert-egress.nft`,
+  mirroring the classifier's existing template/active split. It is
+  copied into `/etc/nftables.d/` **only by `amnezia-covert-ctl enable`**,
+  and removed by `disable`. It is never shipped into `/etc/nftables.d/`
+  by any installer or by `dev/sync-to-packages.sh`, so the `.ipk` and
+  `install.sh` paths (where the feature is deliberately inert) cannot
+  load it.
+- `enable` resolves the **numeric uid** at activation time and
+  substitutes it into the template (`@@COVERT_UID@@` → e.g. `1001`),
+  exactly like the classifier's `@@LAN_IFNAME@@` substitution. A numeric
+  uid cannot fail to resolve at parse time, which removes the
+  whole-firewall failure mode rather than merely making it less likely.
+- Activation sequence is gated and reversible: write the active
+  fragment → **`fw4 check`** (the assembled-ruleset validator; a bare
+  `nft -c -f` on a fragment reports false errors, per project rule) →
+  on failure, remove the fragment and abort `enable` with a specific
+  error, changing nothing; on success, `( sleep 1 && fw4 reload ) &`
+  backgrounded, because a foreground `fw4 reload` can drop the SSH
+  session that is the recovery channel.
+- The rule itself, with DNS explicitly permitted first:
   ```
   chain amnezia_covert_egress {
-      type filter hook output priority -1; policy accept;
-      meta skuid amnezia-covert ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 } reject
+      type filter hook output priority filter; policy accept;
+      meta skuid @@COVERT_UID@@ udp dport 53 ip daddr 127.0.0.1 accept
+      meta skuid @@COVERT_UID@@ tcp dport 53 ip daddr 127.0.0.1 accept
+      meta skuid @@COVERT_UID@@ ip  daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8 } reject
+      meta skuid @@COVERT_UID@@ ip6 daddr { ::1/128, fc00::/7, fe80::/10 } reject
   }
   ```
-  This denies the creator process itself from reaching RFC1918 space,
-  loopback, and (transitively) the router's own management surfaces,
-  while leaving its route to the real internet (and to VK's own
-  infrastructure) untouched. Traffic **forwarded through the tunnel**
-  by the relay bridge on behalf of the joiner is a kernel-level
-  userspace socket relay (the creator process itself makes the outbound
-  connections), so this same uid-scoped rule covers joiner-forwarded
-  traffic too — it's the creator process doing the dialing either way.
-- Threat model stated explicitly: anyone with the link gets router-IP
-  internet egress (not LAN access, after the rule above). Link secrecy
-  is the only admission control in P1 — treat the link like a
-  credential, don't publish it. A dedicated/disposable VK account is
-  recommended over the user's primary one (see Risks — this also
-  bounds the blast radius of the call-creation-storm/account-ban risk).
+- Coverage rationale, restated correctly (the previous wording — "a
+  kernel-level userspace socket relay" — was incoherent): every flow
+  the joiner asks for is dialled **by the creator process itself**
+  (`relay/tunnel/relay_bridge.go` uses `net.DialTimeout`/`net.DialUDP`
+  in-process), so those sockets carry the creator's uid and the
+  `hook output` uid match covers joiner-forwarded traffic as well as
+  the creator's own.
+- **Known accepted limitation:** this also rejects WebRTC ICE
+  host-candidate checks toward LAN peers. Irrelevant here — the joiner
+  is remote and reaches the router via the SFU, never as a LAN peer.
+- Threat model, stated plainly: anyone with the link gets **router-IP
+  internet egress**. Link secrecy is the only admission control in P1.
+  The link is additionally **key material** — `main.go:718` derives the
+  tunnel obfuscation secret from it via
+  `tunnel.DeriveSecretFromJoinLink` — so it is handled as a secret
+  everywhere it is stored (see Secrets). A dedicated/disposable VK
+  account is recommended over the user's primary one.
 
 ---
 
 ## Components
 
-### Upstream source pinning & build (new: this repo's first compiled artifact)
+### Upstream source pinning & build
 
 Source: `github.com/kulikov0/whitelist-bypass`, pinned to commit
-`89d7a474b7aca6cce664280e6feeaeca2706733b`. **Corrected framing per
-Background item 2:** this SHA is the tree Phase 0 built from, not proof
-the creator-mode binary works — that's the Prerequisite's job. The bump
-procedure (re-clone, re-run the Prerequisite spike, update the SHA)
-replaces floating `main` — upstream has broken things on `main` before
-(Telemost, per Phase 0 results).
+`89d7a474b7aca6cce664280e6feeaeca2706733b` — the tree Phase 0 built
+from, **not** proof the creator-mode binary works (that is the
+Prerequisite's job). Bumping means: re-clone, re-run the Prerequisite
+spike, update the pin.
 
 **Why not commit the binary or vendor the Go source:** this repo is
-POSIX-sh-only by convention and explicitly avoided pulling upstream's
-git history earlier this session specifically to dodge large committed
-binaries. A new `dev/build-covert-creator.sh` (**corrected build
-command from review — `-C` must be the first flag, and `-o` is
-interpreted relative to the `-C` directory, so it must be absolute**):
+POSIX-sh-only by convention, and upstream's git history carries large
+committed Android binaries (the reason Phase 0 used a sparse+partial
+clone). A new `dev/build-covert-creator.sh` builds it into a gitignored
+`build/` (which must be **added to `.gitignore` as part of this phase** —
+it is not there today).
 
-```sh
-#!/bin/sh
-set -eu
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$REPO_ROOT/build/covert/src"
-DIST="$REPO_ROOT/build/covert/dist"
-PIN="89d7a474b7aca6cce664280e6feeaeca2706733b"
+Per the project rule that a spec must not carry code it cannot run,
+what follows is the **contract**, not a script body to copy verbatim —
+the executor writes it and runs it for real:
 
-command -v go >/dev/null || { echo "go toolchain required" >&2; exit 1; }
-go version | grep -q go1.26 || { echo "expected go1.26.x (got: $(go version))" >&2; exit 1; }
-
-rm -rf "$SRC"
-mkdir -p "$SRC" "$DIST"
-git clone --filter=blob:none --no-checkout --sparse \
-  https://github.com/kulikov0/whitelist-bypass "$SRC"
-git -C "$SRC" sparse-checkout set headless/vk
-git -C "$SRC" checkout "$PIN"
-[ "$(git -C "$SRC" rev-parse HEAD)" = "$PIN" ] || { echo "checkout SHA mismatch" >&2; exit 1; }
-
-go -C "$SRC/headless/vk" build -trimpath -ldflags="-s -w" \
-  -o "$DIST/headless-vk-creator" .
-
-file "$DIST/headless-vk-creator" | grep -q 'ARM aarch64' \
-  || { echo "build did not produce an aarch64 binary" >&2; exit 1; }
-
-sha256sum "$DIST/headless-vk-creator" > "$DIST/headless-vk-creator.sha256"
-{
-  echo "upstream_sha=$PIN"
-  echo "go_version=$(go version)"
-  echo "built_at=$(date -u +%FT%TZ)"
-} > "$DIST/BUILD_MANIFEST.txt"
-echo "Built: $DIST/headless-vk-creator"
-cat "$DIST/headless-vk-creator.sha256"
-```
-
-`build/` is added to `.gitignore` (it currently is **not** — review
-caught that this design would otherwise be one `git add -A` from
-committing an 11MB binary, exactly what the sparse-checkout dance
-earlier this session was avoiding). The manifest + sha256 let `status`
-report which build is actually on the router (see CLI section) — matches
-this project's own lesson that "deployed ≠ confirmed running" for
-opaque artifacts.
+- **Must set `GOOS=linux GOARCH=arm64 CGO_ENABLED=0`.** Cycle 2 caught
+  their absence: without them the build silently produces a darwin/arm64
+  Mach-O on the dev Mac and then fails its own ELF assertion. (The
+  earlier "11 MB, static, stripped, ARM aarch64" measurement in
+  Background §1 came from a manual build with these variables set, not
+  from the script as it was written.)
+- **Sparse checkout must include `relay/` as well as `headless/vk`.**
+  Verified: `headless/vk/go.mod:11` is
+  `replace whitelist-bypass/relay => ../../relay`, so a checkout of
+  `headless/vk` alone cannot build. The Prerequisite spike does not
+  catch this, because the local clone is already full.
+- Assert the checkout landed on the pin (`git rev-parse HEAD` == pin)
+  rather than assuming a blobless clone fetched an arbitrary SHA.
+- Assert the artifact: `file` reports a **static ARM aarch64** ELF.
+- Checksum with a command that exists on macOS — `shasum -a 256`, not
+  `sha256sum` (cycle 2: the script runs on the dev Mac, where
+  `sha256sum` does not exist and `set -eu` would abort).
+- Emit `BUILD_MANIFEST` (upstream SHA, Go version, artifact sha256)
+  **and install it to the router** alongside the binary — the previous
+  revision produced it only on the Mac, leaving `status.build_sha` with
+  no data source on the device.
+- Upstream's own `build-headless.sh` at the repo root is the sibling
+  reference for the build invocation; read it rather than reconstructing
+  the command.
 
 ### UCI state (`/etc/config/amnezia`, `config amnezia 'config'`)
 
 ```
-option covert_enabled       '0'                                   # opt-in, default off
-option covert_cookies_path  '/etc/amnezia/covert/vk-cookies.json'  # path only — the secret lives in the file, never in UCI
+option covert_enabled  '0'   # opt-in, default off
 ```
 
-`covert_resources` is **dropped** from this revision — review correctly
-flagged it as a dead knob (nothing read it; `moderate` was hardcoded).
-If per-deployment tuning is ever needed, add it back paired with an
-actual reader in the init script, not before. `covert_cookies_path`
-**is** read by the init script now (see procd init) — the other dead-knob
-finding, fixed by actually wiring it up rather than dropping it, since
-letting the user relocate the cookie file is a reasonable knob to keep.
+`covert_resources` was dropped in the previous revision (dead knob).
+`covert_cookies_path` is **also dropped now**: cycle 2 showed it was
+only half-wired and could not be fully wired — the rpcd ACL `write`
+grant is path-exact, so a relocated path makes LuCI's Save button fail
+with a permission error while the init happily reads the new location.
+The cookie path is a fixed constant
+(`/etc/amnezia/covert/vk-cookies.json`), documented, matching how
+`dot_resolver` and friends are handled (backend-only where they can't
+be exposed coherently).
 
-### Secrets — resolved: `fs.write`, not stdin (the C2 finding across all three reviews)
+### Secrets
 
 **Verified live against the router**, not assumed: `ubus -v list file`
-shows `file.exec` takes exactly `{command, params, env}` — **no stdin
-channel exists**, confirming review's finding that the original stdin
-design was unbuildable. But `file.write` takes `{path, data, mode}`
-(confirmed from the device's own `/www/luci-static/resources/fs.js`:
-`write: function(path, data, mode)`, default mode 0644) — **this is
-the real mechanism.**
+returns `"exec":{"command":"String","params":"Array","env":"Table",...}`
+— **no stdin channel**, so the original stdin-based design was
+unbuildable. But `"write":{"path":"String","data":"String","mode":"Integer",...}`
+exists, and the device's own `/www/luci-static/resources/fs.js` exposes
+it as `write: function(path, data, mode)`. That is the mechanism.
 
-- LuCI's "Save cookies" button calls `fs.write('/etc/amnezia/covert/vk-cookies.json', textareaValue, 0o600)`
-  directly — the cookie is written by rpcd in a single ubus call, never
-  passed as a CLI argument (so it never appears in `ps`), and never
-  routed through `amnezia-covert-ctl` at all for the write itself.
-- **ACL:** the `write.file` block needs a **`write`** grant on that
-  exact path (a different primitive than the `exec` grant the original
-  draft assumed sufficient):
-  ```json
-  "write": {
-    "file": {
-      "/usr/bin/amnezia-covert-ctl":              [ "exec" ],
-      "/etc/amnezia/covert/vk-cookies.json":       [ "write" ]
-    }
-  }
-  ```
-- `/etc/amnezia/covert/` is created **0700 root:root** at install time
-  (not just the file at 0600 — the directory mode was unspecified
-  before, per review). The file itself is written by rpcd running as
-  root, so it lands owned root:root; `amnezia-covert-ctl apply` sets
-  0600 explicitly as a belt-and-suspenders step after any write, in
-  case rpcd's mode param doesn't stick exactly as expected on this
-  OpenWrt version — verify empirically at execute time.
-- **Validation, not blind trust:** `amnezia-covert-ctl enable`/`apply`
-  checks the file exists, is non-empty, and does a shallow sanity check
-  (parses as the expected cookie format) before starting the service —
-  catching a truncated/malformed paste as a distinct, surfaced error
-  rather than a generic `auth-failed` after the process starts and
-  fails.
-- `/var/run/amnezia-covert-link.txt` from the earlier draft is
-  **replaced** by a proper state file — see "Status via a dedicated
-  state file," not raw log-grepping.
+- LuCI's "Save cookies" button calls
+  `fs.write('/etc/amnezia/covert/vk-cookies.json', value, 0o640)`
+  directly — the cookie is written by rpcd in one ubus call, never
+  passed as a CLI argument, so it never appears in `ps`.
+- **Ownership model (cycle-2 CRITICAL fix).** The previous revision
+  specified `0700 root:root` dir + `0600 root:root` file *and* ran the
+  process as unprivileged `amnezia-covert` — mutually exclusive; the
+  process would get EACCES and `common.LoadCookies` (`relay/common/http.go:14`)
+  would `log.Fatalf("Cannot read cookies: %v")` into a respawn loop.
+  Corrected: directory `/etc/amnezia/covert/` is **0750 root:amnezia-covert**,
+  the cookie file **0640 root:amnezia-covert**. rpcd writes as root;
+  `amnezia-covert-ctl apply` re-asserts `chown root:amnezia-covert` +
+  `chmod 0640` after any write, since the rpcd `mode` param sets
+  permissions but not group ownership.
+- **Cookie file format (was deferred, is readable — `relay/common/http.go:14-30`):**
+  a JSON array of `{"name": "...", "value": "..."}` objects. The
+  preflight validator therefore checks: file exists, non-empty, parses
+  as JSON, is an array, and every element has non-empty `name` and
+  `value`. That is a structural check only — it never dials VK, so it
+  cannot itself leak or lock anything.
+- **Transport caveat, stated rather than glossed:** the textarea POSTs
+  the cookie over the LuCI HTTP session, and stock OpenWrt serves LuCI
+  on plain `:80` unless `luci-ssl` is installed. On a trusted LAN this
+  is the same exposure as every other LuCI credential field; if that is
+  not acceptable, the alternative is `scp` to the router over the
+  existing `:2323` SSH channel and skipping the UI for this one field.
+  Decide at execute time; do not leave it unstated.
+- **The join link is key material too** (`main.go:718`, see Egress
+  restriction). Every place it lands gets a secret's treatment:
+  `-write-file` target and the state JSON are **0640 root:amnezia-covert**,
+  and the capped log file likewise. Note `-write-file` opens
+  `O_APPEND|O_CREATE, 0644` (`main.go:709`) — it **appends** across
+  restarts and creates world-readable — so `amnezia-covert-ctl` must
+  pre-create the file with the intended mode and truncate it on each
+  service start; the mode is not something the binary will set for us.
 
 ### New CLI `/usr/bin/amnezia-covert-ctl`
 
-POSIX sh, sources `amnezia-common.sh`, `uci -q get` throughout. Full
-verb contract (review flagged the original as too loose to implement
-against without guessing):
+POSIX sh, sources `amnezia-common.sh`, `uci -q get` throughout.
 
-- **`enable`** → preflight: `covert_cookies_path` (from UCI, falling
-  back to the default if unset) exists, non-empty, passes the shallow
-  format check. On failure: **no UCI mutation**, print a specific
-  reason to stderr, exit 1. On success: `uci set amnezia.config.covert_enabled='1'; uci commit amnezia`
-  as a single uninterrupted sequence (minimizes the shared-UCI-commit
-  race window flagged in review — see "UCI commit race" in Risks), then
-  `/etc/init.d/amnezia-covert enable && /etc/init.d/amnezia-covert restart`
-  (matches the DoT precedent: `restart` on a not-yet-`enable`d procd
-  service is a silent no-op — this project has shipped that exact bug
-  before). Exit 0 on success.
-- **`disable`** → `/etc/init.d/amnezia-covert stop && /etc/init.d/amnezia-covert disable`,
-  removes the state file and the link, `covert_enabled='0'`, commit.
-  Idempotent: disabling an already-disabled service is exit 0, not an
-  error. Cookies file is **not** deleted.
-- **`apply`** → idempotent; re-asserts the running state matches UCI
-  (used by boot init and by `enable`). If `covert_enabled=0`: ensures
-  the service is stopped, exit 0 regardless of prior state. If
-  `covert_enabled=1`: runs the same preflight as `enable`; if it fails
-  (e.g. cookies file went missing after a factory-reset-adjacent event),
-  logs the reason, leaves `covert_enabled` untouched but does **not**
-  start the process, and `status` reports `state: "auth-failed"` with a
-  reason string rather than silently doing nothing. If the binary
-  itself is missing, fails loudly (distinct exit code) — this is the
-  expected state on any install path other than
-  `dev/deploy-openwrt-safe.sh` in P1 (see Installer section) and must
-  say so in its error text, not just "not found."
-- **`status`** → reads `/var/run/amnezia-covert.json` (written by the
-  log-wrapper, see below) plus `ubus call service list` for the procd
-  running bit, and returns exactly one JSON object on stdout:
+- **`enable`** → preflight in this order, with **no `uci set` before it
+  completes** (cycle 1: `uci` staging is process-shared in `/tmp/.uci/`,
+  so even an uncommitted `set` can be flushed by another amnezia CLI's
+  commit): binary present; `amnezia-covert` user exists; cookie file
+  passes the structural check above; `MemAvailable` above threshold.
+  Then: install the nft fragment with uid substitution → `fw4 check` →
+  on failure remove it and abort → `uci set covert_enabled='1'; uci commit amnezia`
+  → `/etc/init.d/amnezia-covert enable && /etc/init.d/amnezia-covert restart`
+  (init `enable` **before** `restart`: a bare `restart` on a
+  not-yet-enabled procd service is a silent no-op, a bug this project
+  has already shipped once with stubby/https-dns-proxy) →
+  `( sleep 1 && fw4 reload ) &`.
+- **`disable`** → stop + init-disable the service, remove the nft
+  fragment, backgrounded `fw4 reload`, remove state/link files,
+  `covert_enabled='0'`, commit. Idempotent: disabling an
+  already-disabled feature is exit 0. Cookie file is **not** deleted.
+- **`apply`** → idempotent reconcile used by boot init and `enable`.
+  `covert_enabled=0` ⇒ ensure stopped, exit 0. `covert_enabled=1` ⇒
+  same preflight; on failure, log the specific reason, leave
+  `covert_enabled` untouched, do not start, and make `status` report it
+  (never a silent no-op). Missing binary ⇒ loud, distinct failure whose
+  text names the dev-deploy-only caveat.
+- **`status`** → reads `/var/run/amnezia-covert/state.json` plus procd's
+  running bit; emits exactly one JSON object on stdout:
   ```json
-  {
-    "enabled": true,
-    "running": true,
-    "state": "connected",
-    "link": "https://vk.com/call/join/XXXX",
-    "link_age_s": 42,
-    "reason": "",
-    "build_sha": "89d7a474",
-    "build_hash": "<sha256 prefix of the installed binary>"
-  }
+  {"enabled":true,"running":true,"state":"connected",
+   "link":"https://vk.com/call/join/XXXX","link_age_s":42,
+   "reason":"","build_sha":"89d7a474","build_hash":"ab12cd34"}
   ```
-  `state` ∈ `idle | starting | connected | auth-failed | crashed | unknown`.
-  **Truth table (resolves the "undefined field combinations" finding):**
-  `enabled=false` ⇒ always `state: "idle"`, `running: false`, no link.
-  `running=false` while `enabled=true` ⇒ `state` ∈
-  `{auth-failed, crashed}` with `reason` set — never bare `idle`, so
-  the UI can distinguish "off by choice" from "off because it died."
-  `state: "unknown"` is returned when the state file is stale beyond a
-  fixed staleness window (see log-wrapper) or missing while
-  `running=true` — an explicit "we can't tell" state, never silently
-  presented as `idle` (the exact failure mode review's H4/status
-  findings warned about). `status` never touches the network and never
-  triggers `apply`, so a LuCI poll can't stall. Exit code is always 0 if
-  JSON was produced (errors are represented *in* the JSON, via
-  `state`/`reason`), non-zero only on a genuine CLI-internal failure
-  (missing `jq`/`uci`, etc.) — LuCI's handler treats a non-zero exit as
-  a distinct "CLI broken" case, separate from any `state` value.
+  `state` ∈ `idle | starting | connected | auth-failed | crashed | not-started | unknown`.
+  **`build_sha`/`build_hash` are read from the installed
+  `/etc/amnezia/covert/BUILD_MANIFEST`** — never recomputed. Cycle 2
+  caught that the previous spec would `sha256sum` an 11 MB file on every
+  5-second LuCI poll.
 
-No `set-cookies` verb — the write is LuCI-direct via `fs.write` (see
-Secrets). No separate `watchdog` verb in P1 — Phase 0 showed the binary
-already self-heals VK's ghost-participant/reconnect churn internally;
-procd's own `respawn` is the only outer safety net needed. Revisit if
-live use shows otherwise.
+  **Truth table** (every combination defined — cycle 2 found the
+  previous one incomplete):
 
-### Status via a dedicated state file, not `logread` (resolves the log-ring-starvation + status-ambiguity findings)
+  | enabled | running | state | link | when |
+  |---|---|---|---|---|
+  | false | false | `idle` | `null` | feature off |
+  | true | true | `starting` | `null` | started, no `CALL CREATED` marker yet |
+  | true | true | `connected` | url | call created + ws connected, heartbeat fresh |
+  | true | true | `unknown` | last known | running but heartbeat stale past the window |
+  | true | false | `auth-failed` | `null` | preflight/auth failure, `reason` set |
+  | true | false | `crashed` | `null` | procd respawn budget exhausted |
+  | true | false | `not-started` | `null` | readiness gate never satisfied |
 
-Review found a serious, project-specific risk in the original "parse
-`logread`" design: `amnezia-autotunnel.sh`'s per-minute worker reads
-the **entire** logd ring looking for dnsmasq query lines, and this
-router has **already been hard-crashed once by autolearn CPU/log
-load** (project memory: `feedback-autolearn-crashed-router.md`). A
-chatty WebRTC process writing straight to the shared syslog ring risks
-evicting the lines autotunnel depends on — silently, with no error
-anywhere — and status derived from raw `logread` output has no way to
-scope itself to the *current* process incarnation, so a stale
-`connected` signature from a previous run can outlive a respawn.
+  `link` is JSON `null` (not `""`) when absent, and `link_age_s` is
+  `null` alongside it. Exit code is 0 whenever a JSON object was
+  produced — errors are represented *in* the JSON via `state`/`reason`;
+  non-zero only on a genuine CLI-internal failure, which LuCI treats as
+  a distinct "CLI broken" case.
 
-**Fix, following this project's own `/var/run/amnezia-failover.json`
-convention:** the procd service does not send the binary's stdout/stderr
-straight to syslog. Instead:
+No `set-cookies` verb (the write is LuCI-direct via `fs.write`). No
+watchdog verb in P1.
 
-```
-/usr/bin/amnezia-covert-creator ... 2>&1 | /usr/lib/amnezia/amnezia-covert-logwrap.sh
-```
+### Run wrapper, state file, and why not `logread`
 
-`amnezia-covert-logwrap.sh` (new, POSIX sh) does two things per line:
-1. Appends to a **capped, dedicated** file `/var/log/amnezia-covert.log`
-   (own size cap, e.g. 500 lines, mirroring the blackbox logger's
-   own-file-own-cap convention) — never the shared logd ring, so
-   autotunnel's full-ring scan is never at risk from this feature.
-2. On recognizing a small set of markers, atomically rewrites
-   `/var/run/amnezia-covert.json` (`write-to-tmp` + `mv`, matching the
-   project's atomic-state-file convention) with the current `state`,
-   `link`, and a timestamp. **Exact marker strings are pinned during
-   execute** (per this project's "never fabricate a stub from memory"
-   rule) by running the Prerequisite spike output through this wrapper
-   and observing the real log lines for connected/auth-failed — this is
-   explicitly still deferred, but the *architecture* (dedicated capped
-   file + state JSON, never raw `logread` parsing) is decided now, not
-   left open.
+Cycle 1 established the problem: `amnezia-autotunnel.sh` reads the
+**entire** logd ring every minute, and this router has already been
+hard-reset once by autolearn load. Sending a chatty WebRTC process's
+output into the shared ring risks evicting the lines autotunnel needs,
+silently. Cycle 2 then found the previous revision's fix contradicted
+itself — the init snippet still set `procd_set_param stdout 1 / stderr 1`
+(which *is* "send to syslog"), and `procd_append_param command 2>&1`
+appends nothing at all (the shell eats `2>&1` as a redirection of the
+`procd_append_param` call itself). `procd_set_param command` is exec'd
+without a shell, so a pipe cannot be expressed there.
 
-The wrapper is spawned fresh by procd on every service start, so the
-state file always reflects the *current* process generation — the
-truncation-on-restart bug review found in the original design (stale
-link surviving a respawn) is structurally impossible here rather than
-requiring a separate "remember to clear the file" step.
+**Resolved by making the instance a launcher script**, which is also
+where three other cycle-2 findings land:
+
+`/usr/lib/amnezia/amnezia-covert-run.sh` is what procd execs. It:
+1. Truncates `state.json` and the link file **here**, in the launcher —
+   not in `start_service`. procd does not re-run `start_service` on a
+   respawn, it re-execs the instance command, so truncation in
+   `start_service` would leave the previous generation's `connected`
+   state and link visible after a crash. (The previous revision claimed
+   staleness was "structurally impossible"; it was not.)
+2. Runs the **readiness wait here**, not in `start_service`. A blocking
+   wait inside `start_service` stalls the serial rc boot sequence and
+   stalls the LuCI `enable` click under rpcd's RPC timeout. In the
+   launcher, procd already considers the service running, so waiting is
+   free. On timeout it writes `state: "not-started"` with a reason and
+   exits.
+3. Enforces the **call-creation gap here**. Cycle 2 correctly found the
+   log-wrapper could never do this — it is a downstream pipe consumer,
+   not the parent of the next exec. The launcher records the last
+   call-creation timestamp and sleeps out the remainder of a 120 s gap
+   before exec'ing. Belt and braces: `procd_set_param respawn 300 120 5`
+   puts the same 120 s in procd's own **respawn delay** field (the
+   second field is the delay, not a window — the previous revision's
+   comment misread it; `respawn 300 5 5` would have allowed ~5 real VK
+   calls in ~25 s).
+4. Finally `exec`s the creator with stdout+stderr piped into the log
+   wrapper:
+   `exec /usr/bin/amnezia-covert-creator -cookies ... -write-file ... 2>&1 | amnezia-covert-logwrap.sh`
+
+`amnezia-covert-logwrap.sh` appends to a capped, dedicated
+`/etc/amnezia/covert/covert.log` (flash, like the blackbox logger — not
+tmpfs, so it survives reboot for diagnosis; capped in the same
+size-capped way) and rewrites `state.json` atomically (tmp + `mv`).
+**Bounded cost** (cycle-2 finding — the wrapper must not become the new
+autolearn): the state file is rewritten **at most once per second**
+regardless of marker rate, the cap check runs periodically rather than
+per line, and `-debug` stays **off** so the per-SFU-message chatter
+(`[vk-ws] <- notification`, `<- response seq=`) is not emitted at all.
+The Prerequisite spike's run gives the real steady-state line rate;
+if it is high enough to matter, the wrapper filters to marker lines
+only and drops the rest.
+
+**Markers are read from source, not deferred** (they were an
+unnecessary deferral — cycle 2):
+
+| marker | source | meaning |
+|---|---|---|
+| `  CALL CREATED` | `main.go:553` | call created |
+| `  join_link: ` | `main.go:554` | the link (also the obfuscation secret) |
+| `[vk-ws] Connected` | `main.go:583` | SFU websocket up ⇒ `connected` |
+| `Failed to create call:` | `main.go:704` | fatal ⇒ `auth-failed` |
+| `Cannot read cookies:` / `Cannot parse cookies:` | `relay/common/http.go:17,23` | credential problem ⇒ `auth-failed` |
+
+**Redaction is a hard requirement of the wrapper**, not an afterthought:
+`main.go:264` and `:287` emit raw auth-response bodies containing an
+`access_token` on the empty-token/empty-call_id paths. The wrapper must
+drop or mask any line matching those error shapes before it reaches the
+log file. This is the same defect class as the Prerequisite correction
+at the top of this document.
 
 ### procd init `/etc/init.d/amnezia-covert`
 
-`USE_PROCD=1`, `START=99` (**corrected from 98** — `amnezia-dnsleak`
-already owns 98; review caught the original's stated rationale as
-incomplete). `start_service`:
+`USE_PROCD=1`, `START=99` (98 is `amnezia-dnsleak`; 97 `amnezia-dns`;
+96 force-load/ru-load; 95 failover — verified). Sources
+`amnezia-common.sh` like the other inits. `start_service`:
 
-```sh
-start_service() {
-    config_load amnezia
-    local enabled cookies_path
-    config_get enabled config covert_enabled '0'
-    config_get cookies_path config covert_cookies_path '/etc/amnezia/covert/vk-cookies.json'
-    [ "$enabled" = "1" ] || return 0
+- reads `covert_enabled` via `config_get`; returns immediately if `0`,
+  so a default-OFF feature never starts at boot;
+- creates `/var/run/amnezia-covert/` **owned by `amnezia-covert`** —
+  necessary because `/var` → `/tmp` and `/tmp/run` is `0755 root:root`
+  on this device (verified), so an unprivileged wrapper could not
+  otherwise create its own state file, and `status` would report
+  `unknown` forever;
+- opens the instance with `command /usr/lib/amnezia/amnezia-covert-run.sh`,
+  `user amnezia-covert`, `respawn 300 120 5`;
+- **does not set `stdout`/`stderr`** — explicitly, because the whole
+  log-starvation mitigation depends on the output going to the wrapper
+  and not to logd.
 
-    # readiness gate: no RTC on this hardware, and WAN/DNS complete
-    # asynchronously after boot — starting before both are sane means
-    # VK auth fails and procd's respawn budget burns on nothing (the
-    # exact "pbr boot race" class this project has hit before).
-    amnezia_covert_wait_ready || { logger -t amnezia-covert "boot readiness timeout, not starting"; return 1; }
+**Respawn exhaustion** (5 deaths) leaves `covert_enabled='1'` — "on but
+visibly broken" is preferred over silently self-disabling a user's
+explicit opt-in — and `status` reports `crashed` with a reason naming
+respawn exhaustion, never `idle`.
 
-    rm -f /var/run/amnezia-covert.json /var/run/amnezia-covert-link.txt
+### Memory handling
 
-    procd_open_instance
-    procd_set_param command /usr/bin/amnezia-covert-creator \
-        -cookies "$cookies_path" -resources moderate
-    procd_set_param user amnezia-covert
-    procd_set_param respawn 300 5 5   # 5 restarts within 5min, then give up — see Risks for what "gave up" means
-    procd_set_param limits as="128000000"   # RSS ceiling; see Risks/OOM handling
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_append_param command 2>&1
-    procd_close_instance
-}
-```
+`-resources moderate` maps to `debug.SetMemoryLimit(64MB)`
+(`main.go:638-668`) — a **soft** GOMEMLIMIT target, not an RSS cap.
 
-(The pipe-to-logwrap from the previous section is realized via procd's
-own stdout/stderr redirection plumbing — exact procd syntax for piping
-through a filter vs. a respawned sidecar process is a plan-time detail;
-both are standard procd patterns, picked at execute time based on which
-is more robust against the wrapper itself dying independently of the
-creator.)
+**Cycle-2 correction:** the previous revision claimed
+`procd_set_param limits as=128000000` was "a hard RSS ceiling". It is
+not. `RLIMIT_AS` caps *virtual address space*; `RLIMIT_RSS` is a no-op
+on Linux. A Go runtime plus pion/DTLS/SRTP/QUIC/KCP reserves far more
+address space than it resides, so a 128 MB `as` limit is a realistic
+hard startup failure on the router while working fine on the Mac — the
+named mitigation would have broken the feature. It is **dropped**.
 
-**Respawn-exhaustion state, defined (was undefined in the previous
-draft):** if procd's respawn budget is exhausted (5 deaths in 5 minutes),
-the service instance stops trying and `covert_enabled` stays `'1'` —
-matching how the project would rather have "on but visibly broken" than
-silently self-disabling a user's opt-in choice. `status` must detect
-this (`running: false`, `enabled: true`, no fresh state-file write) and
-report `state: "crashed"` with a reason mentioning respawn exhaustion,
-not `idle`.
-
-**Call-creation backoff (resolves the account-abuse risk from review):**
-`amnezia-covert-logwrap.sh` also tracks the timestamp of the last
-call-creation marker in a small file; if the creator process is about
-to be respawned less than 2 minutes after the previous one created a
-call, the wrapper holds a short additional delay before allowing the
-next `exec`, so a genuine crash loop doesn't turn into a rapid-fire
-call-creation storm against the user's VK account (this is on top of,
-not instead of, procd's own 5-in-5min respawn cap).
-
-### Memory handling (resolves the OOM-rollback-not-provable finding)
-
-`moderate` is a Go **soft** memory target (`GOMEMLIMIT` semantics), not
-an RSS cap — the previous draft's "asks up to 64MB" understated the
-real ceiling against the router's 85MB free RAM. Concrete mitigations,
-now specified rather than deferred:
-- `procd_set_param limits as=128000000` — a hard RSS ceiling via
-  procd/ulimit, so a leak or a burst gets killed by the limit rather
-  than pressuring the whole system.
-- `amnezia-covert-ctl apply` checks `MemAvailable` from `/proc/meminfo`
-  (not the coarser `free -h`) before starting the service; refuses to
-  start below a threshold (pinned at plan/execute time against a live
-  measurement) and reports that as a distinct `reason` in `status`.
-- **First live enable is a foreground-supervised run**, not
-  enable-then-walk-away: start it, watch `free`/`top` on the router for
-  several minutes under real joiner traffic (not just idle — review
-  correctly noted idle-vs-loaded RSS differ a lot for a DTLS/SRTP
-  stack) before trusting it to run unattended across a reboot.
-- Given the OOM killer isn't guaranteed to pick the creator over
-  dnsmasq/hostapd, and this project has a **documented non-self-healing
-  path** if `amnezia_force4` gets corrupted by an unrelated dnsmasq
-  restart, the honest position (stated in Risks, not glossed over) is:
-  the RSS ceiling + preflight check bound the *likely* failure mode,
-  they do not make an OOM event impossible. `disable` is a clean
-  rollback for *this feature's own* state; it is not a guaranteed
-  recovery for whatever else the OOM killer may have already hit.
+What remains, stated honestly rather than overclaimed:
+- GOMEMLIMIT at 64 MB via `-resources moderate` (soft, real, verified in
+  source).
+- A `MemAvailable`-based preflight in `apply`/`enable` (from
+  `/proc/meminfo`, not `free -h`), refusing to start below a threshold
+  pinned against a live measurement.
+- **First live enable is foreground-supervised** under real joiner
+  traffic, not idle — RSS for a DTLS/SRTP stack differs substantially
+  between the two.
+- Honest residual: the OOM killer is not obliged to pick the creator,
+  and if it takes dnsmasq this project has a documented
+  non-self-healing path (`amnezia_force4` corruption). `disable` cleanly
+  rolls back *this feature's* state; it is not a guaranteed recovery
+  for whatever else an OOM event already hit. If live supervision shows
+  real pressure, the answer is a cgroup `memory.max`, specified and
+  measured then — not a wrong rlimit asserted now.
 
 ### LuCI UI
 
-**Placement correction from review:** the panel is rendered **outside**
-`#amz-accordion`, as its own block next to the master-state strip — not
-inside the accordion. The original draft claimed independence from
-`master_enabled` while also nesting the panel inside the
-`.amnezia-master-off { pointer-events:none }` container, which review
-correctly identified as self-contradicting (master OFF would make a
-supposedly-independent toggle physically unclickable). Placing it
-outside makes the stated independence actually true in the UI.
+Rendered **outside** `#amz-accordion`, as its own block next to the
+master-state strip — the accordion carries
+`.amnezia-master-off { pointer-events:none }` when master is OFF, which
+would otherwise make a supposedly master-independent toggle
+unclickable. Because it sits outside the
+`.amnezia-accordion details.amnezia-panel` CSS scope, it needs its own
+matching styles or it will look unlike every other panel.
 
-New require'd module `amnezia.section.covert`, added to `main.js`'s
-module list + `Object.assign` handler map, its own `refresh()` folded
-into the existing `Promise.all` polling, **plus** a `main.load()`
-data-bundle entry (`fs.exec('/usr/bin/amnezia-covert-ctl',['status'])`)
-so first paint shows real state instead of a blank/invented default —
-this project already has the DoT precedent for exactly this pattern.
+New module `amnezia.section.covert`, added to `main.js`'s require list +
+`Object.assign` handler map, its `refresh()` folded into the existing
+`Promise.all`, and a `main.load()` entry at **index 14** (verified: the
+`DATA` array currently holds indices 0–13, 12 = tunnel apps,
+13 = autotunnel — so first paint shows real state instead of a blank
+default, per the DoT precedent). All exec calls `L.resolveDefault`-wrapped
+so a rejection cannot blank the whole page.
 
-- Enable/disable toggle → `handleCovertToggle` (`ctlThenRefresh` shape,
-  `L.resolveDefault`-wrapped so a rejection can't blank the whole page).
-- Cookie `<textarea>` (write-only — never pre-filled) + "Save cookies"
-  button → calls `fs.write()` **directly** (not `fs.exec` — see
-  Secrets), then a **separate** `handleCovertApply` call to
-  `amnezia-covert-ctl apply` so the CLI's validation runs against what
-  was just saved.
-- Status line: a **new** `covertStateColor()` function added to
-  `util.js` (review flagged extending the existing `verdictColor`
-  switch as the "adding a caller to a shared classifier makes a dead
-  default arm live" trap this project has been burned by — zapret's
-  probe vocabulary depends on that switch's exact arm set; a new
-  function avoids touching it).
-- Join-link row with a copy affordance and its age (`link_age_s`),
-  shown only when `state === "connected"`.
+- Enable/disable toggle → `handleCovertToggle` (`ctlThenRefresh` shape).
+- Cookie `<textarea>` (write-only, never pre-filled) + "Save cookies" →
+  `fs.write()` directly, then a separate `handleCovertApply` →
+  `amnezia-covert-ctl apply` so the CLI's structural validation runs
+  against what was just saved.
+- Status via a **new `covertStateColor()`** in `util.js` — not a new arm
+  on the shared `verdictColor`, whose only two callers are in
+  `zapret.js` and whose arm set must not move (the "adding a caller to
+  a shared classifier makes a dead default arm live" trap).
+- Join-link row with copy affordance and `link_age_s`, shown only when
+  `state === "connected"`.
+- Handlers wired with an extra arg are declared `function(extraArg, ev)`
+  — `createHandlerFn` passes the event **last**.
 
-**ACL** — `openwrt/luci-app-amnezia/acl/luci-app-amnezia.json`'s
-`write.file` block gets both entries (exec on the CLI, write on the
-cookie path — see Secrets for the exact JSON). Missing this grant is,
-per this project's own history, the single most common cause of a
-dead-looking LuCI panel — called out explicitly so it isn't missed here
-either.
+**ACL** (`openwrt/luci-app-amnezia/acl/luci-app-amnezia.json`,
+`write.file` block) needs **both**:
+```json
+"/usr/bin/amnezia-covert-ctl":                [ "exec" ],
+"/etc/amnezia/covert/vk-cookies.json":        [ "write" ]
+```
 
-**Harness extension** — `test/lib/luci-harness.js` hardcodes the
-section-module list in **six** places (verified: lines ~88-91, 126,
-158-161, 215-218, 297) plus the `main.js` `DATA` fixture array that
-`main.load()`'s indices mirror. All six, plus the new fixture index,
-must be updated together — a plan-time checklist item, not "extend the
-harness" as a single vague step.
+**Harness extension — enumerated mechanically** (`grep -n "'dns'\|section/dns" test/lib/luci-harness.js`),
+because the previous revision's "six places" list was a recollection
+that missed the two sites that make the module resolve at all. The real
+sites are **8**: lines **77** (`names` DI array), **90**, **116**, **126**,
+**160**, **164**, **217**, **297** — plus the `DATA` fixture (line 72)
+which must gain index 14. Missing line 77 binds `covert` to `undefined`
+inside every module and produces exactly the blank-panel failure the
+harness exists to catch, while still printing green.
 
-### Installer / packaging — scope corrected
+### Installer / packaging
 
-**Review finding (all three reviewers, independently):** the original
-draft's claim that `install-amnezia-pbr.sh` or `install.sh` could
-deliver the binary was wrong. `install-amnezia-pbr.sh` runs **on the
-router** and only ever reads from `/tmp/<staged>` — it cannot reach a
-developer Mac's local build output. `install.sh` fetches a GitHub
-**source tarball** — a gitignored local build artifact can never be in
-it. The `.ipk`'s `PKGARCH:=all` cannot legitimately carry an aarch64
-ELF.
+**Binary delivery is dev-controlled only in P1.** Verified constraints:
+`install-amnezia-pbr.sh` runs **on the router** and only reads from
+`/tmp/<staged>`; `install.sh` fetches a GitHub **source tarball**, which
+can never contain a gitignored build artifact; the `.ipk` declares
+`PKGARCH:=all`, which cannot legitimately carry an aarch64 ELF.
 
-**Corrected P1 scope: binary delivery is via `dev/deploy-openwrt-safe.sh`
-only**, extending its existing hand-maintained upload list:
-1. `dev/build-covert-creator.sh` produces `build/covert/dist/headless-vk-creator`
-   locally.
-2. `dev/deploy-openwrt-safe.sh` stages it to the router (`cat "$f" | ssh_run "cat > /tmp/amnezia-covert-creator"`,
-   matching the script's existing upload pattern), then `cp` +
-   `chmod +x` + a `sha256sum` verification against
-   `BUILD_MANIFEST.txt` into `/usr/bin/amnezia-covert-creator`.
-3. The CLI/lib/init/ACL files ship through the normal four-surface
-   convention (they're POSIX sh + JSON, no different from any other
-   feature) — **only the compiled binary is dev-deploy-only in P1.**
-4. `install.sh` and the `.ipk` install the CLI/init/ACL but the feature
-   stays inert (binary missing) on those paths — `apply`'s
-   missing-binary error text says so explicitly, so this reads as "not
-   available on this install method yet," not a silent bug.
+Delivery, following the repo's actual staging convention (cycle 2:
+`dev/deploy-openwrt-safe.sh` does not place files itself — it stages to
+`/tmp` and lets the installer place them):
+1. `dev/build-covert-creator.sh` produces the binary + `BUILD_MANIFEST`
+   locally into gitignored `build/covert/dist/`.
+2. `dev/deploy-openwrt-safe.sh` gains explicit entries in its
+   hand-maintained upload list to stage both to `/tmp/`.
+3. `install-amnezia-pbr.sh` places them (`/usr/bin/amnezia-covert-creator`,
+   `/etc/amnezia/covert/BUILD_MANIFEST`), verifies the sha256 against
+   the manifest, `chmod +x`, and **removes the staged copy** — `/tmp` is
+   tmpfs, i.e. 11 MB of the same RAM budget this design worries about.
+4. The installer also **creates the `amnezia-covert` user/group** (new
+   infrastructure for this repo) and `/etc/amnezia/covert/` at
+   `0750 root:amnezia-covert`, both **before** anything can load the nft
+   fragment.
+5. CLI, libs, init, template fragment and ACL ship through the normal
+   four-surface convention. On `install.sh`/`.ipk` the feature installs
+   **inert**: no binary ⇒ `apply` fails loudly with text naming the
+   dev-deploy-only caveat, and the nft fragment is a template that
+   `enable` never gets far enough to activate.
 
-A proper public-package story (GitHub release asset, or a
-`PKGARCH:=aarch64_cortex-a53` package) is a separate, later decision —
-correctly out of scope for a P1 that's explicitly a manually-deployed,
-opt-in, dev-supervised feature.
+**Live-router caveat.** `dev/deploy-openwrt-safe.sh` runs
+`install-amnezia-pbr.sh` on the router, and CLAUDE.md's live-router rule
+says a manually-cutover router must be updated by placing specific
+changed files rather than re-running the postinst installer. For this
+router the deploy is therefore **surgical**: stage the files, place them
+by hand with a snapshot of anything replaced, and verify WAN + DNS +
+handshake after each step. The installer path is what the `.ipk`/fresh
+installs use.
+
+**Uninstall/rollback** (was missing entirely): `disable` stops the
+service and removes the fragment, state and link. Full removal
+additionally drops the binary, `/etc/amnezia/covert/`, the UCI key, the
+init, the ACL entries and the system user — specified as an explicit
+documented sequence so a future `--migrate` or rollback run has one.
 
 ---
 
 ## Testing
 
-bats unit tests (uci stub in the exact quoted/multi-line-list real
-format, per CLAUDE.md):
-1. `enable` with no cookies file → refuses, no `uci set` at all (not
-   just no `commit` — review's UCI-race finding means even a staged,
-   uncommitted `uci set` can be flushed by a *different* CLI's
-   `uci commit amnezia`, so the bats stub must model `set` vs `commit`
-   as distinct, observable steps to make this assertion meaningful).
-2. `enable` with a cookies file present → single set+commit sequence,
-   init `enable` then `restart` called in that order (mutation test:
-   swap the order, confirm the test goes red — this is the exact bug
-   class DoT shipped once).
-3. `disable` on an already-disabled service → exit 0, no error.
-4. `apply` with `covert_enabled=1` and a missing binary → distinct,
-   loud failure mentioning the dev-deploy-only caveat.
-5. `status` JSON — exactly one object on stdout; every field present;
-   the enabled/running/state truth table honored (mutation test: force
-   `running=false` while `enabled=true` and confirm `state` is never
-   `idle`).
-6. ACL file contains both the `exec` and the new `write` grant.
-7. Log-wrapper: feed it captured real output from the Prerequisite spike
-   (once available) for both the connected and auth-failed cases,
-   assert the state file lands correctly; feed it a burst simulating a
-   respawn and assert the state file reflects only the newest
-   generation (mutation test: comment out the truncate-on-start step,
-   confirm a stale-state test goes red).
-8. Call-creation backoff: two respawns inside the 2-minute window →
-   second exec is delayed; assert via a mutation that removing the
-   delay logic turns the test red.
+bats unit tests, with the `uci` stub in the **exact real quoted format**
+and modelling `set` (staged) separately from `commit` — without that,
+test 1's assertion is unobservable:
 
-**Live-only gates** (a green bats run proves the wrapper logic only):
-- **The Prerequisite spike itself** — the actual gate that decides if
-  any of this is buildable.
-- Enable on the router with real cookies, confirm LuCI shows
-  `state: "connected"` and a real join link; confirm the egress-restriction
-  nft rule actually blocks the creator's own attempt to reach
-  `192.168.1.1` (a `curl --interface` test bound to the `amnezia-covert`
-  uid, or simplest: temporarily run a probe as that user).
-- Paste the link into the already-working iOS/Mac joiner app, confirm a
-  page loads through the router-hosted creator.
-- `MemAvailable` before/during a live joiner session under real traffic
-  (not idle) — confirm the RSS ceiling and preflight check behave as
-  designed, and that a deliberately-triggered OOM-adjacent condition
-  (e.g. `stress-ng` alongside it, if available) doesn't take down
-  dnsmasq/hostapd before the ceiling kills the creator first.
-- Reboot the router with the feature enabled, confirm it comes back up
-  and creates a fresh call unattended (validates the boot-readiness
-  gate).
+1. `enable` with no/invalid cookie file → refuses; **no `uci set` at
+   all** (not merely no commit).
+2. `enable` happy path → fragment written with the numeric uid
+   substituted, `fw4 check` invoked **before** any reload, then
+   init `enable` **then** `restart`, in that order. *Mutation: swap
+   enable/restart → must go red.*
+3. `enable` when `fw4 check` fails → fragment removed, no UCI mutation,
+   non-zero exit, firewall untouched. *Mutation: skip the check → red.*
+4. `disable` idempotent; removes fragment + state + link; leaves cookies.
+5. Cookie structural validator: rejects non-JSON, non-array, and
+   elements missing `name`/`value`; accepts the real shape. *Mutation:
+   accept-anything → red.*
+6. `status` truth table — every row, including `not-started` and
+   `unknown`; `link` is `null` not `""` when absent. *Mutation: make
+   `running=false,enabled=true` return `idle` → red.*
+7. Log wrapper: fed captured spike output, produces the right states;
+   **redacts** the `empty VK token, response:` / `empty call_id,
+   response:` lines. *Mutation: remove the redaction filter → a test
+   asserting no token-shaped string reaches the log must go red.*
+8. Log wrapper truncates state+link on **launcher** start, so a
+   simulated respawn cannot surface the previous generation's link.
+   *Mutation: move truncation back to `start_service` → red.*
+9. Call-creation gap enforced in the launcher. *Mutation: remove the
+   sleep → red.*
+10. ACL contains both the `exec` and the `write` grants.
+11. `test/unit/luci-js.bats` passes with the covert module wired into
+    all 8 harness sites + the `DATA` fixture.
+
+**Live-only gates:**
+- The Prerequisite spike (the actual go/no-go).
+- `fw4 check` passes with the fragment on the real assembled ruleset,
+  and WAN + DNS + tunnel handshake all survive `enable` and `disable`.
+- The creator, running as `amnezia-covert`, can resolve DNS (proving the
+  port-53 accept works) but **cannot** reach `192.168.1.1:80` or
+  `:2323` (proving the reject works).
+- Joiner attaches to the router-created call and loads a page.
+- `MemAvailable` under sustained joiner traffic, foreground-supervised.
+- Reboot with the feature enabled → comes back up unattended.
 
 ---
 
@@ -644,35 +716,37 @@ format, per CLAUDE.md):
 
 | Risk | Mitigation |
 |---|---|
-| **`headless/vk` creator mode has never been run; VK captcha is a known limitation for exactly this binary** | Promoted to a blocking Prerequisite, not a deferred risk — nothing else in this design proceeds to build until it's answered |
-| Unauthenticated exit relay into the LAN (link = sole admission control) | New uid-scoped fw4 egress-restriction rule (RFC1918/loopback denied for the creator's own user); explicit threat model stated; dedicated/disposable VK account recommended |
-| VK cookie is a real personal-account credential | Written directly via `fs.write` (verified: no stdin channel exists in `fs.exec`), 0700 dir / 0600 file, never in UCI/argv/git/logs |
-| Router has only 85MB free RAM; `moderate` is a soft target, not an RSS cap | Hard `procd limits as=` ceiling + `MemAvailable` preflight + first-run foreground supervision under real (not idle) load; explicitly **not** claimed to make OOM impossible |
-| Respawn creates a new call per restart on a real account ⇒ crash loop = call-creation storm | 2-minute call-creation backoff in the log-wrapper, on top of procd's 5-in-5min respawn cap; account-ban risk stated, dedicated account recommended |
-| Boot race: service starts before clock/WAN/DNS are sane | Readiness-gate wrapper in `start_service`; respawn-exhaustion is a defined, surfaced `crashed` state, not silent death with `enabled: true` |
-| `restart` on a not-yet-`enable`d procd service is a silent no-op (shipped once before, DoT) | `enable` explicitly runs init `enable` then `restart`, in that order, with a mutation test asserting the order matters |
-| Shared `/etc/config/amnezia` UCI file has no commit lock across the ~7 CLIs that write it | **Accepted, scoped risk, not newly introduced infrastructure:** covert-ctl's own writes are user-initiated (enable/disable clicks), not a tight loop like the 20s DNS watchdog or per-minute autotunnel cron — its collision probability is low and no worse than the status quo. Preflight strictly before any `uci set`, single uninterrupted set+commit, to keep its own exposure window minimal. A real fix (a shared UCI lock across all amnezia CLIs) is a legitimate but separate, pre-existing project-wide gap — out of scope for this feature to solve alone |
-| `logread` parsing would risk starving `amnezia-autotunnel`'s full-ring scan (this router has already hard-crashed from autolearn load once) | Resolved architecturally: dedicated capped log file + atomic state-JSON via a log-wrapper, never raw `logread` parsing for `status` |
-| Stale state (old link/state surviving a respawn) | State file is truncated on every service start, written fresh by that generation's own log-wrapper instance — structurally can't show a previous generation's state |
-| Missing ACL grant ⇒ dead-looking LuCI panel (this project's #1 recurring cause) | Explicit `write.file` entries for both the exec and write grants; covered by the extended offline `luci-harness.js` gate |
-| Extending the shared `verdictColor` switch makes a dead default arm live for zapret's vocabulary | New `covertStateColor()` function instead |
-| Binary has no working delivery path on `install.sh`/`.ipk` | P1 scope explicitly limited to `dev/deploy-openwrt-safe.sh`; other paths install the feature inert with a loud, specific error, not silently |
-| Committing a fast-moving foreign upstream's compiled binary into this repo | Not committed — `build/` added to `.gitignore`; built fresh from a pinned SHA with a recorded manifest + sha256 |
+| **Headless creator has zero captcha handling — a VK challenge is terminal** (verified: no captcha code in `headless/vk/`; it exists only in the joiner package) | Blocking Prerequisite spike; if challenges appear, P1 does not proceed in this shape |
+| Spike log itself can contain an `access_token` on the auth-failure path (`main.go:264,287`) | Prerequisite reports only derived counts, never raw logs; log wrapper redacts these lines on the router |
+| Join link is the tunnel obfuscation secret, not just an admission token (`main.go:718`) | Treated as a secret everywhere: 0640 files, no world-readable `-write-file` default, not logged unredacted |
+| Unresolvable `meta skuid <name>` would break the **entire** fw4 ruleset | Numeric uid substituted at `enable` time; template never shipped into `/etc/nftables.d/`; `fw4 check` gate with fragment rollback; backgrounded reload |
+| Egress rule blocking `127.0.0.0/8` would kill the creator's own DNS | Explicit port-53-to-127.0.0.1 accepts ahead of the rejects; live gate proves both directions |
+| Unauthenticated exit relay reachable by anyone with the link | uid-scoped reject of RFC1918 + CGNAT + link-local + v6 ULA/loopback; link treated as a secret; dedicated VK account recommended |
+| Unprivileged user cannot read its own credential | Dir 0750 / file 0640, both `root:amnezia-covert`; `apply` re-asserts ownership after every rpcd write |
+| Unprivileged user cannot write its state file (`/tmp/run` is 0755 root) | `start_service` pre-creates `/var/run/amnezia-covert/` owned by the service user |
+| Crash loop = call-creation storm on a personal VK account | 120 s gap enforced in the launcher **and** in procd's respawn-delay field |
+| `limits as=` is virtual address space, not RSS, and can block Go startup | Dropped; GOMEMLIMIT + `MemAvailable` preflight + supervised first run, with the residual stated plainly |
+| Log wrapper becoming the new autolearn-style CPU sink | `-debug` off, ≤1 state rewrite/sec, periodic (not per-line) cap check, marker-only filtering if the spike shows high line rates |
+| Stale `connected` + dead link surviving a respawn | Truncation in the launcher (which procd *does* re-exec), not `start_service` |
+| Harness green while not covering the new module | All 8 enumerated sites + `DATA` index 14, derived by grep, not memory |
+| `status` hashing an 11 MB binary every 5 s | Manifest installed to the router; `status` reads it, never recomputes |
+| Cookie crosses the LAN over plain HTTP LuCI | Stated explicitly; `scp`-over-SSH alternative named if unacceptable |
+| Shared `/etc/config/amnezia` has no cross-CLI commit lock | Accepted, scoped: covert-ctl's writes are click-initiated; no timer-driven writer competes (verified: autotunnel's per-minute worker performs no `uci set`; the DNS watchdog commits only on tier transitions). Residual named: covert-ctl's `commit` can flush another CLI's staged sets — notably `amnezia-failover-ctl make-default`'s multi-`set` loop. Preflight strictly before any `set`, single uninterrupted set+commit |
+| Binary can't reach the router on `install.sh`/`.ipk` paths | P1 scope is dev-deploy-only; other paths install inert with a loud, specific error |
 
 ---
 
-## Open items deferred to plan
+## Open items for the plan
 
-- Exact log-wrapper marker strings for `connected`/`auth-failed`/call-creation —
-  captured empirically from the Prerequisite spike's real output, not
-  guessed.
-- Exact `MemAvailable` threshold and `procd limits as=` value — pinned
-  against a live measurement under real joiner traffic.
-- Exact staleness window for `status`'s `unknown` state.
-- Whether procd's stdout piping to the log-wrapper is a literal shell
-  pipe in the `command` line or a respawned sidecar service — a
-  procd-mechanics detail, picked at execute time based on which handles
-  the wrapper dying independently of the creator more robustly.
-- Shallow cookie-format validation — exact check (structural, not a
-  full auth attempt) pinned once the Prerequisite spike shows what a
-  real `vk-cookies.json` looks like.
+Only genuinely unresolvable-before-execution items remain (the previous
+revision deferred several things that were readable in source; those are
+now inline above):
+
+- The Prerequisite spike's four counts — the go/no-go itself.
+- Steady-state log line rate (from the spike run) → decides whether the
+  wrapper needs marker-only filtering.
+- `MemAvailable` threshold and the readiness-gate timeout — pinned
+  against live measurement.
+- The state-file staleness window for `unknown`.
+- Whether the LuCI-over-HTTP cookie transport is acceptable, or the
+  `scp` path is used instead.
