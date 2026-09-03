@@ -1,0 +1,62 @@
+#!/bin/sh /etc/rc.common
+# shellcheck disable=SC2034  # USE_PROCD/START/STOP are consumed by /etc/rc.common framework
+# amnezia-covert.init -> /etc/init.d/amnezia-covert
+#
+# procd service for the opt-in, default-OFF headless VK "creator" (the
+# whitelist-bypass covert transport). Default OFF: start_service returns
+# immediately when amnezia.config.covert_enabled != 1, so a fresh install /
+# reboot never starts this feature uninvited.
+#
+# Boot-reconcile / fail-closed (design "procd init", plan Phase 7 C1):
+# before opening the instance, start_service calls the idempotent
+# `amnezia-covert-ctl apply`, which re-resolves the amnezia-covert uid and
+# re-substitutes+revalidates the egress fw4 fragment against it. If apply
+# fails (e.g. the uid cannot be resolved, or the healed fragment fails
+# `fw4 check`), start_service returns non-zero WITHOUT ever opening the
+# procd instance -- the creator must never run while its uid-scoped egress
+# restriction may not match reality. This is the cold-boot half of C1; the
+# launcher's own step-0.5 uid check (amnezia-covert-run.sh) is the
+# respawn-path backstop, since procd re-execs the instance directly and
+# never re-enters start_service on a respawn.
+#
+# `apply` here reconciles the FRAGMENT only -- it must never itself
+# restart/start this service (procd is the one opening the instance),
+# avoiding a start_service -> apply -> restart -> start_service recursion.
+#
+# stdout/stderr are deliberately NOT set on the instance: the whole
+# log-starvation mitigation (amnezia-covert-logwrap.sh) depends on the
+# creator's output reaching the FIFO-fed wrapper, not logd. Setting
+# stdout/stderr here would route output around the wrapper and defeat both
+# the redaction and the state.json readiness tracking.
+#
+# Respawn exhaustion (5 deaths inside the 120s window, `respawn 300 120 5`)
+# leaves covert_enabled='1' untouched -- "on but visibly broken" is
+# preferred over silently disabling a user's explicit opt-in -- and
+# `amnezia-covert-ctl status` reports state=crashed with a reason naming
+# respawn exhaustion, never idle.
+USE_PROCD=1
+START=99
+STOP=10
+
+AMNEZIA_LIB="${AMNEZIA_LIB:-/usr/lib/amnezia}"
+# shellcheck source=lib/amnezia-common.sh
+if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-common.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-common.sh"
+fi
+
+start_service() {
+  amz_covert_enabled || return 0
+
+  mkdir -p /var/run/amnezia-covert
+  chown amnezia-covert:amnezia-covert /var/run/amnezia-covert
+
+  amnezia-covert-ctl apply || return 1
+
+  procd_open_instance
+  procd_set_param command /usr/lib/amnezia/amnezia-covert-run.sh
+  procd_set_param user amnezia-covert
+  procd_set_param respawn 300 120 5
+  procd_close_instance
+}
