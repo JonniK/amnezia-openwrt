@@ -66,15 +66,26 @@ _redact() {
 # read line-by-line, so a multi-line body would otherwise defeat the
 # single-line _redact above on every continuation line. Once a
 # ", response:" line is seen, every SUBSEQUENT line is masked wholesale
-# until one is unmistakably a fresh log line: either the Go `log` package's
-# default timestamp prefix (present because the upstream code never calls
-# log.SetFlags -- verified against headless/vk/*.go), or one of the
-# creator's own un-prefixed fmt.Print* markers. Erring toward
-# over-suppression is correct -- never leak a body line.
+# until one is unmistakably a fresh log line.
+#
+# The boundary markers MUST be line-ANCHORED, never unanchored substrings:
+# an unanchored `*"Cannot"*`/`*"Failed"*`/`*"[vk-ws]"*` matches a body line
+# that merely CONTAINS one of those words (e.g. a VK JSON error body like
+# `{ "error_msg": "Cannot refresh session", ... "access_token": "SECRET" }`)
+# and ends suppression BEFORE the token line -- leaking it. Verified against
+# upstream headless/vk/main.go: the only line-initial markers a fresh log
+# line can legitimately start with are (1) the Go `log` package's default
+# timestamp prefix (present because the upstream code never calls
+# log.SetFlags -- every `[vk-ws]`/`Failed`/`Cannot` line is ALSO emitted via
+# `log.*` and so is timestamp-prefixed at line start already), or (2) the
+# creator's own two un-prefixed `fmt.Println` markers, which likewise only
+# ever appear at the START of a line ("  CALL CREATED" / "  join_link: ").
+# Neither pattern can occur mid-body inside a VK response's JSON/HTML text.
+# Erring toward over-suppression is correct -- never leak a body line.
 _is_fresh_log_line() {
   case "$1" in
     [0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]\ *) return 0 ;;
-    *"  CALL CREATED"*|*"  join_link: "*|*"[vk-ws]"*|*"Failed"*|*"Cannot"*) return 0 ;;
+    "  CALL CREATED"*|"  join_link: "*) return 0 ;;
     *) return 1 ;;
   esac
 }

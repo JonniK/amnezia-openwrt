@@ -389,6 +389,59 @@ EOF
   grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
 }
 
+_install_cp_fail_snapshot_stub() {
+  # Simulate the snapshot `cp` failing SILENTLY (real code path discards its
+  # stderr and never checks its exit status): only intercept the copy FROM
+  # the live fragment (the snapshot-creation direction) so the fragment is
+  # left drifted-but-intact and mktemp's freshly-created (empty) snapshot
+  # file stays empty. The restore-direction cp (source = the snapshot tmp
+  # file) is untouched by this stub.
+  _real_cp="$(command -v cp)"
+  cat > "$BIN_DIR/cp" <<EOF
+#!/bin/sh
+if [ "\$1" = "$AMZ_COVERT_FRAGMENT" ]; then
+  exit 1
+fi
+exec "$_real_cp" "\$@"
+EOF
+  chmod +x "$BIN_DIR/cp"
+}
+
+@test "apply_snapshot_failure_never_clobbers_fragment_with_empty: fw4-check failure + a silently-failed snapshot leaves the fragment non-empty" {
+  _install_fw4_stub
+  _install_cp_fail_snapshot_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_FW4_CHECK_FAIL=1
+  printf 'chain amnezia_covert_egress {\n    meta skuid 9999 oifname "lo" reject\n}\n' > "$AMZ_COVERT_FRAGMENT"
+
+  run "$CLI" apply
+  [ "$status" -ne 0 ]
+
+  # Never a zero-byte fragment -- that is fail-OPEN egress (no skuid match
+  # at all). With the snapshot empty, the code must leave the newly
+  # re-substituted fragment in place rather than "restore" nothing.
+  [ -s "$AMZ_COVERT_FRAGMENT" ]
+  grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+
+  # Loud logging, not a silent no-op.
+  grep -qi "snapshot missing\|snapshot empty\|refusing to restore" "$STUB_LOG"
+}
+
+@test "apply_snapshot_failure_never_clobbers_fragment_with_empty: same guard on the fw4-reload-failure restore path" {
+  _install_fw4_stub
+  _install_cp_fail_snapshot_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_FW4_RELOAD_FAIL=1
+  printf 'chain amnezia_covert_egress {\n    meta skuid 9999 oifname "lo" reject\n}\n' > "$AMZ_COVERT_FRAGMENT"
+
+  run "$CLI" apply
+  [ "$status" -ne 0 ]
+
+  [ -s "$AMZ_COVERT_FRAGMENT" ]
+  grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+  grep -qi "snapshot missing\|snapshot empty\|refusing to restore" "$STUB_LOG"
+}
+
 @test "uid_mismatch_fail_closed: running-uid != fragment-uid aborts/stops, non-zero" {
   _install_fw4_stub
   export UCI_GET_amnezia_config_covert_enabled=1

@@ -70,7 +70,13 @@ _wait_for_state() {
 @test "redacts_generic_response_tail: masks VK secrets on both the create-path and the rejoin-path body dump" {
   token="SECRETTOKEN123"
   session_key="SECRETSESSIONKEY456"
-  printf 'Failed to create call: empty VK token, response: %s\n[rejoin] Failed: empty session_key, response: %s\n' \
+  # Both lines carry the real upstream Go-log timestamp prefix (verified
+  # against headless/vk/main.go: every "Failed"/"[rejoin]" surfacing line is
+  # logged via log.Printf/log.Fatalf, never fmt.Print*) -- that timestamp is
+  # the only anchor the wrapper now trusts to end multi-line body
+  # suppression, so the second line's own timestamp is what correctly ends
+  # the first line's (single-line, here) body suppression.
+  printf '2026/01/01 00:00:00 Failed to create call: empty VK token, response: %s\n2026/01/01 00:00:01 [rejoin] Failed: empty session_key, response: %s\n' \
     "$token" "$session_key" | "$WRAP"
 
   run cat "$LOG"
@@ -192,4 +198,44 @@ _wait_for_state() {
   run grep -o '"state":"[^"]*"' "$STATE"
   [ "$status" -eq 0 ]
   [ "$output" = '"state":"crashed"' ]
+}
+
+# ---------------------------------------------------------------------------
+@test "redact_multiline_body_boundary_is_anchored: a body line merely CONTAINING Cannot/Failed/[vk-ws] does not end suppression early" {
+  token="SECRETTOKEN777"
+  # The body itself carries an embedded "Cannot" and mimics a VK JSON error
+  # shape -- with the old UNANCHORED *"Cannot"* marker this line alone ends
+  # IN_BODY mode and the access_token line right after it leaks raw.
+  printf 'Failed to create call: empty VK token, response: {\n  "error_msg": "Cannot refresh session",\n  "access_token": "%s"\n}\n' \
+    "$token" | "$WRAP"
+
+  run grep -qF "$token" "$LOG"
+  [ "$status" -ne 0 ]
+  run grep -qF "Failed to create call: empty VK token, response:***" "$LOG"
+  [ "$status" -eq 0 ]
+  run grep -q '"access_token"' "$LOG"
+  [ "$status" -ne 0 ]
+  # The mid-body "Cannot" line and the closing brace must both be
+  # wholesale-masked, not passed through raw.
+  run grep -qF 'error_msg' "$LOG"
+  [ "$status" -ne 0 ]
+
+  # State classification off the first (unredacted, pre-body) line is
+  # unaffected by the anchoring fix.
+  run grep -o '"state":"[^"]*"' "$STATE"
+  [ "$status" -eq 0 ]
+  [ "$output" = '"state":"auth-failed"' ]
+}
+
+@test "redact_multiline_body_boundary_is_anchored: mid-line join_link substring does not end suppression early" {
+  token="SECRETTOKEN888"
+  # "  join_link: " only ends suppression when it is the line's own start --
+  # embedded mid-line (e.g. quoted inside a JSON error body) it must not.
+  printf 'Failed to create call: empty VK token, response: {\n  "hint": "see   join_link: below",\n  "access_token": "%s"\n}\n' \
+    "$token" | "$WRAP"
+
+  run grep -qF "$token" "$LOG"
+  [ "$status" -ne 0 ]
+  run grep -q '"access_token"' "$LOG"
+  [ "$status" -ne 0 ]
 }

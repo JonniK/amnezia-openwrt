@@ -149,6 +149,34 @@ _covert_running() {
 }
 
 # ---------------------------------------------------------------------------
+# _covert_restore_or_leave  -- used only from cmd_apply's drift-restore
+# paths (fw4 check/reload failure). Relies on cmd_apply's own $_had_prior /
+# $_snapshot / $AMZ_COVERT_FRAGMENT still being set in the caller's shell
+# (POSIX sh has no function-local variables, so this is safe as long as it
+# is only ever called from inside cmd_apply).
+#
+# L: a snapshot `cp` failure is silent (stderr redirected, exit code never
+# checked) -- if it left an empty/missing file, blindly `cp`-ing it back
+# onto the live fragment on the restore path would clobber a real fragment
+# with zero bytes (fail-OPEN egress: no skuid match at all). Require the
+# snapshot be non-empty before trusting it; otherwise leave the newly
+# written (possibly-untested) fragment in place rather than truncate a
+# previously-working one to nothing, and log loudly so this is never a
+# silent no-op.
+# ---------------------------------------------------------------------------
+_covert_restore_or_leave() {
+  if [ "$_had_prior" -eq 1 ]; then
+    if [ -s "$_snapshot" ]; then
+      cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
+    else
+      amz_log "amnezia-covert-ctl: apply: snapshot missing/empty after $1 -- refusing to restore an empty fragment, leaving the newly-written fragment in place"
+    fi
+  else
+    rm -f "$AMZ_COVERT_FRAGMENT"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # cmd_enable
 # ---------------------------------------------------------------------------
 cmd_enable() {
@@ -323,11 +351,7 @@ cmd_apply() {
     mv "$_new" "$AMZ_COVERT_FRAGMENT"
 
     if ! fw4 check >/dev/null 2>&1; then
-      if [ "$_had_prior" -eq 1 ]; then
-        cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
-      else
-        rm -f "$AMZ_COVERT_FRAGMENT"
-      fi
+      _covert_restore_or_leave "fw4-check-failed"
       rm -f "$_snapshot"
       amz_log "amnezia-covert-ctl: apply: fw4 check failed after re-substituting the egress fragment -- restored the previously-loaded fragment"
       return 1
@@ -338,11 +362,7 @@ cmd_apply() {
     # instance. No interactive SSH session to protect on the boot/reconcile
     # path, unlike enable's backgrounded reload.
     if ! fw4 reload >/dev/null 2>&1; then
-      if [ "$_had_prior" -eq 1 ]; then
-        cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
-      else
-        rm -f "$AMZ_COVERT_FRAGMENT"
-      fi
+      _covert_restore_or_leave "fw4-reload-failed"
       rm -f "$_snapshot"
       amz_log "amnezia-covert-ctl: apply: synchronous fw4 reload failed after fragment drift -- restored the previously-loaded fragment"
       return 1
