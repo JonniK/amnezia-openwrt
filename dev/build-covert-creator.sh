@@ -96,9 +96,9 @@ FILE_OUTPUT="$(file "$ARTIFACT_PATH")"
 echo "==> $FILE_OUTPUT"
 
 case "$FILE_OUTPUT" in
-*ELF*aarch64*) : ;;
+*ELF*aarch64*statically\ linked*) : ;;
 *)
-	echo "FATAL: artifact is not an ELF aarch64 binary: $FILE_OUTPUT" >&2
+	echo "FATAL: artifact is not a static ELF aarch64 binary: $FILE_OUTPUT" >&2
 	exit 1
 	;;
 esac

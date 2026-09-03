@@ -50,6 +50,7 @@ set -u
 # silently clobbered back to the real /var/run or /etc/amnezia path.
 _run_dir_override="${AMZ_COVERT_RUN_DIR:-}"
 _cookies_override="${AMZ_COVERT_COOKIES:-}"
+_log_override="${AMZ_COVERT_LOG:-}"
 
 AMNEZIA_LIB="${AMNEZIA_LIB:-/usr/lib/amnezia}"
 # shellcheck source=lib/amnezia-common.sh
@@ -81,6 +82,12 @@ AMZ_COVERT_CREATOR_BIN="${AMZ_COVERT_CREATOR_BIN:-${AMZ_COVERT_BIN:-/usr/bin/amn
 # override to a bare command name resolved off a scratch PATH entry).
 AMZ_COVERT_LOGWRAP="${AMZ_COVERT_LOGWRAP:-/usr/lib/amnezia/amnezia-covert-logwrap.sh}"
 AMZ_COVERT_COOKIES="${_cookies_override:-${AMZ_COVERT_COOKIES:-/etc/amnezia/covert/vk-cookies.json}}"
+# Same re-export as AMZ_COVERT_RUN_DIR above: common.sh's unconditional
+# export just clobbered a caller override, and the log wrapper (spawned
+# below as a child off the FIFO) inherits AMZ_COVERT_LOG from THIS
+# process's environment, not from the caller's shell.
+AMZ_COVERT_LOG="${_log_override:-${AMZ_COVERT_LOG:-/etc/amnezia/covert/covert.log}}"
+export AMZ_COVERT_LOG
 
 mkdir -p "$RUN_DIR" 2>/dev/null || :
 

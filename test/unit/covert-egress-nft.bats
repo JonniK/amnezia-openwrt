@@ -37,7 +37,12 @@ _substitute() {
 
 @test "numeric_uid_only" {
   _substitute
-  # Every "meta skuid" operand must be all-digits (no leftover name/placeholder).
-  ! grep -E 'meta skuid [^0-9]' "$BATS_TEST_TMPDIR/substituted.nft"
+  # Every "meta skuid" operand must be the fully-numeric substituted uid
+  # with a clean word boundary after it (no leftover name/placeholder, and
+  # no trailing garbage merely because the operand STARTS with a digit --
+  # e.g. "meta skuid 1234x" must fail this, which a bare
+  # 'meta skuid [^0-9]' negative-class check on the first char would miss).
+  run grep -E 'meta skuid [0-9][0-9]*[^0-9 ]' "$BATS_TEST_TMPDIR/substituted.nft"
+  [ "$status" -ne 0 ]
   grep -q 'meta skuid 1234' "$BATS_TEST_TMPDIR/substituted.nft"
 }

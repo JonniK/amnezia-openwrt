@@ -88,7 +88,8 @@ _uci_set_lines() {
 
   [ -f "$AMZ_COVERT_FRAGMENT" ]
   grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
-  ! grep -q '@@' "$AMZ_COVERT_FRAGMENT"
+  run grep -q '@@' "$AMZ_COVERT_FRAGMENT"
+  [ "$status" -ne 0 ]
 
   # fw4 check must precede any fw4 reload in the log.
   awk '/fw4 check/{c=NR} /fw4 reload/{r=NR} END{exit !(c && (!r || c<r))}' "$STUB_LOG"
@@ -245,7 +246,8 @@ EOF
   run "$CLI" apply
   [ "$status" -eq 0 ]
   grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
-  ! grep -q 'meta skuid 9999' "$AMZ_COVERT_FRAGMENT"
+  run grep -q 'meta skuid 9999' "$AMZ_COVERT_FRAGMENT"
+  [ "$status" -ne 0 ]
 
   # Reload must have ALREADY completed and logged by the time `run` returns
   # -- proves it was awaited synchronously, not backgrounded.

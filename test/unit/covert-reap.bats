@@ -23,11 +23,17 @@ teardown() {
 }
 
 # Write a fake /proc/<pid>/status with a real-uid column of $2 (as real
-# /proc/<pid>/status renders it: "Uid:\t<real>\t<eff>\t<saved>\t<fs>").
+# /proc/<pid>/status renders it: "Uid:\t<real>\t<eff>\t<saved>\t<fs>"). The
+# eff/saved/fs columns are DELIBERATELY a different value from the real-uid
+# column: amz_covert_reap must match on the REAL uid (awk field $2) only --
+# with all four columns identical (the old fixture), a reap that read $3/$4/
+# $5 instead of $2 would still match by coincidence and no test would catch
+# the mistake.
 _fake_proc_entry() {
   _pid="$1"; _uid="$2"
+  _other=$((_uid + 5000))
   mkdir -p "$AMZ_PROC_DIR/$_pid"
-  printf 'Name:\tsleep\nUid:\t%s\t%s\t%s\t%s\n' "$_uid" "$_uid" "$_uid" "$_uid" \
+  printf 'Name:\tsleep\nUid:\t%s\t%s\t%s\t%s\n' "$_uid" "$_other" "$_other" "$_other" \
     > "$AMZ_PROC_DIR/$_pid/status"
 }
 
