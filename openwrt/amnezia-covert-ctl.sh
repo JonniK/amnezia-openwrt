@@ -159,17 +159,34 @@ _covert_running() {
 # checked) -- if it left an empty/missing file, blindly `cp`-ing it back
 # onto the live fragment on the restore path would clobber a real fragment
 # with zero bytes (fail-OPEN egress: no skuid match at all). Require the
-# snapshot be non-empty before trusting it; otherwise leave the newly
-# written (possibly-untested) fragment in place rather than truncate a
-# previously-working one to nothing, and log loudly so this is never a
-# silent no-op.
+# snapshot be non-empty before trusting it. What happens next depends on
+# WHICH check rejected the new fragment: on fw4-check-failed the newly
+# written fragment is the one fw4 just REJECTED, so leaving it in
+# /etc/nftables.d/ would brick the next `fw4 reload` (whole firewall) --
+# remove it instead (fail-safe for the firewall, fail-closed for the
+# service: apply returns 1 and the creator never starts). On
+# fw4-reload-failed the new fragment PASSED fw4 check (it is syntactically
+# valid), so leaving it in place is safe; only a bad snapshot must not
+# clobber it to nothing. Always log loudly -- never a silent no-op.
 # ---------------------------------------------------------------------------
 _covert_restore_or_leave() {
   if [ "$_had_prior" -eq 1 ]; then
     if [ -s "$_snapshot" ]; then
       cp "$_snapshot" "$AMZ_COVERT_FRAGMENT" 2>/dev/null
+    elif [ "$1" = "fw4-check-failed" ]; then
+      # No restorable snapshot AND the newly-written fragment is the one
+      # fw4 check just REJECTED -- leaving it would brick the next fw4
+      # reload (the whole firewall). Remove it: a loadable firewall with
+      # no covert egress restriction, and the creator never starts
+      # (enable/apply return 1). Fail-SAFE for the firewall, fail-CLOSED
+      # for the service.
+      rm -f "$AMZ_COVERT_FRAGMENT"
+      amz_log "amnezia-covert-ctl: apply: snapshot missing/empty after $1 and the new fragment failed fw4 check -- removed it so the firewall stays loadable"
     else
-      amz_log "amnezia-covert-ctl: apply: snapshot missing/empty after $1 -- refusing to restore an empty fragment, leaving the newly-written fragment in place"
+      # fw4-reload-failed path: the new fragment PASSED fw4 check (it is
+      # syntactically valid), so leaving it does not brick a reload; a
+      # bad snapshot must not clobber it to nothing.
+      amz_log "amnezia-covert-ctl: apply: snapshot missing/empty after $1 -- leaving the newly-written (check-passed) fragment in place"
     fi
   else
     rm -f "$AMZ_COVERT_FRAGMENT"

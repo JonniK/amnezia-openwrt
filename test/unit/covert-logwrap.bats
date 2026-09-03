@@ -192,6 +192,35 @@ _wait_for_state() {
   [ "$perm" = "640" ]
 }
 
+@test "cap_log_never_truncates_on_run_dir_write_failure: a run-dir write failure preserves covert.log instead of truncating it to an empty logcap" {
+  awk 'BEGIN{for(i=0;i<10;i++) print "line " i}' > "$LOG"
+  ORIGINAL="$(cat "$LOG")"
+
+  if [ "$(id -u)" -eq 0 ]; then
+    # Root bypasses DAC against its own chmod -- enforce the boundary as a
+    # real unprivileged user, same pattern as cap_is_truncate_in_place.
+    chown -R nobody "$RUN_DIR" 2>/dev/null || true
+    chgrp -R nobody "$RUN_DIR" 2>/dev/null || chgrp -R nogroup "$RUN_DIR" 2>/dev/null || true
+    chmod 0500 "$RUN_DIR"
+    run su -s /bin/sh nobody -c "AMZ_COVERT_LOG='$LOG' AMZ_COVERT_RUN_DIR='$RUN_DIR' '$WRAP' --cap-once"
+  else
+    # Non-root dev host: strip our own write bit on the run dir so `tail ...
+    # > $RUN_DIR/logcap` cannot create the file -- a real, enforced DAC
+    # restriction against our own process (mirrors cap_is_truncate_in_place).
+    chmod u-w "$RUN_DIR"
+    run "$WRAP" --cap-once
+  fi
+
+  chmod u+w "$RUN_DIR" 2>/dev/null || true
+
+  # tail's redirect failed -> the whole `&&` chain must short-circuit before
+  # the final `cat "$RUN_DIR/logcap" > "$LOG"` -- covert.log must be
+  # UNCHANGED, never truncated to an empty/missing logcap.
+  [ "$status" -ne 0 ]
+  NEW="$(cat "$LOG")"
+  [ "$NEW" = "$ORIGINAL" ]
+}
+
 @test "run_dir_mode_0750: the run dir the wrapper creates is not world-traversable" {
   rm -rf "$RUN_DIR"
   printf '  CALL CREATED\n' | "$WRAP"

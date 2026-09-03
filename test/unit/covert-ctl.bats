@@ -318,6 +318,18 @@ EOF
   echo "$output" | grep -q '"reason":"readiness-timeout"'
 }
 
+@test "status_stale_connected_downgrades_to_unknown: a heartbeat past AMZ_COVERT_STALE_S downgrades connected->unknown, link kept (last known)" {
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_COVERT_RUNNING=1
+  export AMZ_COVERT_STALE_S=0
+  printf '{"state":"connected","link":"https://vk.com/call/join/ZZZZ","reason":""}' > "$RUN_DIR/state.json"
+
+  run "$CLI" status
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"state":"unknown"'
+  echo "$output" | grep -q '"link":"https://vk.com/call/join/ZZZZ"'
+}
+
 @test "status_reads_manifest: build_sha/build_hash come from BUILD_MANIFEST, never recomputed" {
   printf 'upstream_sha=89d7a474b7aca6cce664280e6feeaeca2706733b\ngo_version=go1.26\nartifact_sha256=ab12cd34ef000000000000000000000000000000000000000000000000000000\n' \
     > "$AMZ_COVERT_MANIFEST"
@@ -409,7 +421,7 @@ EOF
   chmod +x "$BIN_DIR/cp"
 }
 
-@test "apply_snapshot_failure_never_clobbers_fragment_with_empty: fw4-check failure + a silently-failed snapshot leaves the fragment non-empty" {
+@test "apply_snapshot_failure_check_failed_removes_fragment: fw4-check failure + a silently-failed snapshot REMOVES the rejected fragment (never leaves it -- would brick the next fw4 reload)" {
   _install_fw4_stub
   _install_cp_fail_snapshot_stub
   export UCI_GET_amnezia_config_covert_enabled=1
@@ -419,17 +431,16 @@ EOF
   run "$CLI" apply
   [ "$status" -ne 0 ]
 
-  # Never a zero-byte fragment -- that is fail-OPEN egress (no skuid match
-  # at all). With the snapshot empty, the code must leave the newly
-  # re-substituted fragment in place rather than "restore" nothing.
-  [ -s "$AMZ_COVERT_FRAGMENT" ]
-  grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
+  # The new fragment FAILED fw4 check -- with no restorable snapshot,
+  # leaving it in /etc/nftables.d/ would brick the next `fw4 reload` (whole
+  # firewall). It must be removed, not left in place.
+  [ ! -f "$AMZ_COVERT_FRAGMENT" ]
 
   # Loud logging, not a silent no-op.
-  grep -qi "snapshot missing\|snapshot empty\|refusing to restore" "$STUB_LOG"
+  grep -qi "snapshot missing\|snapshot empty\|removed it" "$STUB_LOG"
 }
 
-@test "apply_snapshot_failure_never_clobbers_fragment_with_empty: same guard on the fw4-reload-failure restore path" {
+@test "apply_snapshot_failure_reload_failed_leaves_fragment: same guard on the fw4-reload-failure restore path -- fragment PASSED fw4 check, so it is left in place (not removed)" {
   _install_fw4_stub
   _install_cp_fail_snapshot_stub
   export UCI_GET_amnezia_config_covert_enabled=1
@@ -441,7 +452,7 @@ EOF
 
   [ -s "$AMZ_COVERT_FRAGMENT" ]
   grep -q "meta skuid $AMZ_COVERT_UID" "$AMZ_COVERT_FRAGMENT"
-  grep -qi "snapshot missing\|snapshot empty\|refusing to restore" "$STUB_LOG"
+  grep -qi "snapshot missing\|snapshot empty\|leaving the newly-written" "$STUB_LOG"
 }
 
 @test "uid_mismatch_fail_closed: running-uid != fragment-uid aborts/stops, non-zero" {

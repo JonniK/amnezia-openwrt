@@ -39,10 +39,14 @@ CAP_EVERY=200
 
 _cap_log() {
   # logcap is a full copy of covert.log (join-link-bearing) staged in the
-  # run dir for the truncate-in-place below -- chmod it 0640 like
-  # state.json/covert-link so it is never world-readable.
-  tail -n "$CAP_LINES" "$LOG" > "$RUN_DIR/logcap" && chmod 0640 "$RUN_DIR/logcap" 2>/dev/null || :
-  cat "$RUN_DIR/logcap" > "$LOG"
+  # run dir for the truncate-in-place below. Create it group-only via a
+  # subshell umask (0027 -> 0640) so there is never even a momentary
+  # world/other-readable window; chmod is belt-and-braces. cat back onto
+  # $LOG ONLY on tail success -- a transient run-dir write failure must
+  # never truncate the live log to an empty logcap.
+  ( umask 0027; tail -n "$CAP_LINES" "$LOG" > "$RUN_DIR/logcap" ) \
+    && { chmod 0640 "$RUN_DIR/logcap" 2>/dev/null || :; } \
+    && cat "$RUN_DIR/logcap" > "$LOG"
 }
 
 # --cap-once: run a single cap pass and exit. The launcher never invokes
