@@ -2,25 +2,24 @@
 
 **Date:** 2026-09-03
 **Branch:** `feat/covert-creator-router`
-**Status:** design-review cycles 1–5 complete (2 internal opus each; an
-external codex ran cycles 1–2 and declined 3–5 on a content filter).
-Cycle 1: 8 C / 15 H. Cycle 2: ~15 C / ~28 H. Cycle 3: 1 C / 2 H / 6 M / 6 L.
-Cycle 4: 2 C / 3 H / 5 M / 6 L. **Cycle 5: 0 C / 2 H / 2 M / 4 L** — the
-criticals are gone and the two HIGHs were again cycle-4-fix regressions
-(the "fix rounds introduce defects" pattern, now converging: 8→15→1→2→0
-criticals). Cycle-5 fixes in this revision: the egress rule keeps **both**
-destination rejects (RFC1918/CGNAT/link-local — the coverage cycle 4
-accidentally dropped, re-exposing the upstream ISP CPE/modem and second
-bridges) **and** the `oifname` rejects (the router's own WAN-IP/GUA); the
-flash `covert.log` cap now **truncates in place** (file-write only) because
-the blackbox `>$LOG.tmp && mv` pattern needs dir-write the unprivileged
-wrapper lacks — left unfixed it would grow the log until flash exhaustion;
-`disable` reaps by uid **before** removing the fragment (fragment outlives
-the relay), with the SIGKILL residual reaped in `apply`/boot; and the false
-"`-debug` suppresses `[vk-ws]` chatter" claim is corrected (those dumps are
-unconditional and carry peer-IP metadata, now an accepted trusted-LAN
-residual). Every claim is read from upstream source or measured on the
-router, not asserted from memory. **Prerequisite spike PASSED
+**Status:** design-review cycles 1–6 complete. Cycle 1: 8 C / 15 H.
+Cycle 2: ~15 C / ~28 H. Cycle 3: 1 C / 2 H / 6 M / 6 L. Cycle 4:
+2 C / 3 H / 5 M / 6 L. Cycle 5: 0 C / 2 H / 2 M / 4 L. **Cycle 6: 1 C**
+(one opus lens; the second lens and the external codex both hit a
+content-safeguard filter on this material — a tooling limit, not a
+finding). The cycle-6 CRITICAL was **live-verified on the router**: the
+cycle-5 `pkill -u` reap is unrunnable — `pkill` is absent on this BusyBox
+(only `pgrep`, no `-u`; `ps -o` unsupported), so the orphan-reap silently
+no-op'd. Now a `/proc`-scan helper (`amz_covert_reap`, mechanism verified
+present on the router), with `apply` reaping only on the (re)start path so
+it never kills a healthy creator, and Test 4 exercising the real helper
+rather than a stubbed `pkill` (the "stubs must mirror real tools" trap).
+The lens also confirmed the other cycle-5 fixes hold on the router
+(combined egress rule, truncate-in-place cap, readiness-timeout ordering).
+Criticals across cycles: 8→15→1→2→0→1, each a smaller, more localized
+defect in the prior cycle's fix. **A cycle 7 is required** to confirm the
+`/proc`-scan swap introduced nothing. Every claim is read from upstream
+source or measured on the router, not asserted from memory. **Prerequisite spike PASSED
 2026-09-03** (see below) — the headless creator does create calls
 unattended and draws no VK challenge over 3 consecutive runs. **Second
 gate also PASSED** — the iPhone joiner attached to a headless-created
@@ -621,26 +620,39 @@ POSIX sh, sources `amnezia-common.sh`, `uci -q get` throughout.
   not-yet-enabled procd service is a silent no-op, a bug this project
   has already shipped once with stubby/https-dns-proxy) →
   `( sleep 1 && fw4 reload ) &`.
+  **Reap helper — `/proc`-scan, NOT `pkill` (cycle-6 CRITICAL).** Verified
+  on the target (BusyBox v1.36.1): **`pkill` does not exist** on this router
+  (only `pgrep`, which has **no `-u`**; `ps -o` is unsupported), so a
+  `pkill -u <uid>` reap is a silent "command not found" no-op — the exact
+  "stubs must mirror real tools" trap, since a bats stub providing `pkill`
+  would pass green while the router cannot reap at all. Reaping is therefore
+  a shared `amz_covert_reap` helper in `amnezia-common.sh` that scans
+  `/proc/<pid>/status` for the covert uid (the `Uid:` line's first field;
+  `awk` is present at `/usr/bin/awk`) and `kill`s matches with the given
+  signal. Only the launcher and creator run as the fixed covert uid, so a
+  uid scan is precise.
 - **`disable`** → stop + init-disable the service, then **confirm no
   creator survives before removing the fragment** (cycle-5: the egress
-  fragment must outlive the relay, never the reverse). Because only the
-  launcher and creator run as the fixed covert uid, that confirmation is
-  precise: `pkill -u <covert-uid>; ` wait briefly; if any process with that
-  uid remains, `pkill -9 -u <covert-uid>` and re-verify. **Only then**
+  fragment must outlive the relay, never the reverse): `amz_covert_reap TERM`;
+  wait briefly; if the scan still finds a covert-uid process,
+  `amz_covert_reap KILL` and re-verify the scan is empty. **Only then**
   remove the nft fragment, backgrounded `fw4 reload`, remove state/link
   files, `covert_enabled='0'`, commit. Idempotent: disabling an
   already-disabled feature is exit 0. Cookie file is **not** deleted.
   Residual, stated: if procd SIGKILLs the launcher on `term_timeout`
-  (default 5 s) the launcher's `trap` never runs — so the reap-by-uid here
-  (and in `apply`/`start_service`, below) is what actually guarantees no
-  orphan, not the `trap` alone.
+  (default 5 s) the launcher's `trap` never runs — so the `/proc`-scan reap
+  here (and in `apply`, below) is what actually guarantees no orphan, not
+  the `trap` alone.
 - **`apply`** → idempotent reconcile used by boot init and `enable`.
-  **First reaps any orphan by uid** (`pkill -u <covert-uid>` for a creator
-  left by a prior SIGKILL) so a stale relay never runs alongside a fresh
-  fragment. `covert_enabled=0` ⇒ ensure stopped (reap included), exit 0.
-  `covert_enabled=1` ⇒ same preflight; on failure, log the specific
-  reason, leave `covert_enabled` untouched, do not start, and make
-  `status` report it (never a silent no-op). Missing binary ⇒ loud,
+  `covert_enabled=0` ⇒ ensure stopped, `amz_covert_reap TERM` (then KILL if
+  needed), exit 0. `covert_enabled=1` ⇒ same preflight; **reap only on the
+  path that (re)starts** — i.e. when procd reports the service **not**
+  running (clearing a SIGKILL-left orphan *before* the fresh start); when
+  the service is already running healthy, `apply` is a no-op and **must not
+  reap** (a blanket uid reap would kill the healthy creator during a benign
+  boot/enable reconcile). On preflight failure, log the specific reason,
+  leave `covert_enabled` untouched, do not start, and make `status` report
+  it (never a silent no-op). Missing binary ⇒ loud,
   distinct failure whose text names the dev-deploy-only caveat.
 - **`status`** → reads `/var/run/amnezia-covert/state.json` plus procd's
   running bit; emits exactly one JSON object on stdout:
@@ -1063,9 +1075,14 @@ test 1's assertion is unobservable:
    non-zero exit, firewall untouched. *Mutation: skip the check → red.*
 4. `disable` idempotent; removes fragment + state + link; leaves cookies;
    **confirms no covert-uid process survives BEFORE removing the fragment**
-   (fragment outlives the relay). *Mutation: remove the fragment before the
-   reap → a test asserting the fragment is still present while a fake
-   creator lives must go red.*
+   (fragment outlives the relay). The reap is exercised via the real
+   `amz_covert_reap` `/proc`-scan against an actual spawned process, **not**
+   a stubbed `pkill` (which doesn't exist on the router — a stub would hide
+   the live failure). *Mutations: (a) remove the fragment before the reap →
+   a test asserting the fragment is still present while a fake creator
+   lives must go red; (b) implement the reap with `pkill -u` → on a host
+   without `pkill`, or with `pkill` removed from PATH in the test, the
+   surviving-process assertion must go red.*
 5. Cookie structural validator: rejects non-JSON, non-array, and
    elements missing `name`/`value`; accepts the real shape. *Mutation:
    accept-anything → red.*
@@ -1159,6 +1176,10 @@ test 1's assertion is unobservable:
 - **procd SIGTERM leaves no orphan:** send SIGTERM to the launcher (as
   procd stop/`disable` does) and confirm **no** `amnezia-covert-creator`
   process survives (cycle-4 CRITICAL guard).
+- **SIGKILL orphan is reaped (cycle-6):** SIGKILL the launcher (bypassing
+  its `trap`), then run `amz_covert_reap` via `disable`/`apply` and confirm
+  the `/proc`-scan leaves no covert-uid process — proving the reap works
+  on the real BusyBox where `pkill` is absent.
 - **Multi-day supervised watch (cycle-4):** observe process-exit cadence
   and calls-created-per-day over the first sustained run — the slow-drip
   unbounded-call residual has no other detector, and sustained call
@@ -1177,7 +1198,7 @@ test 1's assertion is unobservable:
 | Join link is the tunnel obfuscation secret, not just an admission token (`main.go:718`) | Treated as a secret everywhere: `0640 amnezia-covert:amnezia-covert` files, no world-readable `-write-file` default; the link **is** logged in clear at `:554`/`:722` (marker lines) so it is protected by **file mode + `0750` parent dir**, not redaction |
 | **Admin plane / private targets reachable** — v6-GUA (cycle-3), the v4 WAN IP = joiner's egress IP (cycle-4), and the upstream ISP CPE / other bridges (cycle-5, after the oif rewrite dropped the address rejects) | Egress rule uses **both**: destination rejects (RFC1918/CGNAT/link-local/multicast, both stacks) close private/CGNAT/other-bridge targets that egress WAN; `oifname "lo"`/`"<LAN>"` rejects close the router's own addresses (WAN IP + GUA, any stack) + LAN hosts. `policy accept` permits only public WAN egress. Live gate probes the WAN IP, a GUA, and a private/CGNAT target on both stacks |
 | Flash `covert.log` grows unbounded — the blackbox `>$LOG.tmp && mv` cap needs dir-write the unprivileged wrapper lacks in the `0750 root` dir → EACCES → flash exhaustion breaks UCI/DNS | Wrapper caps by **truncate-in-place** (`tail > /var/run/…/logcap && cat logcap > covert.log`) — file-write only, no temp-in-dir/rename; bats test caps in a `0750 root` dir and asserts success |
-| Orphan window during `disable` (fragment removed before creator dies) + SIGKILL bypasses the launcher `trap` | `disable` reaps by covert-uid and confirms dead **before** removing the fragment; `apply`/boot reap any SIGKILL-left orphan by uid; SIGKILL residual stated, not assumed away |
+| Orphan window during `disable` (fragment removed before creator dies) + SIGKILL bypasses the launcher `trap` | `disable` reaps via `amz_covert_reap` (a **`/proc`-scan** on the covert uid — `pkill`/`ps -o` are ABSENT on this BusyBox, cycle-6) and confirms the scan empty **before** removing the fragment; `apply` reaps a SIGKILL-left orphan only on the (re)start path (never a healthy running creator); SIGKILL residual stated, not assumed away |
 | A blanket `meta nfproto ipv6 reject` would brick the SFU dial (pinned `ips[0]`, no v4 fallback — `main.go:479`/`wtsignal.go:75`) | Not used — the rule **allows** public WAN egress on both stacks (only the router's own addresses, LAN, and private/CGNAT destinations are denied), so the SFU dial works whichever stack the resolver picks |
 | Unresolvable `meta skuid <name>` / ifname would break the **entire** fw4 ruleset | Numeric uid **and** real LAN ifname substituted at `enable` time (both parse-safe); template never shipped into `/etc/nftables.d/`; `fw4 check` gate with fragment rollback; backgrounded reload |
 | Egress rule blocking loopback would kill the creator's own DNS | Explicit `oifname "lo"` port-53 accepts (v4 `127.0.0.1` **and** v6 `::1`) ahead of the `lo` reject; live gate proves DNS resolves and admin plane is refused |
