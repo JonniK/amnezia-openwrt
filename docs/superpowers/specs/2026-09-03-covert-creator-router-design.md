@@ -8,8 +8,10 @@ most of them defects introduced by cycle 1's own fixes**, which is the
 documented "fix rounds introduce defects at a high rate" pattern. This
 revision addresses cycle 2 and, crucially, replaces every claim that
 was previously asserted from memory with one read out of the upstream
-source or measured on the router. **Not ready for implementation** —
-see Prerequisite.
+source or measured on the router. **Prerequisite spike PASSED
+2026-09-03** (see below) — the headless creator does create calls
+unattended and draws no VK challenge over 3 consecutive runs. One live
+gate remains open (joiner against a headless-created call).
 
 > **Correction — a credential-handling mistake in the previous
 > revision of this document.** The earlier Prerequisite told the user
@@ -29,7 +31,58 @@ see Prerequisite.
 > is rewritten to report **only redacted, derived facts**. No raw log
 > is to be pasted anywhere.
 
-## Prerequisite — must pass before any Phase 1 build work starts
+## Prerequisite — **PASSED 2026-09-03**
+
+**Result.** Ran the host build 3 times, ~45 s each, ~50 s apart, cookies
+read at runtime from their path (never on a command line). Every run:
+
+| signal | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `CALL CREATED` | 1 | 1 | 1 |
+| `[vk-ws] Connected` | 1 | 1 | 1 |
+| fatal errors (`Failed to create call` / `Cannot read/parse cookies` / `empty VK token\|call_id\|ok_join_link`) | 0 | 0 | 0 |
+| captcha / challenge / too-many / flood | 0 | 0 | 0 |
+
+**The probe's own false positive, resolved:** the alarm pattern also
+contained the bare substring `rate`, which matched 4×/run — all of them
+`maintain-framerate` inside a VK SFU video-config message
+(`[vk-ws] unhandled: {"camera":{...}}`). Not a rate-limit signal.
+
+**Control for the negative** (per the project's "a negative probe is
+worthless until a control proves the probe can say yes" rule): because
+`headless/vk` has **no captcha handling at all**, a challenge cannot
+present as a prompt — it would surface as `empty call_id, response: …`
+→ `log.Fatalf`. That path is exactly what the fatal-error row counts,
+and it read 0 while a call was demonstrably created and the SFU
+websocket came up. Two independent signals agree, so the negative is
+meaningful rather than merely "nothing printed".
+
+**Measured, and it closes one deferred item:** steady-state log volume
+is **37 lines / 45 s ≈ 0.8 lines/s at idle with no joiner attached**
+(tags: `[p2p]` 13, `[vk-ws]` 9, `[auth]` 4, `[config]` 3, `[relay]` 1,
+`[obf]` 1). At that rate the log wrapper is not a CPU concern and does
+not need marker-only filtering. **Caveat:** this is the *idle* rate;
+the rate under an attached joiner passing real traffic is still
+unmeasured and is the number that actually sizes the wrapper — measure
+it during the first supervised live run.
+
+**Still NOT proven by this spike** (do not let the PASS overstate itself):
+- That the iOS/Mac joiner attaches to a **headless-created** call and
+  relays through it. Phase 0 only proved it against a GUI-created call.
+  This needs the phone and remains a live gate.
+- Long-run stability — runs were 45 s; the production service runs for
+  days.
+- Anything about arm64/the router. This was a host (darwin/arm64) build.
+- Whether sustained call creation over days draws challenges; 3 calls
+  in ~2.5 minutes did not. Note those 3 calls are now abandoned on the
+  account.
+
+Logs were shredded after extraction (they contain join links, which are
+key material) and the test binary removed.
+
+---
+
+### Original gate rationale (kept for the record)
 
 **Phase 0 never ran `headless/vk` in creator mode.** It ran
 `relay/main.go --mode vk-video-creator` (browser-bridged) on the Mac
@@ -742,11 +795,15 @@ Only genuinely unresolvable-before-execution items remain (the previous
 revision deferred several things that were readable in source; those are
 now inline above):
 
-- The Prerequisite spike's four counts — the go/no-go itself.
-- Steady-state log line rate (from the spike run) → decides whether the
-  wrapper needs marker-only filtering.
+- ~~The Prerequisite spike's counts~~ — **done, PASSED**, see above.
+- ~~Steady-state log line rate~~ — **measured at idle (0.8 lines/s)**;
+  wrapper needs no marker-only filtering. Still to measure: the rate
+  **with a joiner attached under real traffic**, during the first
+  supervised live run — that is the number that actually sizes it.
 - `MemAvailable` threshold and the readiness-gate timeout — pinned
   against live measurement.
+- Joiner attachment to a **headless-created** call — the one remaining
+  feasibility gate; needs the phone, not the router.
 - The state-file staleness window for `unknown`.
 - Whether the LuCI-over-HTTP cookie transport is acceptable, or the
   `scp` path is used instead.
