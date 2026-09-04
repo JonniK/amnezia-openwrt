@@ -138,7 +138,10 @@ load '../lib/harness.bash'
     UCI_FAKE_TUNNELS="awg1" \
     run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
   [ -f "$_covert_dir/covert.log" ]
-  _mode=$(stat -f %Lp "$_covert_dir/covert.log" 2>/dev/null || stat -c %a "$_covert_dir/covert.log" 2>/dev/null)
+  # GNU stat (-c %a) FIRST, BSD/macOS (-f %Lp) as fallback: on GNU stat,
+  # `-f` means --file-system and mis-parses %Lp, so the BSD form must never
+  # come first or it yields a non-mode value under the Tier-2 (ubuntu) job.
+  _mode=$(stat -c %a "$_covert_dir/covert.log" 2>/dev/null || stat -f %Lp "$_covert_dir/covert.log" 2>/dev/null)
   [ "$_mode" = "640" ]
 }
 

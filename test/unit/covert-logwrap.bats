@@ -107,28 +107,17 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<3000;i++) print "line " i}' > "$AMZ_COVERT_LOG"
   chmod 0640 "$AMZ_COVERT_LOG"
 
-  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
-  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
-  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
-  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
-  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
-  # is a no-op that root sails through, failing the assertion. $EUID is a
-  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
-  if [ "$EUID" -eq 0 ]; then
-    # Root (CI's `sudo bats`) bypasses DAC entirely against its own
-    # restrictive chmod, so the permission boundary has to be enforced by
-    # actually running as a real unprivileged user -- root can `su` to one
-    # without a password, unlike a non-root dev shell.
-    chown -R nobody "$flash_dir" "$RUN_DIR" 2>/dev/null || true
-    chgrp -R nobody "$flash_dir" "$RUN_DIR" 2>/dev/null || chgrp -R nogroup "$flash_dir" "$RUN_DIR" 2>/dev/null || true
-    chmod 0750 "$flash_dir"
-    run su -s /bin/sh nobody -c "AMZ_COVERT_LOG='$AMZ_COVERT_LOG' AMZ_COVERT_RUN_DIR='$RUN_DIR' '$WRAP' --cap-once"
-  else
+  # OS DAC write-denial is not faithfully testable as root: root bypasses its
+  # own chmod, and the `su nobody` workaround is unreliable in CI
+  # (BATS_TEST_TMPDIR is 0700-root, so nobody cannot traverse into the test
+  # dir; the command then fails for the wrong reason). Real gate on a non-root
+  # dev host, where `chmod u-w` denies our own process; skip under root.
+  # ($EUID is used for the check, never the PATH-stubbed `id -u`.)
+  [ "$EUID" -eq 0 ] && skip "DAC write-denial not enforceable as root; gated on non-root dev hosts"
     # Non-root dev host: strip OUR OWN write bit on the dir (we own it, so
     # this is a real, enforced DAC restriction against our own process).
     chmod u-w "$flash_dir"
     run "$WRAP" --cap-once
-  fi
 
   [ "$status" -eq 0 ]
   chmod u+w "$flash_dir" 2>/dev/null || true
@@ -146,22 +135,15 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<3000;i++) print "line " i}' > "$log"
   chmod 0640 "$log"
 
-  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
-  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
-  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
-  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
-  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
-  # is a no-op that root sails through, failing the assertion. $EUID is a
-  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
-  if [ "$EUID" -eq 0 ]; then
-    chown -R nobody "$flash_dir" 2>/dev/null || true
-    chgrp -R nobody "$flash_dir" 2>/dev/null || chgrp -R nogroup "$flash_dir" 2>/dev/null || true
-    chmod 0750 "$flash_dir"
-    run su -s /bin/sh nobody -c "tail -n 2000 '$log' > '$log.tmp' && mv '$log.tmp' '$log'"
-  else
+  # OS DAC write-denial is not faithfully testable as root: root bypasses its
+  # own chmod, and the `su nobody` workaround is unreliable in CI
+  # (BATS_TEST_TMPDIR is 0700-root, so nobody cannot traverse into the test
+  # dir; the command then fails for the wrong reason). Real gate on a non-root
+  # dev host, where `chmod u-w` denies our own process; skip under root.
+  # ($EUID is used for the check, never the PATH-stubbed `id -u`.)
+  [ "$EUID" -eq 0 ] && skip "DAC write-denial not enforceable as root; gated on non-root dev hosts"
     chmod u-w "$flash_dir"
     run sh -c "tail -n 2000 '$log' > '$log.tmp' && mv '$log.tmp' '$log'"
-  fi
 
   chmod u+w "$flash_dir" 2>/dev/null || true
   [ "$status" -ne 0 ]
@@ -211,27 +193,18 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<10;i++) print "line " i}' > "$LOG"
   ORIGINAL="$(cat "$LOG")"
 
-  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
-  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
-  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
-  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
-  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
-  # is a no-op that root sails through, failing the assertion. $EUID is a
-  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
-  if [ "$EUID" -eq 0 ]; then
-    # Root bypasses DAC against its own chmod -- enforce the boundary as a
-    # real unprivileged user, same pattern as cap_is_truncate_in_place.
-    chown -R nobody "$RUN_DIR" 2>/dev/null || true
-    chgrp -R nobody "$RUN_DIR" 2>/dev/null || chgrp -R nogroup "$RUN_DIR" 2>/dev/null || true
-    chmod 0500 "$RUN_DIR"
-    run su -s /bin/sh nobody -c "AMZ_COVERT_LOG='$LOG' AMZ_COVERT_RUN_DIR='$RUN_DIR' '$WRAP' --cap-once"
-  else
+  # OS DAC write-denial is not faithfully testable as root: root bypasses its
+  # own chmod, and the `su nobody` workaround is unreliable in CI
+  # (BATS_TEST_TMPDIR is 0700-root, so nobody cannot traverse into the test
+  # dir; the command then fails for the wrong reason). Real gate on a non-root
+  # dev host, where `chmod u-w` denies our own process; skip under root.
+  # ($EUID is used for the check, never the PATH-stubbed `id -u`.)
+  [ "$EUID" -eq 0 ] && skip "DAC write-denial not enforceable as root; gated on non-root dev hosts"
     # Non-root dev host: strip our own write bit on the run dir so `tail ...
     # > $RUN_DIR/logcap` cannot create the file -- a real, enforced DAC
     # restriction against our own process (mirrors cap_is_truncate_in_place).
     chmod u-w "$RUN_DIR"
     run "$WRAP" --cap-once
-  fi
 
   chmod u+w "$RUN_DIR" 2>/dev/null || true
 
