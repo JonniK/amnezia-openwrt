@@ -24,6 +24,10 @@ load '../lib/harness.bash'
     openwrt/amnezia-dnsleak.init \
     openwrt/99-amnezia-dnsleak.hotplug \
     openwrt/99-amnezia-force-load.hotplug \
-    openwrt/99-amnezia-ru-load.hotplug
+    openwrt/99-amnezia-ru-load.hotplug \
+    openwrt/amnezia-covert-ctl.sh \
+    openwrt/amnezia-covert-run.sh \
+    openwrt/amnezia-covert-logwrap.sh \
+    openwrt/amnezia-covert.init
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Stub for /etc/init.d/amnezia-covert, routed in via AMNEZIA_COVERT_INIT
+# (mirrors the existing amnezia-dnsleak-init convention). enable/restart/
+# disable/stop are arg-echo. `running` is test-controllable -- STUB_COVERT_RUNNING
+# set -> exit 0 (procd reports the instance up); unset -> exit 1 (not
+# running). NOT an unconditional exit 0 like the dnsleak stub: the CLI's
+# status_truth_table needs to reach the three enabled=true,running=false
+# rows (auth-failed/crashed/not-started), which would be vacuous otherwise.
+echo "amnezia-covert-init $*" >> "${STUB_LOG:-/dev/null}"
+case "$1" in
+  running)
+    [ -n "${STUB_COVERT_RUNNING:-}" ] && exit 0
+    exit 1
+    ;;
+esac
+exit 0

@@ -52,6 +52,22 @@ return baseclass.extend({
 		}
 	},
 
+	// Status colour for the covert-creator panel. A NEW helper, deliberately
+	// NOT a new arm on verdictColor (whose only two callers are in zapret.js
+	// and whose arm set must not move -- "adding a caller to a shared
+	// classifier makes a dead default arm live").
+	covertStateColor: function(state) {
+		switch (state) {
+			case 'connected':   return '#3c763d';
+			case 'starting':    return '#f0ad4e';
+			case 'idle':        return '#666';
+			case 'auth-failed': return '#a94442';
+			case 'crashed':     return '#a94442';
+			case 'not-started': return '#888';
+			default:            return '#666'; // unknown
+		}
+	},
+
 	fmtDur: function(sec) {
 		if (!sec || sec < 0) return '0s';
 		var m = Math.floor(sec / 60);
