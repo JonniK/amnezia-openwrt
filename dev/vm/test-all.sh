@@ -9,7 +9,17 @@
 #     fetch-image.sh (fresh disk) → run-vm.sh → provision.sh --first-install
 #     → test-first-install.sh
 #
-# Both scenarios always run. No flags needed.
+#   SCENARIO 3 — TUNNEL MGMT + ALLOWLIST:
+#     fetch-image.sh (fresh disk) → run-vm.sh → provision.sh --first-install
+#     → installer --first-install (full stack) → test-tunnel-mgmt.sh
+#
+#   SCENARIO 4 — UNINSTALL (covert-creator teardown + main-stack survival):
+#     fetch-image.sh (fresh disk) → run-vm.sh → provision.sh --first-install
+#     → installer --first-install (covert user/dir/log present)
+#     → test-uninstall.sh (runs installer --uninstall, asserts covert
+#       teardown + that ip rules/classifier/WAN/DNS survive)
+#
+# All scenarios always run. No flags needed.
 #
 # console_bootstrap() in provision.sh handles the serial-console activation
 # and polls SSH until it's up; test-all.sh does not need its own boot-wait
@@ -43,6 +53,7 @@ done
 SUITE_MIGRATE_RC=0
 SUITE_FIRST_RC=0
 SUITE_TUNNEL_MGMT_RC=0
+SUITE_UNINSTALL_RC=0
 _T0=$(date +%s)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -171,6 +182,40 @@ log "SCENARIO 3 finished in $(( _S3_END - _S3_START ))s, rc=${SUITE_TUNNEL_MGMT_
 
 stop_vm || true
 
+# ── SCENARIO 4: UNINSTALL — covert teardown + main-stack survival ───────────
+
+log "======================================================"
+log " SCENARIO 4: covert --uninstall teardown + main-stack survival"
+log "======================================================"
+
+fresh_disk "uninstall"
+boot_vm
+
+log "provisioning VM to no-pbr state (first-install mode)"
+"$VM_DIR/provision.sh" --first-install
+
+log "pre-seeding amnezia_ru4 nft set (gate pass for installer)"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" '
+  nft add table inet fw4 2>/dev/null || true
+  nft add set inet fw4 amnezia_ru4 "{ type ipv4_addr; flags interval; auto-merge; }" 2>/dev/null || true
+  nft add element inet fw4 amnezia_ru4 { 77.88.8.8 } 2>/dev/null || true
+' 2>/dev/null || log "WARN: amnezia_ru4 pre-seed had errors (may be non-fatal)"
+
+log "running installer --first-install to install the full stack (covert user/dir/log present)"
+# shellcheck disable=SC2086
+ssh $VM_SSH_OPTS "root@$SSH_HOST" \
+  'CONF_DIR=/etc/amnezia sh /root/cutover/install-amnezia-pbr.sh --first-install 2>&1' \
+  || log "WARN: installer returned non-zero (assertions in test-uninstall.sh will clarify)"
+
+log "running test-uninstall.sh"
+_S4_START=$(date +%s)
+"$VM_DIR/test-uninstall.sh" && SUITE_UNINSTALL_RC=0 || SUITE_UNINSTALL_RC=$?
+_S4_END=$(date +%s)
+log "SCENARIO 4 finished in $(( _S4_END - _S4_START ))s, rc=${SUITE_UNINSTALL_RC}"
+
+stop_vm || true
+
 # ── Final summary ─────────────────────────────────────────────────────────────
 
 _T1=$(date +%s)
@@ -197,6 +242,12 @@ if [ "$SUITE_TUNNEL_MGMT_RC" -eq 0 ]; then
   echo "  SCENARIO 3 (tunnel-mgmt):   PASS"
 else
   echo "  SCENARIO 3 (tunnel-mgmt):   FAIL (rc=$SUITE_TUNNEL_MGMT_RC)"
+  _overall=1
+fi
+if [ "$SUITE_UNINSTALL_RC" -eq 0 ]; then
+  echo "  SCENARIO 4 (uninstall):      PASS"
+else
+  echo "  SCENARIO 4 (uninstall):      FAIL (rc=$SUITE_UNINSTALL_RC)"
   _overall=1
 fi
 if [ "$_overall" -eq 0 ]; then
