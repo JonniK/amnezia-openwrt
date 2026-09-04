@@ -47,6 +47,14 @@ if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
 else
   . "$(dirname "$0")/lib/amnezia-common.sh"
 fi
+# amnezia-routing.sh provides routing_emit_covert_classifier (P2 covert
+# routing): the covert creator's egress is classified like a LAN client.
+# shellcheck source=lib/amnezia-routing.sh
+if [ -f "$AMNEZIA_LIB/amnezia-routing.sh" ]; then
+  . "$AMNEZIA_LIB/amnezia-routing.sh"
+else
+  . "$(dirname "$0")/lib/amnezia-routing.sh"
+fi
 
 # Re-apply: common.sh's own unconditional `export AMZ_COVERT_*=<fixed path>`
 # just clobbered any caller override in the process environment.
@@ -59,6 +67,7 @@ export AMZ_COVERT_BIN AMZ_COVERT_DIR AMZ_COVERT_COOKIES AMZ_COVERT_MANIFEST AMZ_
 
 AMNEZIA_COVERT_INIT="${AMNEZIA_COVERT_INIT:-/etc/init.d/amnezia-covert}"
 AMZ_COVERT_FRAGMENT="${AMZ_COVERT_FRAGMENT:-/etc/nftables.d/40-amnezia-covert-egress.nft}"
+AMZ_COVERT_CLASSIFY_FRAGMENT="${AMZ_COVERT_CLASSIFY_FRAGMENT:-/etc/nftables.d/41-amnezia-covert-classify.nft}"
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -203,6 +212,70 @@ _covert_restore_or_leave() {
 }
 
 # ---------------------------------------------------------------------------
+# _covert_render_classify <dest>  -- render the covert-uid classify chain
+# (P2) for the ACTIVE routing_mode into <dest>. This is the marking chain
+# that makes the creator's egress behave like a LAN client: default direct,
+# list-matched destinations through the tunnels. Derived from the LAN
+# classifier (routing_emit_covert_classifier) so the two never drift.
+# Returns non-zero (and writes nothing usable) if the uid is unresolvable or
+# the emit fails -- callers treat that as "no marking" = covert egress stays
+# direct, which is the pre-P2 behaviour and always safe (never fail-closed
+# on the creator).
+_covert_render_classify() {
+  _dest="$1"
+  _cuid="$(amz_covert_uid 2>/dev/null)" || _cuid=""
+  [ -n "$_cuid" ] || { amz_log "amnezia-covert-ctl: classify: uid unresolvable -- covert egress stays direct"; return 1; }
+  _cmode="$(uci -q get amnezia.config.routing_mode 2>/dev/null || echo tunnel-default)"
+  _clan="$(uci -q get network.lan.device 2>/dev/null || echo br-lan)"
+  if ! routing_emit_covert_classifier "$_cmode" "$_clan" "$_cuid" > "$_dest" 2>/dev/null; then
+    amz_log "amnezia-covert-ctl: classify: emit failed (mode=$_cmode) -- covert egress stays direct"
+    return 1
+  fi
+  [ -s "$_dest" ] || { amz_log "amnezia-covert-ctl: classify: empty render -- covert egress stays direct"; return 1; }
+  return 0
+}
+
+# _covert_install_classify  -- best-effort install of the classify fragment
+# with its own snapshot -> mv -> fw4 check -> restore/remove -> reload dance,
+# mirroring the egress fragment's. SYNCHRONOUS reload (no SSH session to
+# protect on the boot/reconcile path; the enable path folds classify into
+# its own reload instead of calling this). Never fails the caller: on any
+# error the fragment is removed (fall back to direct) and 1 is returned for
+# logging only.
+_covert_install_classify() {
+  _new="$(mktemp 2>/dev/null || echo "/tmp/amnezia-covert-classify.$$")"
+  if ! _covert_render_classify "$_new"; then
+    rm -f "$_new"
+    return 1
+  fi
+  if [ -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ] && cmp -s "$_new" "$AMZ_COVERT_CLASSIFY_FRAGMENT" 2>/dev/null; then
+    rm -f "$_new"   # no drift, nothing to reload
+    return 0
+  fi
+  _csnap=""; _chad=0
+  if [ -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]; then
+    _chad=1
+    _csnap="$(mktemp 2>/dev/null || echo "/tmp/amnezia-covert-classify-snap.$$")"
+    cp "$AMZ_COVERT_CLASSIFY_FRAGMENT" "$_csnap" 2>/dev/null
+  fi
+  mv "$_new" "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  chmod 0644 "$AMZ_COVERT_CLASSIFY_FRAGMENT" 2>/dev/null || :
+  if ! fw4 check >/dev/null 2>&1; then
+    if [ "$_chad" -eq 1 ] && [ -s "$_csnap" ]; then
+      cp "$_csnap" "$AMZ_COVERT_CLASSIFY_FRAGMENT" 2>/dev/null
+    else
+      rm -f "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+    fi
+    rm -f "$_csnap"
+    amz_log "amnezia-covert-ctl: classify: fw4 check failed -- removed/restored, covert egress stays direct"
+    return 1
+  fi
+  rm -f "$_csnap"
+  ( sleep 1 && fw4 reload >/dev/null 2>&1 ) &
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # cmd_enable
 # ---------------------------------------------------------------------------
 cmd_enable() {
@@ -247,9 +320,20 @@ cmd_enable() {
   # /etc/nftables.d fragment's convention (0644).
   chmod 0644 "$AMZ_COVERT_FRAGMENT" 2>/dev/null || :
 
+  # P2: render the covert-uid classify chain alongside the egress fragment so
+  # the SINGLE fw4 check below validates both and the SINGLE reload loads
+  # both (no second, racing reload). Best-effort: if the render fails the
+  # covert egress simply stays direct (pre-P2 behaviour) -- never block the
+  # feature on it.
+  if _covert_render_classify "$AMZ_COVERT_CLASSIFY_FRAGMENT"; then
+    chmod 0644 "$AMZ_COVERT_CLASSIFY_FRAGMENT" 2>/dev/null || :
+  else
+    rm -f "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  fi
+
   if ! fw4 check >/dev/null 2>&1; then
-    rm -f "$AMZ_COVERT_FRAGMENT"
-    amz_log "amnezia-covert-ctl: enable: fw4 check failed after installing the egress fragment; removed, firewall untouched"
+    rm -f "$AMZ_COVERT_FRAGMENT" "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+    amz_log "amnezia-covert-ctl: enable: fw4 check failed after installing the egress/classify fragments; removed, firewall untouched"
     return 1
   fi
 
@@ -285,6 +369,12 @@ cmd_disable() {
   # init already stopped above) so no NEW creator starts under the kept
   # fragment; only the fragment removal + reload are skipped.
   _covert_reap_and_confirm
+
+  # The classify (marking) chain is always safe to drop -- unlike the egress
+  # fence it restricts nothing; a surviving process simply falls back to
+  # direct. Remove it unconditionally; the success-branch reload below (or
+  # the next reload) evicts it from the kernel.
+  rm -f "$AMZ_COVERT_CLASSIFY_FRAGMENT"
 
   _rc=0
   if _covert_uid_procs_present; then
@@ -410,6 +500,11 @@ cmd_apply() {
   # (uid unresolvable, cookie check, fw4 check/reload) already returned 1
   # before reaching here, so a failed apply never touches perms.
   [ -f "$AMZ_COVERT_FRAGMENT" ] && chmod 0644 "$AMZ_COVERT_FRAGMENT" 2>/dev/null || :
+
+  # P2: (re)install the covert-uid classify chain for the ACTIVE
+  # routing_mode. Best-effort -- a failure leaves covert egress direct
+  # (pre-P2, safe), never fails the reconcile.
+  _covert_install_classify || :
 
   # Reap only on the (re)start path -- procd reports the instance NOT
   # running. A healthy running creator is never touched by a benign reconcile.

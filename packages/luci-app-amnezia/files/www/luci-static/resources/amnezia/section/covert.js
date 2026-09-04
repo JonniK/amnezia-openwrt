@@ -153,7 +153,7 @@ return baseclass.extend({
 		}, [
 			E('h3', { 'style': 'margin:0 0 6px 0;' }, _('Covert transport (VK creator)')),
 			E('div', { 'class': 'cbi-map-descr' },
-				_('Opt-in, default-OFF. Creates a fresh VK call on start; paste the join link into the phone/Mac joiner app by hand. Does not participate in tunnel/DNS routing.')),
+				_('Opt-in, default-OFF. Creates a fresh VK call on start; paste the join link into the phone/Mac joiner app by hand. The relayed traffic is classified like a LAN client (default direct, listed resources through the tunnels); DNS resolves via the router.')),
 			E('div', { 'id': 'amz-covert-row' }, [ covertRowMarkup(view, st) ]),
 
 			E('details', { 'class': 'amnezia-action' }, [

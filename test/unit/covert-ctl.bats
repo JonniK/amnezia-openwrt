@@ -43,6 +43,9 @@ setup() {
 
   export UCI_GET_amnezia_config_covert_enabled=0
   export UCI_GET_network_lan_device=br-lan
+  export UCI_GET_amnezia_config_routing_mode=direct-default
+  # P2 covert classify fragment -> temp, never /etc.
+  export AMZ_COVERT_CLASSIFY_FRAGMENT="$NFT_DIR/41-amnezia-covert-classify.nft"
 }
 
 teardown() {
@@ -533,4 +536,60 @@ EOF
   age="$(echo "$output" | sed -n 's/.*"link_age_s":\([0-9]*\).*/\1/p')"
   [ -n "$age" ]
   [ "$age" -lt 300 ]
+}
+
+# ---------------------------------------------------------------------------
+# P2 covert routing: enable/apply generate the covert-uid classify chain for
+# the active routing_mode; disable removes it.
+@test "p2 classify: enable generates the classify chain for the active mode" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_routing_mode=direct-default
+  run "$CLI" enable
+  [ "$status" -eq 0 ]
+  [ -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]
+  grep -q 'chain amnezia_covert_classify {' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  grep -q 'type route hook output priority mangle;' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  # uid gate uses the resolved uid, not a placeholder
+  grep -q "meta skuid != $AMZ_COVERT_UID return" "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  ! grep -q '@@COVERT_UID@@' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  # direct-default: force4->pool, no blanket mark
+  grep -q 'ip daddr @amnezia_force4  meta mark set 0x0b0000 return' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  # never redeclares the sets
+  ! grep -q '^set amnezia_' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+}
+
+@test "p2 classify: enable reflects tunnel-default when active" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_routing_mode=tunnel-default
+  run "$CLI" enable
+  [ "$status" -eq 0 ]
+  grep -qE '^[[:space:]]*meta mark set 0x0b0000$' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+  grep -q '@amnezia_ru4 return' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
+}
+
+@test "p2 classify: enable fw4-check failure removes BOTH egress and classify" {
+  _install_fw4_stub
+  export STUB_FW4_CHECK_FAIL=1
+  run "$CLI" enable
+  [ "$status" -ne 0 ]
+  [ ! -f "$AMZ_COVERT_FRAGMENT" ]
+  [ ! -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]
+}
+
+@test "p2 classify: disable removes the classify fragment" {
+  _install_fw4_stub
+  run "$CLI" enable
+  [ -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]
+  unset STUB_COVERT_RUNNING
+  run "$CLI" disable
+  [ ! -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]
+}
+
+@test "p2 classify: apply (reconcile) generates the classify chain" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  run "$CLI" apply
+  [ "$status" -eq 0 ]
+  [ -f "$AMZ_COVERT_CLASSIFY_FRAGMENT" ]
+  grep -q 'chain amnezia_covert_classify {' "$AMZ_COVERT_CLASSIFY_FRAGMENT"
 }
