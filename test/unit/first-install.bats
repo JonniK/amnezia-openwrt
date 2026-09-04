@@ -141,3 +141,33 @@ load '../lib/harness.bash'
   _mode=$(stat -f %Lp "$_covert_dir/covert.log" 2>/dev/null || stat -c %a "$_covert_dir/covert.log" 2>/dev/null)
   [ "$_mode" = "640" ]
 }
+
+# H4 gap (VM probe 2026-09-04): amnezia.config.covert_enabled is absent on a
+# fresh/cutover install whose /etc/config/amnezia predates this feature (the
+# shipped default only reaches .ipk installs). The installer must default it
+# to 0 (feature OFF) when unset -- the uci stub's "get" falls through to exit 1
+# / empty output for any key with no UCI_GET_* override, which is exactly the
+# "unset" case here (no UCI_GET_amnezia_config_covert_enabled exported).
+@test "first-install defaults covert_enabled to 0 when unset" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
+}
+
+# The important half of the guard: a user's existing covert_enabled=1 must
+# survive a re-install/upgrade. Without the "unset" guard, a shared default
+# write would silently disable a user's already-enabled feature.
+@test "first-install does NOT reset an existing covert_enabled=1" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    UCI_GET_amnezia_config_covert_enabled="1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  ! grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
+}

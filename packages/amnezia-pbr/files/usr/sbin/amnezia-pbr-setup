@@ -210,6 +210,16 @@ _amz_covert_install() {
   chown amnezia-covert:amnezia-covert "$_clog" 2>/dev/null || true
   chmod 0640 "$_clog" 2>/dev/null || true
 
+  # Ensure the opt-in flag exists, defaulting OFF, on a fresh install -- a
+  # cutover router's live /etc/config/amnezia predates this feature and the
+  # shipped default only reaches .ipk installs. GUARDED on "unset" so a
+  # re-install/upgrade never resets a user's covert_enabled=1 back to 0.
+  if [ -z "$(uci -q get amnezia.config.covert_enabled 2>/dev/null)" ]; then
+    uci set amnezia.config.covert_enabled=0 2>/dev/null || true
+    uci commit amnezia 2>/dev/null || true
+    amz_log "amnezia-covert-install: covert_enabled was unset -- defaulted to 0 (feature OFF)"
+  fi
+
   # Binary + manifest placement (dev-deploy-only in P1: staged to /tmp/ by
   # dev/deploy-openwrt-safe.sh). Absent on a .ipk/install.sh install --
   # inert; `amnezia-covert-ctl apply`/`enable` fail loudly on the missing

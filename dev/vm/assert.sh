@@ -290,22 +290,28 @@ assert_covert_installed() {
     assert_fail "H1" "amnezia-covert uid/gid MISMATCH -- id -u: '$_cu_uid' id -g: '$_cu_gid' (expected 391/391)"
   fi
 
-  # H2: /etc/amnezia/covert dir owner + mode.
-  _cd_mode=$(vm_run "stat -c %a /etc/amnezia/covert 2>/dev/null" 2>/dev/null || true)
-  _cd_owner=$(vm_run "stat -c %U:%G /etc/amnezia/covert 2>/dev/null" 2>/dev/null || true)
-  if [ "$_cd_mode" = "750" ] && [ "$_cd_owner" = "root:amnezia-covert" ]; then
+  # H2: /etc/amnezia/covert dir owner + mode. BusyBox has no `stat`; parse
+  # `ls -lnd` (permission string + NUMERIC uid/gid -- `ls` truncates long
+  # owner names to 8 chars, so use -n).
+  _cd_ls=$(vm_run "ls -lnd /etc/amnezia/covert 2>/dev/null" 2>/dev/null || true)
+  _cd_perm=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $1}')
+  _cd_uid=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $3}')
+  _cd_gid=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $4}')
+  if [ "$_cd_perm" = "drwxr-x---" ] && [ "$_cd_uid" = "0" ] && [ "$_cd_gid" = "391" ]; then
     assert_pass "H2" "/etc/amnezia/covert dir is root:amnezia-covert 0750"
   else
-    assert_fail "H2" "/etc/amnezia/covert dir wrong owner/mode -- owner: '$_cd_owner' mode: '$_cd_mode' (expected root:amnezia-covert / 750)"
+    assert_fail "H2" "/etc/amnezia/covert dir wrong owner/mode -- ls: '$_cd_ls' (expected drwxr-x--- uid 0 gid 391)"
   fi
 
-  # H3: covert.log owner + mode.
-  _cl_mode=$(vm_run "stat -c %a /etc/amnezia/covert/covert.log 2>/dev/null" 2>/dev/null || true)
-  _cl_owner=$(vm_run "stat -c %U:%G /etc/amnezia/covert/covert.log 2>/dev/null" 2>/dev/null || true)
-  if [ "$_cl_mode" = "640" ] && [ "$_cl_owner" = "amnezia-covert:amnezia-covert" ]; then
+  # H3: covert.log owner + mode (same ls -ln parse; -d not needed for a file).
+  _cl_ls=$(vm_run "ls -ln /etc/amnezia/covert/covert.log 2>/dev/null" 2>/dev/null || true)
+  _cl_perm=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $1}')
+  _cl_uid=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $3}')
+  _cl_gid=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $4}')
+  if [ "$_cl_perm" = "-rw-r-----" ] && [ "$_cl_uid" = "391" ] && [ "$_cl_gid" = "391" ]; then
     assert_pass "H3" "covert.log is pre-created amnezia-covert:amnezia-covert 0640"
   else
-    assert_fail "H3" "covert.log wrong owner/mode -- owner: '$_cl_owner' mode: '$_cl_mode' (expected amnezia-covert:amnezia-covert / 640)"
+    assert_fail "H3" "covert.log wrong owner/mode -- ls: '$_cl_ls' (expected -rw-r----- uid 391 gid 391)"
   fi
 
   # H4: feature OFF by default.
