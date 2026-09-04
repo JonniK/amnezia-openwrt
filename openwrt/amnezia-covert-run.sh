@@ -76,6 +76,9 @@ PIPE="$RUN_DIR/covert.fifo"
 AMZ_COVERT_FRAGMENT="${AMZ_COVERT_FRAGMENT:-/etc/nftables.d/40-amnezia-covert-egress.nft}"
 AMZ_COVERT_CALL_GAP="${AMZ_COVERT_CALL_GAP:-120}"
 AMZ_COVERT_READY_TIMEOUT="${AMZ_COVERT_READY_TIMEOUT:-30}"
+# Heartbeat interval, comfortably inside amnezia-covert-ctl's 90s
+# AMZ_COVERT_STALE_S window -- see step 5.
+AMZ_COVERT_HEARTBEAT_S="${AMZ_COVERT_HEARTBEAT_S:-30}"
 AMZ_COVERT_CREATOR_BIN="${AMZ_COVERT_CREATOR_BIN:-${AMZ_COVERT_BIN:-/usr/bin/amnezia-covert-creator}}"
 # Bare-name default so a test can PATH-shadow it (mirrors the existing
 # AMNEZIA_DNSLEAK_INIT convention: default is an absolute path, tests
@@ -169,9 +172,12 @@ LW=$!
 CR=$!
 
 _teardown() {
+  [ -n "${HB:-}" ] && kill "$HB" 2>/dev/null
   kill "$CR" "$LW" 2>/dev/null
   wait "$CR" 2>/dev/null
   wait "$LW" 2>/dev/null
+  [ -n "${HB:-}" ] && wait "$HB" 2>/dev/null
+  return 0
 }
 # TERM/INT must actually stop this launcher (a trap alone does not
 # terminate the shell -- without the explicit exit, ash would resume the
@@ -200,8 +206,36 @@ while [ "$_ticks" -lt "$AMZ_COVERT_READY_TIMEOUT" ]; do
 done
 
 if [ "$_ready" -eq 1 ]; then
+  # -------------------------------------------------------------------------
+  # Step 5 -- heartbeat. amnezia-covert-ctl's status degrades a `connected`
+  # to `unknown` once state.json is older than AMZ_COVERT_STALE_S (90s), and
+  # the design's status truth table names that arm "running but heartbeat
+  # stale". Nothing was emitting one: the log wrapper rewrites state.json
+  # only when a marker CHANGES something, and the creator falls silent the
+  # instant the call is up and it is waiting for a joiner. So a perfectly
+  # healthy creator went `unknown` ~90s in -- and covert.js renders the join
+  # link ONLY for `connected`, so the link the feature exists to produce
+  # disappeared from the panel (live router, 2026-09-04).
+  #
+  # `touch` only moves the mtime; it never rewrites content, so this cannot
+  # resurrect or downgrade a state the wrapper owns. Gated on the creator
+  # still existing, so an orphaned heartbeat can never keep reporting a dead
+  # creator as fresh: once the creator is gone (reaped by this launcher, or
+  # by init if this launcher was SIGKILLed) the pid stops resolving and the
+  # loop ends on its own.
+  (
+    while kill -0 "$CR" 2>/dev/null; do
+      sleep "$AMZ_COVERT_HEARTBEAT_S"
+      kill -0 "$CR" 2>/dev/null || break
+      touch "$STATE" 2>/dev/null || :
+    done
+  ) &
+  HB=$!
+
   wait "$CR"
   _rc=$?
+  kill "$HB" 2>/dev/null
+  wait "$HB" 2>/dev/null
   exit "$_rc"
 fi
 

@@ -100,6 +100,14 @@ case "\${AMZ_FAKE_CREATOR_MODE:-quick}" in
     sleep 0.2
     exit 0
     ;;
+  connect_hold)
+    # What the REAL creator does: emit the whole startup burst, then stay
+    # alive and SILENT waiting for a joiner. exec'ing the sleep keeps this
+    # a single process, per the `hang` note below.
+    printf '  CALL CREATED\n'
+    printf '[vk-ws] Connected\n'
+    exec sleep 60
+    ;;
   hang)
     # exec, not a forked subshell: the real creator binary is a single
     # process (no children to leak); this must be too, or SIGTERM to the
@@ -283,4 +291,43 @@ EOF
   [ "$status" -eq 0 ]
   elapsed=$((end_ts - start_ts))
   [ "$elapsed" -ge 2 ]
+}
+
+# ---------------------------------------------------------------------------
+# Regression (live router 2026-09-04): cmd_status degrades a `connected` to
+# `unknown` once state.json is older than AMZ_COVERT_STALE_S (90s), and the
+# design's truth table names that arm "running but heartbeat stale". Nothing
+# ever emitted a heartbeat: the log wrapper rewrites state.json only when a
+# marker CHANGES something, and the creator falls silent the moment the call
+# is up. So a healthy creator waiting for a joiner was reported `unknown`
+# ~90s in -- and covert.js renders the join link ONLY for `connected`, so
+# the link the whole feature exists to hand the user vanished from the panel.
+@test "heartbeat_keeps_state_fresh: a connected-but-silent creator keeps state.json fresh" {
+  export AMZ_FAKE_CREATOR_MODE=connect_hold
+  export AMZ_COVERT_READY_TIMEOUT=10
+  export AMZ_COVERT_HEARTBEAT_S=1
+  _write_fake_creator
+
+  "$RUN_SH" &
+  RUNPID=$!
+
+  # Wait for readiness.
+  _tries=0
+  while [ "$_tries" -lt 100 ]; do
+    [ -f "$STATE" ] && grep -q '"state":"connected"' "$STATE" && break
+    _tries=$((_tries + 1)); sleep 0.1
+  done
+  grep -q '"state":"connected"' "$STATE"
+
+  _mtime0="$(date -r "$STATE" +%s 2>/dev/null || stat -c %Y "$STATE" 2>/dev/null || stat -f %m "$STATE")"
+  # The creator emits NOTHING more from here on -- only a heartbeat can
+  # move the mtime.
+  sleep 3
+  _mtime1="$(date -r "$STATE" +%s 2>/dev/null || stat -c %Y "$STATE" 2>/dev/null || stat -f %m "$STATE")"
+  [ "$_mtime1" -gt "$_mtime0" ]
+  # Content is untouched: a heartbeat refreshes freshness, never state.
+  grep -q '"state":"connected"' "$STATE"
+
+  kill "$RUNPID" 2>/dev/null || true
+  wait "$RUNPID" 2>/dev/null || true
 }
