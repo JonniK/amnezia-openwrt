@@ -107,7 +107,14 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<3000;i++) print "line " i}' > "$AMZ_COVERT_LOG"
   chmod 0640 "$AMZ_COVERT_LOG"
 
-  if [ "$(id -u)" -eq 0 ]; then
+  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
+  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
+  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
+  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
+  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
+  # is a no-op that root sails through, failing the assertion. $EUID is a
+  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
+  if [ "$EUID" -eq 0 ]; then
     # Root (CI's `sudo bats`) bypasses DAC entirely against its own
     # restrictive chmod, so the permission boundary has to be enforced by
     # actually running as a real unprivileged user -- root can `su` to one
@@ -139,7 +146,14 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<3000;i++) print "line " i}' > "$log"
   chmod 0640 "$log"
 
-  if [ "$(id -u)" -eq 0 ]; then
+  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
+  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
+  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
+  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
+  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
+  # is a no-op that root sails through, failing the assertion. $EUID is a
+  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
+  if [ "$EUID" -eq 0 ]; then
     chown -R nobody "$flash_dir" 2>/dev/null || true
     chgrp -R nobody "$flash_dir" 2>/dev/null || chgrp -R nogroup "$flash_dir" 2>/dev/null || true
     chmod 0750 "$flash_dir"
@@ -197,7 +211,14 @@ _wait_for_state() {
   awk 'BEGIN{for(i=0;i<10;i++) print "line " i}' > "$LOG"
   ORIGINAL="$(cat "$LOG")"
 
-  if [ "$(id -u)" -eq 0 ]; then
+  # Root detection MUST use bash's $EUID builtin, never `id -u`: the harness
+  # puts test/stubs/id on PATH (for the installer's `id -u amnezia-covert`
+  # precheck), and with STUB_ID_UID unset that stub prints nothing and exits
+  # 1 -- so `$(id -u)` here is EMPTY, the `if` silently takes the non-root
+  # branch, and under `sudo bats` (root) the `chmod u-w`/`u+w` DAC boundary
+  # is a no-op that root sails through, failing the assertion. $EUID is a
+  # bash builtin, unaffected by PATH. (Tier-2 CI, 2026-09-04.)
+  if [ "$EUID" -eq 0 ]; then
     # Root bypasses DAC against its own chmod -- enforce the boundary as a
     # real unprivileged user, same pattern as cap_is_truncate_in_place.
     chown -R nobody "$RUN_DIR" 2>/dev/null || true
