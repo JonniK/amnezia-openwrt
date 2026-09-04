@@ -34,7 +34,7 @@ const ui = { createHandlerFn:function(ctx, fn){
 		// PREPENDED, and the DOM appends the event → handler is called f(...args, event).
 		return function(){ var callArgs = Array.prototype.slice.call(arguments); return Promise.resolve(f.apply(ctx, args.concat(callArgs))); };
 	}, addNotification:()=>{}, showModal:()=>E('div'), hideModal:()=>{} };
-const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null) };
+const fsApi = { read:()=>Promise.resolve(''), exec:()=>Promise.resolve({stdout:'',stderr:'',code:0}), stat:()=>Promise.resolve(null), write:()=>Promise.resolve() };
 // uci module stub: load/unload are async cache ops; get returns the configured value.
 // Default '1' for master_enabled — mirrors default-ON semantics in main.js.
 const uciStub = {
@@ -66,18 +66,18 @@ function makeQuerySelectorResult(selector) {
   return n;
 }
 const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
-// DATA: 14 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list),
-// 13 (autotunnel worker status).
+// DATA: 15 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list),
+// 13 (autotunnel worker status), 14 (covert-creator status).
 // DATA[11] is a plain string '1' (from uci.get, not fs.exec) — master_enabled default ON.
-const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, '1', {stdout:'[]'}, {stdout:'{"enabled":0,"routing_mode":"direct-default","loadavg":0.1,"added_count":0,"added":[],"verdict_count":0,"hour_count":0}'}];
+const DATA = ['', {stdout:''}, '', {stdout:''}, {stdout:''}, {stdout:''}, '', '', '', '', {stdout:'{}'}, '1', {stdout:'[]'}, {stdout:'{"enabled":0,"routing_mode":"direct-default","loadavg":0.1,"added_count":0,"added":[],"verdict_count":0,"hour_count":0}'}, {stdout:'{"enabled":false,"running":false,"state":"idle","link":null,"link_age_s":null,"reason":"","build_sha":"","build_hash":""}'}];
 
 // Load a module with a given fs stub and dependency map.
 function loadWith(rel, deps, fsStub){ const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return null;
   const src = fs.readFileSync(file,'utf8');
-  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns','uci'];
+  const names = ['baseclass','ui','fs','poll','view','E','_','L','document','util','failover','routing','zapret','dns','covert','uci'];
   const fn = new Function(...names, src);
   return fn(baseclass, ui, fsStub, poll, view, E, _, L, documentStub,
-           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns,
+           deps.util, deps.failover, deps.routing, deps.zapret, deps.dns, deps.covert,
            uciStub); }
 
 // Default loader (succeeding fs stubs).
@@ -89,6 +89,7 @@ d.routing   = load('amnezia/section/routing.js', d);
 d.zapret    = load('amnezia/section/zapret.js', d);
 d.dns       = load('amnezia/section/dns.js', d);
 d.failover  = load('amnezia/section/failover.js', d);
+d.covert    = load('amnezia/section/covert.js', d);
 const main  = load('view/main.js', d);
 // FIX: use call(main, DATA) so this=main and data=DATA (LuCI single-arg render signature).
 let mainTree = null;
@@ -113,7 +114,7 @@ if (mainTree) {
 }
 // Execute every render() that exists → throws on undefined-symbol refs.
 const panels = [];
-for (const k of ['failover','routing','zapret','dns']) {
+for (const k of ['failover','routing','zapret','dns','covert']) {
   if (d[k] && typeof d[k].render === 'function') { const node = d[k].render({}, DATA); panels.push([k,node]); } }
 function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[]).forEach(c=>walk(c,fn)); }
 
@@ -123,7 +124,7 @@ function walk(n, fn){ if(!n||typeof n!=='object')return; fn(n); (n.children||[])
 // assert it textually across every shipped JS file. (Convention proven on-device: every
 // dotted require — tools.firewall as fwtool, tools.widgets as widgets — carries ` as `.)
 function lintRequires(){
-  const files = ['view/main.js','amnezia/util.js','amnezia/section/failover.js','amnezia/section/routing.js','amnezia/section/zapret.js','amnezia/section/dns.js'];
+  const files = ['view/main.js','amnezia/util.js','amnezia/section/failover.js','amnezia/section/routing.js','amnezia/section/zapret.js','amnezia/section/dns.js','amnezia/section/covert.js'];
   const bad = [];
   files.forEach(function(rel){
     const file = path.join(ROOT, rel); if(!fs.existsSync(file)) return;
@@ -152,16 +153,17 @@ if (require.main === module) {
 
   // Rejection-mode self-test: every module.refresh() must RESOLVE (not reject) when fs fails.
   // This specifically validates the L.resolveDefault guard in dns.refresh().
-  const fsRej = { read:()=>Promise.reject(new Error('reject')), exec:()=>Promise.reject(new Error('reject')), stat:()=>Promise.reject(new Error('reject')) };
+  const fsRej = { read:()=>Promise.reject(new Error('reject')), exec:()=>Promise.reject(new Error('reject')), stat:()=>Promise.reject(new Error('reject')), write:()=>Promise.reject(new Error('reject')) };
   const dr = {};
   dr.util      = loadWith('amnezia/util.js', dr, fsRej);
   dr.routing   = loadWith('amnezia/section/routing.js', dr, fsRej);
   dr.zapret    = loadWith('amnezia/section/zapret.js', dr, fsRej);
   dr.dns       = loadWith('amnezia/section/dns.js', dr, fsRej);
   dr.failover  = loadWith('amnezia/section/failover.js', dr, fsRej);
+  dr.covert    = loadWith('amnezia/section/covert.js', dr, fsRej);
   const viewStub = {};
   const refreshPromises = [];
-  for (const k of ['failover','routing','zapret','dns']) {
+  for (const k of ['failover','routing','zapret','dns','covert']) {
     if (dr[k] && typeof dr[k].refresh === 'function') {
       // Wrap in Promise.resolve().then() so synchronous throws are also captured as rejections.
       refreshPromises.push([k, Promise.resolve().then(function(){ return dr[k].refresh(viewStub); })]);
@@ -204,7 +206,11 @@ if (require.main === module) {
         handleProbePage: [],                 // NO extra arg — reads URL from DOM input
         handleWatch: [],                     // NO extra arg
         handleProbePageAdd: ['example.com'], // extra arg = host (FIRST), event last
-        handleProbePageAddAll: []            // NO extra arg — reads from _ppLastResult
+        handleProbePageAddAll: [],           // NO extra arg — reads from _ppLastResult
+        // Covert-creator handlers.
+        handleCovertToggle: ['1'],           // extra-arg toggle, function(state, ev), like handleMasterToggle
+        handleCovertSaveCookies: [],         // NO extra arg — reads cookie textarea from DOM
+        handleCovertApply: []                // NO extra arg — re-apply without rewriting the cookie
       };
       const CHANGE_HANDLERS = Object.keys(WIRING);
       const fakeEv = { __isEvent: true, target: { checked: true, value: 'awg1' }, currentTarget: documentStub.createElement('button'), preventDefault: function(){} };
@@ -216,13 +222,15 @@ if (require.main === module) {
         dv.zapret    = loadWith('amnezia/section/zapret.js', dv, fsStub);
         dv.dns       = loadWith('amnezia/section/dns.js', dv, fsStub);
         dv.failover  = loadWith('amnezia/section/failover.js', dv, fsStub);
+        dv.covert    = loadWith('amnezia/section/covert.js', dv, fsStub);
         const mv = loadWith('view/main.js', dv, fsStub);
         // Assemble exactly as LuCI does via view.extend(Object.assign(...)).
         const assembled = Object.assign({}, mv,
           (dv.failover && dv.failover.handlers) || {},
           (dv.routing  && dv.routing.handlers)  || {},
           (dv.zapret   && dv.zapret.handlers)   || {},
-          (dv.dns      && dv.dns.handlers)       || {}
+          (dv.dns      && dv.dns.handlers)       || {},
+          (dv.covert   && dv.covert.handlers)   || {}
         );
         // Bind util for handlers that call util.uiConfirm.
         assembled.__util = dv.util;
@@ -260,6 +268,10 @@ if (require.main === module) {
           // that the sentinel extra arg actually reaches the exec.
           const execCalls = [];
           const fsSpy = { read:()=>Promise.resolve(''), stat:()=>Promise.resolve(null),
+            // write is EXEMPT from the "every backend arg is a string" tooth below --
+            // it inspects only execCalls. fs.write(path, data, mode) legitimately
+            // passes 0o640 (a Number) as mode.
+            write:()=>Promise.resolve(),
             exec:function(cmd, args){ execCalls.push({cmd:cmd, args:(args||[]).slice()}); return Promise.resolve({stdout:'{}',stderr:'',code:0}); } };
           const av = buildView(fsSpy);
           if (av.__util) av.__util.uiConfirm = function(){ return Promise.resolve(true); };
@@ -294,7 +306,7 @@ if (require.main === module) {
           // This pass ensures paintMasterStrip is called with the correct `self` context.
           var repaintView = buildView(fsApi);
           // Run main.render first so the module-level state (domSeen, pollFn) is seeded.
-          var mr = loadWith('view/main.js', (function(){ var dv2={}; dv2.util=loadWith('amnezia/util.js',dv2,fsApi); dv2.routing=loadWith('amnezia/section/routing.js',dv2,fsApi); dv2.zapret=loadWith('amnezia/section/zapret.js',dv2,fsApi); dv2.dns=loadWith('amnezia/section/dns.js',dv2,fsApi); dv2.failover=loadWith('amnezia/section/failover.js',dv2,fsApi); return dv2; }()), fsApi);
+          var mr = loadWith('view/main.js', (function(){ var dv2={}; dv2.util=loadWith('amnezia/util.js',dv2,fsApi); dv2.routing=loadWith('amnezia/section/routing.js',dv2,fsApi); dv2.zapret=loadWith('amnezia/section/zapret.js',dv2,fsApi); dv2.dns=loadWith('amnezia/section/dns.js',dv2,fsApi); dv2.failover=loadWith('amnezia/section/failover.js',dv2,fsApi); dv2.covert=loadWith('amnezia/section/covert.js',dv2,fsApi); return dv2; }()), fsApi);
           if (mr && typeof mr.render === 'function') { try { mr.render.call(mr, DATA); } catch(e2) { /* ignore render errors in this sub-env */ } }
           // Override uiConfirm to resolve TRUE so the toggle actually executes the repaint path.
           if (repaintView.__util) repaintView.__util.uiConfirm = function() { return Promise.resolve(true); };

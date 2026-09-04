@@ -252,6 +252,88 @@ assert_monitor_installed() {
   fi
 }
 
+# assert_covert_installed: the covert-creator feature's installer-owned
+# footprint (design "Installer" section, _amz_covert_install in
+# install-amnezia-pbr.sh) is present and INERT after a plain --first-install
+# with no creator binary staged. Verified against the code (2026-09-04):
+#   - _amz_covert_install always creates the amnezia-covert user/group
+#     (fixed uid=gid=391), the /etc/amnezia/covert dir (root:amnezia-covert,
+#     0750) and a pre-created covert.log (amnezia-covert:amnezia-covert,
+#     0640), even when the creator binary is absent -- it only WARNs
+#     ("creator binary not staged") and returns 0. No hard abort, so the VM
+#     harness needs no dummy binary.
+#   - The creator binary/manifest, /usr/bin/amnezia-covert-ctl,
+#     /etc/init.d/amnezia-covert, /usr/lib/amnezia/amnezia-covert-{run,
+#     logwrap}.sh and the egress template
+#     (/usr/share/amnezia/nftables.d/40-amnezia-covert-egress.nft) are NOT
+#     self-installed by install-amnezia-pbr.sh in ANY path (first-install or
+#     migrate) -- grep confirms the only cp/mkdir for those paths lives in
+#     dev/sync-to-packages.sh (the .ipk build), never in the installer.
+#     They are delivered by the .ipk only, which this raw-script VM harness
+#     does not exercise. So H5 asserts what --first-install actually
+#     controls: the egress fragment must NOT be self-installed, and must
+#     NEVER appear in /etc/nftables.d/ (an unsubstituted @@..@@ fragment
+#     there would brick fw4 reload for the whole router).
+# H1: amnezia-covert user+group exist at the fixed uid=gid=391.
+# H2: /etc/amnezia/covert dir owner root:amnezia-covert, mode 0750.
+# H3: covert.log owner amnezia-covert:amnezia-covert, mode 0640.
+# H4: amnezia.config.covert_enabled defaults to 0 (feature OFF).
+# H5: covert egress template is NOT self-installed to /usr/share/amnezia/
+#     nftables.d/ by --first-install, and is absent from /etc/nftables.d/.
+assert_covert_installed() {
+  # H1: user + group at fixed uid/gid 391.
+  _cu_uid=$(vm_run "id -u amnezia-covert 2>/dev/null" 2>/dev/null || true)
+  _cu_gid=$(vm_run "id -g amnezia-covert 2>/dev/null" 2>/dev/null || true)
+  if [ "$_cu_uid" = "391" ] && [ "$_cu_gid" = "391" ]; then
+    assert_pass "H1" "amnezia-covert user+group exist at uid=gid=391"
+  else
+    assert_fail "H1" "amnezia-covert uid/gid MISMATCH -- id -u: '$_cu_uid' id -g: '$_cu_gid' (expected 391/391)"
+  fi
+
+  # H2: /etc/amnezia/covert dir owner + mode. BusyBox has no `stat`; parse
+  # `ls -lnd` (permission string + NUMERIC uid/gid -- `ls` truncates long
+  # owner names to 8 chars, so use -n).
+  _cd_ls=$(vm_run "ls -lnd /etc/amnezia/covert 2>/dev/null" 2>/dev/null || true)
+  _cd_perm=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $1}')
+  _cd_uid=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $3}')
+  _cd_gid=$(printf '%s\n' "$_cd_ls" | awk 'NR==1{print $4}')
+  if [ "$_cd_perm" = "drwxr-x---" ] && [ "$_cd_uid" = "0" ] && [ "$_cd_gid" = "391" ]; then
+    assert_pass "H2" "/etc/amnezia/covert dir is root:amnezia-covert 0750"
+  else
+    assert_fail "H2" "/etc/amnezia/covert dir wrong owner/mode -- ls: '$_cd_ls' (expected drwxr-x--- uid 0 gid 391)"
+  fi
+
+  # H3: covert.log owner + mode (same ls -ln parse; -d not needed for a file).
+  _cl_ls=$(vm_run "ls -ln /etc/amnezia/covert/covert.log 2>/dev/null" 2>/dev/null || true)
+  _cl_perm=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $1}')
+  _cl_uid=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $3}')
+  _cl_gid=$(printf '%s\n' "$_cl_ls" | awk 'NR==1{print $4}')
+  if [ "$_cl_perm" = "-rw-r-----" ] && [ "$_cl_uid" = "391" ] && [ "$_cl_gid" = "391" ]; then
+    assert_pass "H3" "covert.log is pre-created amnezia-covert:amnezia-covert 0640"
+  else
+    assert_fail "H3" "covert.log wrong owner/mode -- ls: '$_cl_ls' (expected -rw-r----- uid 391 gid 391)"
+  fi
+
+  # H4: feature OFF by default.
+  _cov_enabled=$(vm_run "uci -q get amnezia.config.covert_enabled 2>/dev/null" 2>/dev/null || true)
+  if [ "$_cov_enabled" = "0" ]; then
+    assert_pass "H4" "amnezia.config.covert_enabled defaults to 0 (feature OFF)"
+  else
+    assert_fail "H4" "amnezia.config.covert_enabled is '$_cov_enabled', expected '0' (feature must default OFF)"
+  fi
+
+  # H5: egress template not self-installed by the installer, and never
+  # present in the active /etc/nftables.d/ (the only place an unsubstituted
+  # fragment could brick fw4 reload).
+  _cov_share=$(vm_run "test -f /usr/share/amnezia/nftables.d/40-amnezia-covert-egress.nft && echo yes || echo no" 2>/dev/null || echo no)
+  _cov_active=$(vm_run "test -f /etc/nftables.d/40-amnezia-covert-egress.nft && echo yes || echo no" 2>/dev/null || echo no)
+  if [ "$_cov_share" = "no" ] && [ "$_cov_active" = "no" ]; then
+    assert_pass "H5" "covert egress template NOT self-installed by --first-install (share: absent, active /etc/nftables.d: absent)"
+  else
+    assert_fail "H5" "covert egress template unexpectedly present -- /usr/share/amnezia/nftables.d: $_cov_share, /etc/nftables.d (would brick firewall if unsubstituted): $_cov_active"
+  fi
+}
+
 # assert_block_quic_preserved: amnezia_block_quic must survive the migrate unchanged.
 assert_block_quic_preserved() {
   _val=$(vm_run "uci -q get firewall.amnezia_block_quic 2>/dev/null || true" 2>/dev/null || true)

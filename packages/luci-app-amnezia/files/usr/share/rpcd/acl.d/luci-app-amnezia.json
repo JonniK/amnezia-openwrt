@@ -30,7 +30,9 @@
 				"/usr/bin/amnezia-force-update":    [ "exec" ],
 				"/usr/bin/amnezia-dns-ctl":         [ "exec" ],
 				"/usr/bin/amnezia-app-ctl":         [ "exec" ],
-				"/usr/bin/amnezia-autotunnel":      [ "exec" ]
+				"/usr/bin/amnezia-autotunnel":      [ "exec" ],
+				"/usr/bin/amnezia-covert-ctl":      [ "exec" ],
+				"/etc/amnezia/covert/vk-cookies.json": [ "write" ]
 			}
 		}
 	}

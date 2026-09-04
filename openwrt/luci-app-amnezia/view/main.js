@@ -9,6 +9,7 @@
 'require amnezia.section.routing as routing';
 'require amnezia.section.zapret as zapret';
 'require amnezia.section.dns as dns';
+'require amnezia.section.covert as covert';
 
 // Module-level handle for the poll callback. LuCI has no teardown hook for
 // views, so the poller self-unregisters when its DOM anchor disappears
@@ -58,7 +59,7 @@ function paintMasterStrip(view, masterEnabled) {
 	}
 }
 
-return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, {
+return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret.handlers, dns.handlers, covert.handlers, {
 
 	handleRefresh: function(ev) {
 		var btn = document.getElementById('manual-refresh-btn');
@@ -124,7 +125,10 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			// index 12: tunnel apps list for first-paint (routing section).
 			L.resolveDefault(fs.exec('/usr/bin/amnezia-app-ctl', ['list']), { stdout: '[]' }),
 			// index 13: autotunnel worker status for first-paint (routing section).
-			L.resolveDefault(fs.exec('/usr/bin/amnezia-autotunnel', ['status']), { stdout: '' })
+			L.resolveDefault(fs.exec('/usr/bin/amnezia-autotunnel', ['status']), { stdout: '' }),
+			// index 14: covert-creator status for first-paint (covert section, parsed
+			// synchronously in covert.render()).
+			L.resolveDefault(fs.exec('/usr/bin/amnezia-covert-ctl', ['status']), { stdout: '' })
 		]);
 	},
 
@@ -158,6 +162,12 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			// Master switch strip (above accordion, always interactive).
 			// Built populated synchronously so it paints on first render.
 			E('div', { 'id': 'amz-master-strip' }, [ masterStripContent(this, masterEnabled) ]),
+
+			// Covert-creator panel: rendered OUTSIDE #amz-accordion (master_enabled
+			// does not gate this feature at all -- it never touches the tunnel/DNS
+			// plane -- and the accordion's .amnezia-master-off{pointer-events:none}
+			// must not make this toggle unclickable when master is OFF).
+			covert.render(this, data),
 
 			E('div', { 'class': 'amnezia-accordion' + (masterEnabled ? '' : ' amnezia-master-off'), 'id': 'amz-accordion' }, [
 				failover.render(this, data),
@@ -207,7 +217,8 @@ return view.extend(Object.assign({}, failover.handlers, routing.handlers, zapret
 			failover.refresh(self),
 			routing.refresh(self),
 			zapret.refresh(self),
-			dns.refresh(self)
+			dns.refresh(self),
+			covert.refresh(self)
 		]);
 	},
 

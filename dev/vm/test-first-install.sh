@@ -107,5 +107,15 @@ assert_vpn_zone_masq
 log "G: amnezia-failover binary + init self-installed by installer"
 assert_monitor_installed
 
+# ── H. covert-creator service installed inert ─────────────────────────────────
+# Verified against install-amnezia-pbr.sh (2026-09-04): _amz_covert_install
+# always creates the user/dir/log even with the creator binary absent (only
+# WARNs, never aborts) -- no dummy binary needed for this VM harness. See the
+# comment above assert_covert_installed() in assert.sh for the full trace,
+# including why H5 checks non-installation rather than presence in
+# /usr/share (that placement is .ipk-only, not exercised by this harness).
+log "H: covert-creator user/dir/log/template installed inert (feature OFF)"
+assert_covert_installed
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 print_summary

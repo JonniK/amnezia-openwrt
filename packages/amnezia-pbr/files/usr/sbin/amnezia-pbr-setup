@@ -66,6 +66,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # otherwise overwrite an env var injected by the test harness or a sysadmin.
 _saved_conf_dir="${CONF_DIR:-}"
 
+# Same problem for the covert-creator fixed paths (amnezia-common.sh
+# unconditionally `export`s AMZ_COVERT_DIR/LOG/BIN/MANIFEST) -- preserve any
+# caller override (the test harness points these at a scratch dir) so the
+# Phase 9 installer code below never touches real router paths off-device.
+_saved_covert_dir="${AMZ_COVERT_DIR:-}"
+_saved_covert_log="${AMZ_COVERT_LOG:-}"
+_saved_covert_bin="${AMZ_COVERT_BIN:-}"
+_saved_covert_manifest="${AMZ_COVERT_MANIFEST:-}"
+
 # Source the shared lib if present (POSIX-safe guard: no failed-`.` exit).
 if [ -f /usr/lib/amnezia/amnezia-common.sh ]; then
   . /usr/lib/amnezia/amnezia-common.sh
@@ -75,6 +84,165 @@ fi
 
 # Restore caller-supplied CONF_DIR if it was set before the source.
 [ -n "$_saved_conf_dir" ] && CONF_DIR="$_saved_conf_dir"
+[ -n "$_saved_covert_dir" ] && AMZ_COVERT_DIR="$_saved_covert_dir"
+[ -n "$_saved_covert_log" ] && AMZ_COVERT_LOG="$_saved_covert_log"
+[ -n "$_saved_covert_bin" ] && AMZ_COVERT_BIN="$_saved_covert_bin"
+[ -n "$_saved_covert_manifest" ] && AMZ_COVERT_MANIFEST="$_saved_covert_manifest"
+export AMZ_COVERT_DIR AMZ_COVERT_LOG AMZ_COVERT_BIN AMZ_COVERT_MANIFEST
+
+# ---------------------------------------------------------------------------
+# Covert-creator (whitelist-bypass) fixed uid/gid (design "Installer"
+# section; first user-creation code in this repo).
+#
+# Chosen from the traditional low system-uid/gid range so it is a plausible
+# "free on both hosts" value: well below the Ubuntu Actions runner's login
+# accounts (ubuntu=1000, runner=1001 -- explicitly avoided) and below the
+# handful of base-image system accounts Ubuntu assigns in the low hundreds.
+# This is belt-and-braces, NOT load-bearing for test correctness: the unit
+# tests always resolve id/adduser/addgroup to test/stubs/ (harness.bash
+# prepends stubs to PATH) and the collision check reads $AMNEZIA_PASSWD (a
+# fixture), never the CI host's real /etc/passwd. Override both via env if a
+# real collision is ever discovered on a target.
+AMZ_COVERT_FIXED_UID="${AMZ_COVERT_FIXED_UID:-391}"
+AMZ_COVERT_FIXED_GID="${AMZ_COVERT_FIXED_GID:-391}"
+# Passwd path is env-parameterizable so the unit test can point the
+# uid-collision check at a fixture instead of the real host database.
+AMNEZIA_PASSWD="${AMNEZIA_PASSWD:-/etc/passwd}"
+# Group path mirrors AMNEZIA_PASSWD above -- same env-seam idea, so the unit
+# tests can point the gid-collision check + group creation at a fixture
+# instead of the real host database.
+AMNEZIA_GROUP="${AMNEZIA_GROUP:-/etc/group}"
+
+# ---------------------------------------------------------------------------
+# _amz_covert_ensure_user: idempotent + collision-loud creation of the
+# amnezia-covert system user/group at the fixed uid/gid, by editing
+# /etc/passwd + /etc/group directly (temp+mv, append-only). OpenWrt's default
+# BusyBox ships NO adduser/addgroup applets (verified on the armsr aarch64
+# VM 2026-09-04: "ash: addgroup: not found", rc 127) -- editing the account
+# databases directly is the portable OpenWrt package-postinst idiom and works
+# whether or not those applets exist. A silently-reused wrong uid would void
+# the uid-scoped egress restriction the whole feature exists to enforce, so
+# any ambiguity here refuses rather than guesses.
+#   0 = user already correct, or freshly created.
+#   1 = a collision was detected -- creates NOTHING (no group, no user).
+# ---------------------------------------------------------------------------
+_amz_covert_ensure_user() {
+  _acu_pwd="${AMNEZIA_PASSWD:-/etc/passwd}"
+  _acu_grp="${AMNEZIA_GROUP:-/etc/group}"
+
+  # Already present? (read the passwd file, not `id` -- same source we write)
+  _cu_uid="$(awk -F: -v n=amnezia-covert '$1==n{print $3; exit}' "$_acu_pwd" 2>/dev/null)" || _cu_uid=""
+  if [ -n "$_cu_uid" ]; then
+    if [ "$_cu_uid" = "$AMZ_COVERT_FIXED_UID" ]; then
+      amz_log "amnezia-covert user already present at uid=$AMZ_COVERT_FIXED_UID"
+      return 0
+    fi
+    amz_log "ERROR: amnezia-covert exists with uid=$_cu_uid (expected $AMZ_COVERT_FIXED_UID) -- refusing to modify, creating nothing"
+    return 1
+  fi
+
+  # uid collision: some OTHER user already holds the fixed uid.
+  _cu_collision="$(awk -F: -v u="$AMZ_COVERT_FIXED_UID" '$3==u{print $1; exit}' "$_acu_pwd" 2>/dev/null)" || _cu_collision=""
+  if [ -n "$_cu_collision" ]; then
+    amz_log "ERROR: uid $AMZ_COVERT_FIXED_UID is already held by user '$_cu_collision' -- refusing to create amnezia-covert, creating nothing"
+    return 1
+  fi
+
+  # gid collision: some OTHER group (not ours) already holds the fixed gid.
+  _cg_collision="$(awk -F: -v g="$AMZ_COVERT_FIXED_GID" '$3==g && $1!="amnezia-covert"{print $1; exit}' "$_acu_grp" 2>/dev/null)" || _cg_collision=""
+  if [ -n "$_cg_collision" ]; then
+    amz_log "ERROR: gid $AMZ_COVERT_FIXED_GID is already held by group '$_cg_collision' -- refusing to create amnezia-covert, creating nothing"
+    return 1
+  fi
+
+  # Create the group (append) if not already present by name.
+  if ! grep -q '^amnezia-covert:' "$_acu_grp" 2>/dev/null; then
+    if ! printf 'amnezia-covert:x:%s:\n' "$AMZ_COVERT_FIXED_GID" >> "$_acu_grp" 2>/dev/null; then
+      amz_log "ERROR: could not append amnezia-covert group to $_acu_grp"
+      return 1
+    fi
+  fi
+
+  # Create the user (append). Locked no-login system account: 'x' passwd
+  # placeholder (no /etc/shadow entry -> login impossible), /bin/false shell,
+  # home = the runtime dir. gid referenced numerically so group-line ordering
+  # is irrelevant.
+  if ! printf 'amnezia-covert:x:%s:%s:amnezia-covert:/var/run/amnezia-covert:/bin/false\n' \
+        "$AMZ_COVERT_FIXED_UID" "$AMZ_COVERT_FIXED_GID" >> "$_acu_pwd" 2>/dev/null; then
+    amz_log "ERROR: could not append amnezia-covert user to $_acu_pwd"
+    return 1
+  fi
+
+  amz_log "amnezia-covert user/group created (uid=gid=$AMZ_COVERT_FIXED_UID)"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _amz_covert_install: user/group + flash dir + pre-created log + binary +
+# manifest placement (design "Installer" section). Runs from BOTH
+# first_install_wiring and migrate_from_pbr via _amz_wire_force_engine, so
+# it is guarded by that function's own dry-run early-return.
+#
+# ALL of this runs before anything can load the covert nft fragment -- the
+# fragment is only ever installed by `amnezia-covert-ctl enable`, never
+# here. On a .ipk/install.sh install the binary is absent (dev-deploy-only
+# in P1): the user + empty log are still created (harmless/inert) so a
+# later binary-only dev-deploy finds them already present and `enable`'s
+# "user exists" preflight passes.
+# ---------------------------------------------------------------------------
+_amz_covert_install() {
+  if ! _amz_covert_ensure_user; then
+    amz_log "amnezia-covert-install: user creation blocked -- skipping dir/log/binary placement until the uid collision above is resolved"
+    return 0
+  fi
+
+  _cdir="${AMZ_COVERT_DIR:-/etc/amnezia/covert}"
+  _clog="${AMZ_COVERT_LOG:-$_cdir/covert.log}"
+  mkdir -p "$_cdir" 2>/dev/null || true
+  chown root:amnezia-covert "$_cdir" 2>/dev/null || true
+  chmod 0750 "$_cdir" 2>/dev/null || true
+
+  # Pre-create the log -- the unprivileged wrapper cannot create a file
+  # inside a 0750 dir it does not own.
+  if [ ! -f "$_clog" ]; then
+    : > "$_clog" 2>/dev/null || true
+  fi
+  chown amnezia-covert:amnezia-covert "$_clog" 2>/dev/null || true
+  chmod 0640 "$_clog" 2>/dev/null || true
+
+  # Ensure the opt-in flag exists, defaulting OFF, on a fresh install -- a
+  # cutover router's live /etc/config/amnezia predates this feature and the
+  # shipped default only reaches .ipk installs. GUARDED on "unset" so a
+  # re-install/upgrade never resets a user's covert_enabled=1 back to 0.
+  if [ -z "$(uci -q get amnezia.config.covert_enabled 2>/dev/null)" ]; then
+    uci set amnezia.config.covert_enabled=0 2>/dev/null || true
+    uci commit amnezia 2>/dev/null || true
+    amz_log "amnezia-covert-install: covert_enabled was unset -- defaulted to 0 (feature OFF)"
+  fi
+
+  # Binary + manifest placement (dev-deploy-only in P1: staged to /tmp/ by
+  # dev/deploy-openwrt-safe.sh). Absent on a .ipk/install.sh install --
+  # inert; `amnezia-covert-ctl apply`/`enable` fail loudly on the missing
+  # binary, not this installer.
+  _cbin="${AMZ_COVERT_BIN:-/usr/bin/amnezia-covert-creator}"
+  _cmanifest="${AMZ_COVERT_MANIFEST:-$_cdir/BUILD_MANIFEST}"
+  if [ -f /tmp/amnezia-covert-creator ] && [ -f /tmp/BUILD_MANIFEST ]; then
+    _staged_sha="$(sed -n 's/^artifact_sha256=//p' /tmp/BUILD_MANIFEST | head -n1)"
+    _got_sha="$(sha256sum /tmp/amnezia-covert-creator 2>/dev/null | awk '{print $1}')"
+    if [ -n "$_staged_sha" ] && [ "$_got_sha" = "$_staged_sha" ]; then
+      cp /tmp/amnezia-covert-creator "$_cbin"
+      chmod +x "$_cbin" 2>/dev/null || true
+      cp /tmp/BUILD_MANIFEST "$_cmanifest"
+      chmod 0644 "$_cmanifest" 2>/dev/null || true
+      rm -f /tmp/amnezia-covert-creator /tmp/BUILD_MANIFEST
+      amz_log "amnezia-covert-install: binary installed to $_cbin (sha256 verified)"
+    else
+      amz_log "ERROR: amnezia-covert-install: staged binary sha256 mismatch (expected $_staged_sha got $_got_sha) -- not installed, staged copy left at /tmp/ for inspection"
+    fi
+  else
+    amz_log "amnezia-covert-install: creator binary not staged (dev-deploy-only in P1); apply/enable will fail loud until deployed"
+  fi
+}
 
 # Source the routing lib if present.
 if [ -f /usr/lib/amnezia/amnezia-routing.sh ]; then
@@ -159,6 +327,110 @@ if [ "${1:-}" = "--dry-run-all" ]; then
   if command -v routing_firewall_dryrun >/dev/null 2>&1; then
     routing_firewall_dryrun "$_tunnel_list"
   fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# --uninstall [--dry-run]: reverse-order teardown of the covert-creator
+# feature (design "Uninstall/rollback"). Every step is idempotent (absent ->
+# skip, never error) so a repeat run, or a run after a partial prior
+# teardown, is always safe.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--uninstall" ]; then
+  _un_dry=0
+  shift
+  [ "${1:-}" = "--dry-run" ] && { _un_dry=1; shift; }
+
+  covert_uninstall() {
+    # 1. amnezia-covert-ctl disable: stops the service, reaps any surviving
+    #    covert-uid process, removes the egress fragment (backgrounded fw4
+    #    reload), removes state/link, and sets covert_enabled=0. This also
+    #    invokes the init's own `disable` verb -- step 2 below only removes
+    #    the init FILE, it does not need to disable it again.
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:disable"
+    else
+      _un_ctl=$(resolve_dep /usr/bin/amnezia-covert-ctl amnezia-covert-ctl.sh amnezia-covert-ctl.sh) || true
+      if [ -n "$_un_ctl" ]; then
+        sh "$_un_ctl" disable 2>/dev/null || true
+      fi
+      amz_log "uninstall:disable"
+    fi
+
+    # 2. Remove /etc/init.d/amnezia-covert -- AFTER disable.
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:init-removed"
+    else
+      rm -f /etc/init.d/amnezia-covert
+      amz_log "uninstall:init-removed"
+    fi
+
+    # 3. Remove the binary + manifest.
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:binary-removed"
+    else
+      rm -f "${AMZ_COVERT_BIN:-/usr/bin/amnezia-covert-creator}"
+      rm -f "${AMZ_COVERT_MANIFEST:-/etc/amnezia/covert/BUILD_MANIFEST}"
+      amz_log "uninstall:binary-removed"
+    fi
+
+    # 4. Remove /etc/amnezia/covert/ (cookie included).
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:dir-removed"
+    else
+      rm -rf "${AMZ_COVERT_DIR:-/etc/amnezia/covert}"
+      amz_log "uninstall:dir-removed"
+    fi
+
+    # 5. Remove the ACL grants (exec on the CLI + write on the cookie file)
+    #    from the installed rpcd ACL file. The two covert grants are the
+    #    LAST entries in the write.file object -- deleting them can leave
+    #    the preceding grant line with a dangling trailing comma, which
+    #    json-c (rpcd's parser) rejects, dropping ALL grants for the still-
+    #    installed amnezia app (empty/dead LuCI panel). So the delete is
+    #    followed by a comma repair: strip a "," that ends up immediately
+    #    before a closing "}" (across a line break), which a valid JSON
+    #    object never legally has -- this is a no-op when the covert grants
+    #    were NOT last (another grant follows, no dangling comma results).
+    #    Written via a temp-file + mv rather than `sed -i` for portability
+    #    (BSD sed's `-i` requires a backup-extension argument that GNU/
+    #    BusyBox sed do not accept the same way).
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:acl-removed"
+    else
+      _un_acl="${AMZ_COVERT_ACL:-/usr/share/rpcd/acl.d/luci-app-amnezia.json}"
+      if [ -f "$_un_acl" ]; then
+        sed -e '/amnezia-covert-ctl/d' -e '/vk-cookies\.json/d' "$_un_acl" 2>/dev/null \
+          | sed -e ':a' -e 'N' -e '$!ba' -e 's/,\([[:space:]]*}\)/\1/g' \
+          > "$_un_acl.tmp" 2>/dev/null \
+          && mv "$_un_acl.tmp" "$_un_acl" \
+          || rm -f "$_un_acl.tmp"
+      fi
+      amz_log "uninstall:acl-removed"
+    fi
+
+    # 6. remove the user + group LAST -- portable line removal (OpenWrt busybox
+    #    has no deluser/delgroup applets; edit the files directly, temp+mv, the
+    #    same idiom _amz_covert_ensure_user uses to create them). Only after
+    #    every file/dir/ACL reference to the uid is gone.
+    if [ "$_un_dry" = 1 ]; then
+      echo "uninstall:deluser"
+      echo "uninstall:delgroup"
+    else
+      _un_pwd="${AMNEZIA_PASSWD:-/etc/passwd}"
+      _un_grp="${AMNEZIA_GROUP:-/etc/group}"
+      if [ -f "$_un_pwd" ]; then
+        grep -v '^amnezia-covert:' "$_un_pwd" > "$_un_pwd.tmp" 2>/dev/null && mv "$_un_pwd.tmp" "$_un_pwd" || rm -f "$_un_pwd.tmp"
+      fi
+      if [ -f "$_un_grp" ]; then
+        grep -v '^amnezia-covert:' "$_un_grp" > "$_un_grp.tmp" 2>/dev/null && mv "$_un_grp.tmp" "$_un_grp" || rm -f "$_un_grp.tmp"
+      fi
+      amz_log "uninstall:deluser"
+      amz_log "uninstall:delgroup"
+    fi
+  }
+
+  covert_uninstall
   exit 0
 fi
 
@@ -286,6 +558,11 @@ _amz_wire_force_engine() {
     fi
   fi
   /etc/init.d/amnezia-dnsleak enable 2>/dev/null || true
+
+  # Covert-creator (whitelist-bypass): fixed-uid user/group + flash dir +
+  # pre-created log + binary/manifest placement. Default-OFF and inert
+  # until `amnezia-covert-ctl enable` is run by hand (opt-in feature).
+  _amz_covert_install
 
   # Kernel resilience: auto-reboot on a hung/oopsed kernel instead of dead-hanging
   # (procd keeps the hw watchdog fed during a subsystem lockup, so a hung kernel
