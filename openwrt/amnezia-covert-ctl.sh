@@ -230,6 +230,13 @@ cmd_enable() {
   _tmp="$(mktemp 2>/dev/null || echo "/tmp/amnezia-covert-enable.$$")"
   sed -e "s/@@COVERT_UID@@/$_uid/g" -e "s/@@LAN_IFNAME@@/$_lan/g" "$_tpl" > "$_tmp"
   mv "$_tmp" "$AMZ_COVERT_FRAGMENT"
+  # mktemp leaves the fragment 0600 root:root, but the launcher's step-0.5
+  # uid check runs as the unprivileged amnezia-covert user and must be able
+  # to read it (sed on `meta skuid`). No secret in this file -- it's nft
+  # rules + the numeric uid + LAN ifname -- the kernel `meta skuid` match
+  # enforces the egress restriction, not file perms. Match every other
+  # /etc/nftables.d fragment's convention (0644).
+  chmod 0644 "$AMZ_COVERT_FRAGMENT" 2>/dev/null || :
 
   if ! fw4 check >/dev/null 2>&1; then
     rm -f "$AMZ_COVERT_FRAGMENT"
@@ -386,6 +393,14 @@ cmd_apply() {
     fi
     rm -f "$_snapshot"
   fi
+
+  # Unconditional post-block repair: covers BOTH the no-drift path (an
+  # already-deployed router may still carry a stale 0600 fragment from
+  # before this fix -- apply must not be a no-op there) and the
+  # successful-drift-write path above. Every earlier failure branch
+  # (uid unresolvable, cookie check, fw4 check/reload) already returned 1
+  # before reaching here, so a failed apply never touches perms.
+  [ -f "$AMZ_COVERT_FRAGMENT" ] && chmod 0644 "$AMZ_COVERT_FRAGMENT" 2>/dev/null || :
 
   # Reap only on the (re)start path -- procd reports the instance NOT
   # running. A healthy running creator is never touched by a benign reconcile.

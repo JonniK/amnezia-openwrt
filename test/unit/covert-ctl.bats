@@ -262,6 +262,41 @@ EOF
   ! grep -q 'fw4 reload' "$STUB_LOG"
 }
 
+@test "enable_writes_fragment_world_readable: fragment is 0644, not mktemp's 0600 -- the launcher runs as the unprivileged amnezia-covert user and must read it" {
+  _install_fw4_stub
+  run "$CLI" enable
+  [ "$status" -eq 0 ]
+  [ -f "$AMZ_COVERT_FRAGMENT" ]
+  perm="$(stat -c %a "$AMZ_COVERT_FRAGMENT" 2>/dev/null || stat -f %Lp "$AMZ_COVERT_FRAGMENT" 2>/dev/null)"
+  [ "$perm" = "644" ]
+}
+
+@test "apply_repairs_stale_0600_fragment_on_no_drift_path: an existing fragment with correct content but 0600 perms (pre-fix router state) is chmod'd 0644 even though apply takes the no-drift branch" {
+  _install_fw4_stub
+  export UCI_GET_amnezia_config_covert_enabled=1
+  unset STUB_COVERT_RUNNING
+
+  # First apply from empty renders the current-content fragment (this is a
+  # drift write, from "absent" to "present" -- establishes the exact bytes
+  # apply itself would render, rather than hand-duplicating the template
+  # substitution in the test).
+  run "$CLI" apply
+  [ "$status" -eq 0 ]
+
+  # Simulate the pre-fix on-disk state: correct content, but 0600 (as
+  # mktemp+mv left it before this fix). No content drift, so apply must take
+  # the no-drift (cmp -s match, no reload) branch.
+  chmod 0600 "$AMZ_COVERT_FRAGMENT"
+  : > "$STUB_LOG"
+
+  run "$CLI" apply
+  [ "$status" -eq 0 ]
+  ! grep -q 'fw4 reload' "$STUB_LOG"
+
+  perm="$(stat -c %a "$AMZ_COVERT_FRAGMENT" 2>/dev/null || stat -f %Lp "$AMZ_COVERT_FRAGMENT" 2>/dev/null)"
+  [ "$perm" = "644" ]
+}
+
 @test "apply_resubstitutes_and_reloads_on_drift: fw4 check failure on drift aborts non-zero" {
   _install_fw4_stub
   export UCI_GET_amnezia_config_covert_enabled=1
