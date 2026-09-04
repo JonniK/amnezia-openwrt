@@ -49,11 +49,12 @@ _wait_for_state() {
   _wait_for_state idle
 
   printf '  CALL CREATED\n' >&9
-  # >1s gap so the throttled flush (<=1 write/sec) is due, then a benign
-  # chatter line (not a marker) is what actually triggers the periodic
-  # check on the next loop iteration -- exactly like the real unconditional
-  # "[vk-ws]" debug dumps that arrive every ~1s in production and drive the
-  # same throttled-flush check.
+  # Markers arriving spread out over time, with unrelated chatter in
+  # between. NOTE: this spacing is NOT what production looks like -- the
+  # real creator emits every marker inside one second and then goes silent
+  # (see burst_then_silence below, the shape that actually shipped a bug).
+  # Kept as the slow-drip counterpart: each marker must still land on its
+  # own, without the next line being what flushes it.
   sleep 1.2
   printf '[vk-ws] <- notification chatter\n' >&9
   _wait_for_state starting
@@ -284,4 +285,48 @@ _wait_for_state() {
   [ "$status" -ne 0 ]
   run grep -q '"access_token"' "$LOG"
   [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Regression (live router 2026-09-04): the real creator emits its ENTIRE
+# startup burst -- "CALL CREATED", join_link, "[vk-ws] Connected" and the
+# post-connect notifications -- inside a single wall-clock second, and then
+# goes SILENT waiting for a joiner. It does not chatter every ~1s. With a
+# throttled flush that is only ever retried on the next input line, the
+# "connected" write stayed pending forever, state.json was left at
+# "starting" (or even "idle"), and amnezia-covert-run.sh's readiness monitor
+# killed a perfectly healthy creator at its 30s timeout -- procd then
+# respawned until it gave up, surfacing as state "not-started" /
+# reason "readiness-timeout" in the LuCI panel.
+@test "burst_then_silence: a same-second burst reaches connected with no further input" {
+  mkfifo "$RUN_DIR/covert.fifo"
+  "$WRAP" < "$RUN_DIR/covert.fifo" &
+  WPID=$!
+
+  # fd 9 stays OPEN for the whole test: the creator is still running, just
+  # quiet. EOF must not be what finally flushes the state.
+  exec 9> "$RUN_DIR/covert.fifo"
+
+  _wait_for_state idle
+
+  # One uninterrupted burst, no sleeps between lines -- exactly the shape
+  # captured from the router's covert.log.
+  {
+    printf '2026/09/04 16:52:07 [auth] Joining conversation...\n'
+    printf '  CALL CREATED\n'
+    printf '  join_link: https://vk.ru/call/join/TESTLINK\n'
+    printf '2026/09/04 16:52:08 [relay] PC created (2 ICE servers)\n'
+    printf '2026/09/04 16:52:08 [vk-ws] Connecting...\n'
+    printf '[vk-ws] Connected\n'
+    printf '2026/09/04 16:52:08 [vk-ws] -> change-media-settings\n'
+    printf '2026/09/04 16:52:08 [vk-ws] <- response seq=1: {"x":1}\n'
+  } >&9
+
+  _wait_for_state connected
+  run grep -o '"link":"[^"]*"' "$STATE"
+  [ "$status" -eq 0 ]
+  [ "$output" = '"link":"https://vk.ru/call/join/TESTLINK"' ]
+
+  exec 9>&-
+  wait "$WPID" 2>/dev/null || true
 }

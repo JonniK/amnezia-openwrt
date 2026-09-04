@@ -156,7 +156,6 @@ CUR_STATE=idle
 CUR_LINK=""
 CUR_REASON=""
 DIRTY=1     # force the very first flush, unconditionally (establishes "idle").
-LAST_WRITE=0
 
 _flush_state() {
   _on_disk="$(_disk_state)"
@@ -180,16 +179,29 @@ _flush_state() {
   chmod 0640 "$_tmp" 2>/dev/null || :
   mv "$_tmp" "$STATE"
   DIRTY=0
-  LAST_WRITE=$(date +%s 2>/dev/null || echo 0)
 }
 
-# State rewrite <= once/sec regardless of marker rate (bounded cost).
+# Flush every PENDING change immediately -- never behind a wall-clock
+# throttle. The creator emits its whole startup burst ("CALL CREATED", the
+# join_link, "[vk-ws] Connected" and the post-connect notifications) inside
+# a SINGLE wall-clock second and then goes SILENT waiting for a joiner. A
+# <=1/sec throttle therefore does not merely delay the "connected" write, it
+# strands it forever: a deferred flush is only ever retried when another
+# input line arrives, and no further line arrives. amnezia-covert-run.sh
+# then polls a state.json still reading "starting", times out at
+# AMZ_COVERT_READY_TIMEOUT, kills a perfectly healthy creator, and procd
+# respawns until it gives up -- surfacing as state "not-started" / reason
+# "readiness-timeout" in the LuCI panel (live router, 2026-09-04).
+#
+# The rewrite rate the throttle was reaching for is instead bounded at the
+# SOURCE: DIRTY is set only when a marker actually CHANGES state/reason/link
+# (see the classify/join-link blocks below), so a repeated -- or
+# body-echoed -- marker line costs nothing at all. A genuine alternation
+# writes one small tmpfs file, strictly cheaper than the per-line _redact
+# fork the log path already pays for that same line.
 _maybe_flush_state() {
   [ "$DIRTY" -eq 1 ] || return 0
-  _now=$(date +%s 2>/dev/null || echo 0)
-  if [ "$LAST_WRITE" -eq 0 ] || [ $(( _now - LAST_WRITE )) -ge 1 ]; then
-    _flush_state
-  fi
+  _flush_state
 }
 
 mkdir -p "$RUN_DIR" 2>/dev/null || :
@@ -217,15 +229,25 @@ while IFS= read -r line || [ -n "$line" ]; do
     fi
   fi
 
+  # Only an ACTUAL change marks the snapshot dirty -- that is what bounds
+  # the state.json rewrite rate now that _maybe_flush_state no longer
+  # throttles on the clock. A marker line repeating the state already held
+  # (the creator re-logs "[vk-ws] Connected" on every rejoin, and a response
+  # body can echo a marker verbatim) is a no-op, not a rewrite.
   _classify "$line"
   if [ -n "$_NEW_STATE" ]; then
-    CUR_STATE="$_NEW_STATE"
-    CUR_REASON="$_NEW_REASON"
-    DIRTY=1
+    if [ "$_NEW_STATE" != "$CUR_STATE" ] || [ "$_NEW_REASON" != "$CUR_REASON" ]; then
+      CUR_STATE="$_NEW_STATE"
+      CUR_REASON="$_NEW_REASON"
+      DIRTY=1
+    fi
   fi
   if _is_join_link "$line"; then
-    CUR_LINK="$(_join_link_value "$line")"
-    DIRTY=1
+    _new_link="$(_join_link_value "$line")"
+    if [ "$_new_link" != "$CUR_LINK" ]; then
+      CUR_LINK="$_new_link"
+      DIRTY=1
+    fi
   fi
 
   case "$line" in
