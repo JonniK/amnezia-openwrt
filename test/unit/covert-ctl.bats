@@ -505,3 +505,32 @@ EOF
   # mismatched-uid instance -- no reload call at all on this path.
   ! grep -q 'fw4 reload' "$STUB_LOG"
 }
+
+# ---------------------------------------------------------------------------
+# Regression (live router 2026-09-04): the AX3000T's BusyBox is built WITHOUT
+# the `stat` applet (`stat -c %Y` -> "ash: stat: not found"), so
+# _covert_file_mtime fell through to `echo 0`. `_age=$(( now - 0 ))` is then
+# the whole Unix epoch, which is >= AMZ_COVERT_STALE_S, so cmd_status
+# reported a healthy, freshly-written "connected" as "unknown" and emitted a
+# nonsense link_age_s of ~1.79e9. Every dev/CI box HAS stat, which is exactly
+# why the existing truth-table assertion could never catch it -- so shadow
+# `stat` with a failing stub to reproduce the router's toolbox here.
+@test "status_mtime_without_stat: connected survives a BusyBox with no stat applet" {
+  printf '#!/bin/sh\necho "stat: not found" >&2\nexit 127\n' > "$BIN_DIR/stat"
+  chmod +x "$BIN_DIR/stat"
+  # Prove the shadow is live -- a stub that silently did not shadow would
+  # make this test pass for the wrong reason.
+  ! stat -c %Y "$RUN_DIR" >/dev/null 2>&1
+
+  export UCI_GET_amnezia_config_covert_enabled=1
+  export STUB_COVERT_RUNNING=1
+  printf '{"state":"connected","link":"https://vk.com/call/join/XXXX","reason":""}' > "$RUN_DIR/state.json"
+
+  run "$CLI" status
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"state":"connected"'
+  # A just-written state file is seconds old, never epoch-sized.
+  age="$(echo "$output" | sed -n 's/.*"link_age_s":\([0-9]*\).*/\1/p')"
+  [ -n "$age" ]
+  [ "$age" -lt 300 ]
+}

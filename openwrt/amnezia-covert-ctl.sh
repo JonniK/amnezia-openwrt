@@ -68,9 +68,18 @@ _covert_json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-# Portable mtime: GNU/BusyBox `stat -c`, else BSD/macOS `stat -f`.
+# Portable mtime. `date -r FILE +%s` FIRST -- it is the only form the
+# router actually has: the AX3000T's BusyBox is built without the `stat`
+# applet, so both `stat` arms below fall through to `echo 0` there, and a
+# 0 mtime makes cmd_status compute an epoch-sized age -- reporting a
+# freshly-written "connected" as "unknown" (live router, 2026-09-04).
+# `stat -c` (GNU/BusyBox-with-stat) and `stat -f` (BSD/macOS) are kept as
+# fallbacks for dev boxes whose `date` lacks -r.
 _covert_file_mtime() {
-  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+  date -r "$1" +%s 2>/dev/null \
+    || stat -c %Y "$1" 2>/dev/null \
+    || stat -f %m "$1" 2>/dev/null \
+    || echo 0
 }
 
 # Locate the egress template across the AMZ_COVERT_TEMPLATE override, the
