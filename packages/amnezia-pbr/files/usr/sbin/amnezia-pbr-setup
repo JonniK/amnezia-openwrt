@@ -108,40 +108,71 @@ AMZ_COVERT_FIXED_GID="${AMZ_COVERT_FIXED_GID:-391}"
 # Passwd path is env-parameterizable so the unit test can point the
 # uid-collision check at a fixture instead of the real host database.
 AMNEZIA_PASSWD="${AMNEZIA_PASSWD:-/etc/passwd}"
+# Group path mirrors AMNEZIA_PASSWD above -- same env-seam idea, so the unit
+# tests can point the gid-collision check + group creation at a fixture
+# instead of the real host database.
+AMNEZIA_GROUP="${AMNEZIA_GROUP:-/etc/group}"
 
 # ---------------------------------------------------------------------------
 # _amz_covert_ensure_user: idempotent + collision-loud creation of the
-# amnezia-covert system user/group at the fixed uid/gid. A silently-reused
-# wrong uid would void the uid-scoped egress restriction the whole feature
-# exists to enforce, so any ambiguity here refuses rather than guesses.
+# amnezia-covert system user/group at the fixed uid/gid, by editing
+# /etc/passwd + /etc/group directly (temp+mv, append-only). OpenWrt's default
+# BusyBox ships NO adduser/addgroup applets (verified on the armsr aarch64
+# VM 2026-09-04: "ash: addgroup: not found", rc 127) -- editing the account
+# databases directly is the portable OpenWrt package-postinst idiom and works
+# whether or not those applets exist. A silently-reused wrong uid would void
+# the uid-scoped egress restriction the whole feature exists to enforce, so
+# any ambiguity here refuses rather than guesses.
 #   0 = user already correct, or freshly created.
 #   1 = a collision was detected -- creates NOTHING (no group, no user).
 # ---------------------------------------------------------------------------
 _amz_covert_ensure_user() {
-  _cu_existing="$(id -u amnezia-covert 2>/dev/null)" || _cu_existing=""
-  if [ -n "$_cu_existing" ]; then
-    if [ "$_cu_existing" = "$AMZ_COVERT_FIXED_UID" ]; then
+  _acu_pwd="${AMNEZIA_PASSWD:-/etc/passwd}"
+  _acu_grp="${AMNEZIA_GROUP:-/etc/group}"
+
+  # Already present? (read the passwd file, not `id` -- same source we write)
+  _cu_uid="$(awk -F: -v n=amnezia-covert '$1==n{print $3; exit}' "$_acu_pwd" 2>/dev/null)" || _cu_uid=""
+  if [ -n "$_cu_uid" ]; then
+    if [ "$_cu_uid" = "$AMZ_COVERT_FIXED_UID" ]; then
       amz_log "amnezia-covert user already present at uid=$AMZ_COVERT_FIXED_UID"
       return 0
     fi
-    amz_log "ERROR: amnezia-covert exists with uid=$_cu_existing (expected $AMZ_COVERT_FIXED_UID) -- refusing to modify, creating nothing"
+    amz_log "ERROR: amnezia-covert exists with uid=$_cu_uid (expected $AMZ_COVERT_FIXED_UID) -- refusing to modify, creating nothing"
     return 1
   fi
 
-  _cu_collision="$(awk -F: -v u="$AMZ_COVERT_FIXED_UID" '$3==u{print $1; exit}' "$AMNEZIA_PASSWD" 2>/dev/null)" || _cu_collision=""
+  # uid collision: some OTHER user already holds the fixed uid.
+  _cu_collision="$(awk -F: -v u="$AMZ_COVERT_FIXED_UID" '$3==u{print $1; exit}' "$_acu_pwd" 2>/dev/null)" || _cu_collision=""
   if [ -n "$_cu_collision" ]; then
     amz_log "ERROR: uid $AMZ_COVERT_FIXED_UID is already held by user '$_cu_collision' -- refusing to create amnezia-covert, creating nothing"
     return 1
   fi
 
-  if ! addgroup -g "$AMZ_COVERT_FIXED_GID" amnezia-covert 2>/dev/null; then
-    amz_log "ERROR: addgroup amnezia-covert (gid=$AMZ_COVERT_FIXED_GID) failed"
+  # gid collision: some OTHER group (not ours) already holds the fixed gid.
+  _cg_collision="$(awk -F: -v g="$AMZ_COVERT_FIXED_GID" '$3==g && $1!="amnezia-covert"{print $1; exit}' "$_acu_grp" 2>/dev/null)" || _cg_collision=""
+  if [ -n "$_cg_collision" ]; then
+    amz_log "ERROR: gid $AMZ_COVERT_FIXED_GID is already held by group '$_cg_collision' -- refusing to create amnezia-covert, creating nothing"
     return 1
   fi
-  if ! adduser -D -H -s /bin/false -u "$AMZ_COVERT_FIXED_UID" -G amnezia-covert amnezia-covert 2>/dev/null; then
-    amz_log "ERROR: adduser amnezia-covert (uid=$AMZ_COVERT_FIXED_UID) failed"
+
+  # Create the group (append) if not already present by name.
+  if ! grep -q '^amnezia-covert:' "$_acu_grp" 2>/dev/null; then
+    if ! printf 'amnezia-covert:x:%s:\n' "$AMZ_COVERT_FIXED_GID" >> "$_acu_grp" 2>/dev/null; then
+      amz_log "ERROR: could not append amnezia-covert group to $_acu_grp"
+      return 1
+    fi
+  fi
+
+  # Create the user (append). Locked no-login system account: 'x' passwd
+  # placeholder (no /etc/shadow entry -> login impossible), /bin/false shell,
+  # home = the runtime dir. gid referenced numerically so group-line ordering
+  # is irrelevant.
+  if ! printf 'amnezia-covert:x:%s:%s:amnezia-covert:/var/run/amnezia-covert:/bin/false\n' \
+        "$AMZ_COVERT_FIXED_UID" "$AMZ_COVERT_FIXED_GID" >> "$_acu_pwd" 2>/dev/null; then
+    amz_log "ERROR: could not append amnezia-covert user to $_acu_pwd"
     return 1
   fi
+
   amz_log "amnezia-covert user/group created (uid=gid=$AMZ_COVERT_FIXED_UID)"
   return 0
 }
@@ -368,14 +399,22 @@ if [ "${1:-}" = "--uninstall" ]; then
       amz_log "uninstall:acl-removed"
     fi
 
-    # 6. deluser + delgroup LAST -- only after every file/dir/ACL reference
-    #    to the uid is gone.
+    # 6. remove the user + group LAST -- portable line removal (OpenWrt busybox
+    #    has no deluser/delgroup applets; edit the files directly, temp+mv, the
+    #    same idiom _amz_covert_ensure_user uses to create them). Only after
+    #    every file/dir/ACL reference to the uid is gone.
     if [ "$_un_dry" = 1 ]; then
       echo "uninstall:deluser"
       echo "uninstall:delgroup"
     else
-      deluser amnezia-covert 2>/dev/null || true
-      delgroup amnezia-covert 2>/dev/null || true
+      _un_pwd="${AMNEZIA_PASSWD:-/etc/passwd}"
+      _un_grp="${AMNEZIA_GROUP:-/etc/group}"
+      if [ -f "$_un_pwd" ]; then
+        grep -v '^amnezia-covert:' "$_un_pwd" > "$_un_pwd.tmp" 2>/dev/null && mv "$_un_pwd.tmp" "$_un_pwd" || rm -f "$_un_pwd.tmp"
+      fi
+      if [ -f "$_un_grp" ]; then
+        grep -v '^amnezia-covert:' "$_un_grp" > "$_un_grp.tmp" 2>/dev/null && mv "$_un_grp.tmp" "$_un_grp" || rm -f "$_un_grp.tmp"
+      fi
       amz_log "uninstall:deluser"
       amz_log "uninstall:delgroup"
     fi

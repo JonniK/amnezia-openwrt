@@ -29,6 +29,30 @@ load '../lib/harness.bash'
   [ "$_l_deluser" -lt "$_l_delgroup" ]
 }
 
+@test "uninstall removes the amnezia-covert line from the passwd/group files" {
+  # OpenWrt busybox has no deluser/delgroup applets -- the installer edits
+  # /etc/passwd + /etc/group directly (temp+mv line removal), the same
+  # idiom _amz_covert_ensure_user uses to create them.
+  _passwd="$BATS_TEST_TMPDIR/passwd-with-covert"
+  _group="$BATS_TEST_TMPDIR/group-with-covert"
+  printf 'root:x:0:0:root:/root:/bin/ash\namnezia-covert:x:391:391:amnezia-covert:/var/run/amnezia-covert:/bin/false\n' > "$_passwd"
+  printf 'root:x:0:\namnezia-covert:x:391:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" AMNEZIA_COVERT_INIT=amnezia-covert-init \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --uninstall
+  [ "$status" -eq 0 ]
+  # NOTE: `!`-negated commands are exempt from bash errexit, so a `!`
+  # assertion must never be a non-final statement in a bats test body (its
+  # failure would silently not fail the test) -- use `run` + an explicit
+  # status check instead.
+  run grep -q '^amnezia-covert:' "$_passwd"
+  [ "$status" -ne 0 ]
+  run grep -q '^amnezia-covert:' "$_group"
+  [ "$status" -ne 0 ]
+  # The other line must survive untouched.
+  grep -q '^root:x:0:0:root:/root:/bin/ash$' "$_passwd"
+  grep -q '^root:x:0:$' "$_group"
+}
+
 @test "uninstall is idempotent when nothing was ever installed" {
   AMNEZIA_COVERT_INIT=amnezia-covert-init \
     run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --uninstall
