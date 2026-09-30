@@ -946,7 +946,7 @@ cmd_auto() {
     if [ -n "$_cached" ]; then
       _cached_verdict=$(printf '%s' "$_cached" | awk '{print $2}')
       _wants_tunnel "$_cached_verdict" || continue
-      # cached throttled: still try to add if list not capped.
+      # cached throttled/geo-blocked: still try to add if list not capped.
     fi
 
     if [ -z "$_cached" ]; then
