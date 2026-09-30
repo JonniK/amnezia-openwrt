@@ -89,6 +89,19 @@ start_remote_deploy() {
     cat "$_f" | ssh_run "cat > /tmp/luci-app-amnezia/$_rel"
   done
   cat "$REPO_ROOT/openwrt/luci-app-amnezia/view/main.js" | ssh_run "cat > /tmp/luci-app-amnezia/view/main.js"
+  # Covert-creator: dev-deploy-only binary + manifest staging (Phase 1's
+  # cross-compile output; gitignored, built on demand via
+  # dev/build-covert-creator.sh). Optional -- absent means the covert
+  # feature installs inert (amnezia-covert-ctl apply/enable fail loud on
+  # the missing binary, which is not this script's concern).
+  if [ -f "$REPO_ROOT/build/covert/dist/amnezia-covert-creator" ] && \
+     [ -f "$REPO_ROOT/build/covert/dist/BUILD_MANIFEST" ]; then
+    echo "=== Staging covert-creator binary + manifest ==="
+    cat "$REPO_ROOT/build/covert/dist/amnezia-covert-creator" | ssh_run "cat > /tmp/amnezia-covert-creator"
+    cat "$REPO_ROOT/build/covert/dist/BUILD_MANIFEST" | ssh_run "cat > /tmp/BUILD_MANIFEST"
+  else
+    echo "=== covert-creator binary not built locally -- skipping staging (dev/build-covert-creator.sh) ==="
+  fi
   ssh_run "chmod +x /tmp/install-amnezia-pbr.sh"
   ssh_run "cat > /tmp/awg-setup.conf" <"$CONF_LOCAL"
   # Detach the installer from this SSH session so a dropped connection

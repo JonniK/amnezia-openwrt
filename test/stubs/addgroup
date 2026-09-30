@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "addgroup $*" >> "${STUB_LOG:-/dev/null}"
+exit 0

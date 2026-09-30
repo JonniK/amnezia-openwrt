@@ -1,0 +1,3 @@
+#!/bin/sh
+echo "deluser $*" >> "${STUB_LOG:-/dev/null}"
+exit 0

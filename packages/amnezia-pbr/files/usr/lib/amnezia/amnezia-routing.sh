@@ -143,6 +143,28 @@ routing_emit_classifier() {
   sed "s/@@LAN_IFNAME@@/$_lan/" "$_src"
 }
 
+# routing_emit_covert_classifier <mode> <lan_ifname> <covert_uid>
+# Prints an OUTPUT-hook `type route` chain that classifies the covert
+# creator's OWN egress (router-origin, uid-scoped) exactly like a LAN client
+# under the same routing_mode. The mark logic is NOT duplicated: it is
+# DERIVED from routing_emit_classifier's output so the two can never drift
+# (a unit test asserts the mark lines are byte-identical). Only three things
+# change vs the LAN classifier:
+#   - chain name  amnezia_classify -> amnezia_covert_classify
+#   - hook        filter/prerouting/priority mangle -> route/output/priority mangle
+#                 (`type route` is required for route reselection; `filter`
+#                  cannot reselect. srcnat_vpn masquerades the awgN egress so
+#                  the router's WAN source address is a non-issue -- verified
+#                  live 2026-09-04.)
+#   - gate        `iifname != "<lan>" return` -> `meta skuid != <uid> return`
+# The `set amnezia_*` declarations are stripped: the LAN classifier already
+# declares them, and redeclaring an existing set in the same table errors.
+routing_emit_covert_classifier() {
+  _mode=$1; _lan=$2; _uid=$3
+  case "$_uid" in ''|*[!0-9]*) amz_log "covert classifier: bad uid '$_uid'"; return 1 ;; esac
+  routing_emit_classifier "$_mode" "$_lan"     | sed         -e '/^set amnezia_/d'         -e 's/^# amnezia .*classifier.*/# amnezia covert-uid classifier (derived) -- included into inet fw4 by fw4./'         -e 's/chain amnezia_classify {/chain amnezia_covert_classify {/'         -e 's/type filter hook prerouting priority mangle;/type route hook output priority mangle;/'         -e "s|iifname != \"$_lan\" return|meta skuid != $_uid return|"     | grep -vE '^[[:space:]]*# (Only classify LAN-sourced|@@LAN_IFNAME@@ is replaced|.* is replaced by the installer)'
+}
+
 # Disable LAN RA/DHCPv6/NDP so LAN clients stay IPv4-only (v6 fail-closed part b).
 routing_disable_lan_v6() {
   uci set dhcp.lan.ra='disabled'

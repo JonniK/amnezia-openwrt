@@ -1,0 +1,11 @@
+chain amnezia_covert_egress {
+    type filter hook output priority filter; policy accept;
+    meta skuid @@COVERT_UID@@ oifname "lo" ip  daddr 127.0.0.1 udp dport 53 accept
+    meta skuid @@COVERT_UID@@ oifname "lo" ip  daddr 127.0.0.1 tcp dport 53 accept
+    meta skuid @@COVERT_UID@@ oifname "lo" ip6 daddr ::1       udp dport 53 accept
+    meta skuid @@COVERT_UID@@ oifname "lo" ip6 daddr ::1       tcp dport 53 accept
+    meta skuid @@COVERT_UID@@ ip  daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } reject
+    meta skuid @@COVERT_UID@@ ip6 daddr { fc00::/7, fe80::/10 } reject
+    meta skuid @@COVERT_UID@@ oifname "lo" reject
+    meta skuid @@COVERT_UID@@ oifname "@@LAN_IFNAME@@" reject
+}

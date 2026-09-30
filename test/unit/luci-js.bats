@@ -98,8 +98,17 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "handleTunnelRemove" "$FV"
 }
 
-@test "no fs.write() in any module (argv-only channel)" {
-  for f in $(alljs); do ! grep -qE "fs\.write\s*\(" "$f"; done
+@test "no fs.write() outside covert.js (argv-only channel elsewhere; cookie secret is the one exception)" {
+  for f in $(alljs); do
+    [ "$(basename "$f")" = "covert.js" ] && continue
+    ! grep -qE "fs\.write\s*\(" "$f"
+  done
+}
+
+@test "covert.js writes the VK cookie via fs.write, never as an argv element" {
+  C="$AMZ/amnezia/section/covert.js"
+  grep -q "fs.write" "$C"
+  grep -q "vk-cookies.json" "$C"
 }
 
 @test "failover.js add-tunnel section has textarea and Add tunnel button" {
@@ -427,12 +436,85 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   grep -q "amnezia-autotunnel.*status\|status.*amnezia-autotunnel" "$F"
 }
 
-@test "harness DATA has 14 elements (index 13 = autotunnel status)" {
+@test "harness DATA has 15 elements (index 14 = covert-creator status)" {
   run node -e '
     const h=require("./test/lib/luci-harness.js");
-    if(h.DATA.length !== 14){ console.error("DATA.length="+h.DATA.length+", want 14"); process.exit(1); }
+    if(h.DATA.length !== 15){ console.error("DATA.length="+h.DATA.length+", want 15"); process.exit(1); }
     process.exit(0);'
   [ "$status" -eq 0 ]
+}
+
+# ── Phase 8: covert-creator LuCI section ────────────────────────────────────
+
+@test "covert.js owns toggle/save-cookies/apply handlers + covertStateColor usage" {
+  C="$AMZ/amnezia/section/covert.js"; node --check "$C"
+  grep -q "handleCovertToggle" "$C"
+  grep -q "handleCovertSaveCookies" "$C"
+  grep -q "handleCovertApply" "$C"
+  grep -q "covertStateColor" "$C"
+  grep -q "amnezia-covert-ctl" "$C"
+}
+
+@test "covert.js handleCovertToggle declared function(state, ev) -- extra arg first" {
+  C="$AMZ/amnezia/section/covert.js"
+  grep -qE "handleCovertToggle\s*:\s*function\s*\(\s*targetState" "$C"
+}
+
+@test "util.js has covertStateColor as a separate function from verdictColor" {
+  U="$AMZ/amnezia/util.js"
+  grep -q "covertStateColor" "$U"
+  # verdictColor's arm set must not move -- covertStateColor is a distinct switch.
+  grep -q "verdictColor" "$U"
+}
+
+@test "main.js requires amnezia.section.covert, merges its handlers, and reads index 14 in load()" {
+  grep -q "require amnezia.section.covert as covert" "$F"
+  grep -q "covert.handlers" "$F"
+  grep -q "amnezia-covert-ctl" "$F"
+}
+
+@test "main.js renders the covert block outside #amz-accordion" {
+  # covert.render(...) must appear before the amz-accordion div opens.
+  ACCORDION_LINE=$(grep -n "id.*amz-accordion" "$F" | head -1 | cut -d: -f1)
+  COVERT_LINE=$(grep -n "covert.render" "$F" | head -1 | cut -d: -f1)
+  [ -n "$ACCORDION_LINE" ]
+  [ -n "$COVERT_LINE" ]
+  [ "$COVERT_LINE" -lt "$ACCORDION_LINE" ]
+}
+
+@test "acl grants exec on amnezia-covert-ctl and write on vk-cookies.json" {
+  ACL="$HARNESS_DIR/../openwrt/luci-app-amnezia/acl/luci-app-amnezia.json"
+  grep -q "amnezia-covert-ctl" "$ACL"
+  grep -q "vk-cookies.json" "$ACL"
+  grep -q '"write"' "$ACL"
+}
+
+@test "covert_handlers_exercised: covert handlers are in WIRING and merged into the assembled view (harness source), and resolve under both fs stubs" {
+  # Runtime pass alone is NOT sufficient here: a handler omitted from WIRING is
+  # simply never invoked and the run still reports "ok" (vacuous tooth) --
+  # so assert directly that the wiring sites exist in the harness source.
+  H="$HARNESS_DIR/../test/lib/luci-harness.js"
+  grep -q "handleCovertToggle: \['1'\]" "$H"
+  grep -q "handleCovertSaveCookies: \[\]" "$H"
+  grep -q "handleCovertApply: \[\]" "$H"
+  grep -q "dv.covert" "$H"
+  grep -q "(dv.covert" "$H"
+  run node "$H"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "handler-exec-safe ok"
+  echo "$output" | grep -q "handler-argorder ok"
+}
+
+@test "covert_refresh_reject_safe: covert is loaded into the reject-mode deps AND iterated (harness source + runtime)" {
+  # The reject-mode loop (~L164) is guarded by "if (dr[k] && typeof dr[k].refresh
+  # === 'function')" -- adding 'covert' to the iteration list alone is vacuous
+  # unless dr.covert is also loaded with the rejecting fs stub. Assert both.
+  H="$HARNESS_DIR/../test/lib/luci-harness.js"
+  grep -q "dr.covert.*=.*loadWith('amnezia/section/covert.js', dr, fsRej)" "$H"
+  grep -qE "for \(const k of \['failover','routing','zapret','dns','covert'\]\)" "$H"
+  run node "$H"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "refresh-reject-safe ok"
 }
 
 @test "handler arg-order: handleAutotunnelRemove passes no event as backend arg (harness)" {

@@ -68,3 +68,109 @@ load '../lib/harness.bash'
   # Only one uci batch call (for awg1), not two.
   [ "$(grep -c "^uci batch" "$STUB_LOG")" -eq 1 ]
 }
+
+# Phase 9 (covert-creator-router plan): fixed-uid user creation.
+# OpenWrt busybox ships no adduser/addgroup applets (verified on the armsr
+# aarch64 VM 2026-09-04) -- the installer creates the user/group by
+# appending directly to /etc/passwd + /etc/group instead.
+@test "first-install creates amnezia-covert user+group at fixed uid/gid" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  grep -qE '^amnezia-covert:x:391:391:' "$_passwd"
+  grep -qE '^amnezia-covert:x:391:' "$_group"
+}
+
+@test "first-install is idempotent when amnezia-covert already exists at the correct uid" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-existing"
+  _group="$BATS_TEST_TMPDIR/group-existing"
+  printf 'root:x:0:0:root:/root:/bin/ash\namnezia-covert:x:391:391:amnezia-covert:/var/run/amnezia-covert:/bin/false\n' > "$_passwd"
+  printf 'root:x:0:\namnezia-covert:x:391:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  [ "$(grep -c '^amnezia-covert:' "$_passwd")" -eq 1 ]
+  [ "$(grep -c '^amnezia-covert:' "$_group")" -eq 1 ]
+  ! grep -q "ERROR: amnezia-covert exists with uid=" "$STUB_LOG"
+}
+
+@test "first-install refuses and creates nothing when the fixed uid is held by a different user" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-uid-collision"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  cp "$HARNESS_DIR/../test/fixtures/passwd-uid-collision" "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  # NOTE: `!`-negated commands are exempt from bash errexit, so a `!`
+  # assertion must never be a non-final statement in a bats test body (its
+  # failure would silently not fail the test) -- use `run` + an explicit
+  # status check instead.
+  run grep -q '^amnezia-covert:' "$_passwd"
+  [ "$status" -ne 0 ]
+  run grep -q '^amnezia-covert:' "$_group"
+  [ "$status" -ne 0 ]
+  grep -q "held by user 'nobody'" "$STUB_LOG"
+}
+
+@test "first-install refuses and creates nothing when the fixed gid is held by a different group" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-gid-collision"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  cp "$HARNESS_DIR/../test/fixtures/group-gid-collision" "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  run grep -q '^amnezia-covert:' "$_passwd"
+  [ "$status" -ne 0 ]
+  run grep -q '^amnezia-covert:' "$_group"
+  [ "$status" -ne 0 ]
+  grep -q "held by group 'othergrp'" "$STUB_LOG"
+}
+
+@test "first-install pre-creates covert.log 0640 owned by amnezia-covert:amnezia-covert" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  _covert_dir="$BATS_TEST_TMPDIR/covert"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" AMZ_COVERT_DIR="$_covert_dir" AMZ_COVERT_LOG="$_covert_dir/covert.log" \
+    UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  [ -f "$_covert_dir/covert.log" ]
+  # GNU stat (-c %a) FIRST, BSD/macOS (-f %Lp) as fallback: on GNU stat,
+  # `-f` means --file-system and mis-parses %Lp, so the BSD form must never
+  # come first or it yields a non-mode value under the Tier-2 (ubuntu) job.
+  _mode=$(stat -c %a "$_covert_dir/covert.log" 2>/dev/null || stat -f %Lp "$_covert_dir/covert.log" 2>/dev/null)
+  [ "$_mode" = "640" ]
+}
+
+# H4 gap (VM probe 2026-09-04): amnezia.config.covert_enabled is absent on a
+# fresh/cutover install whose /etc/config/amnezia predates this feature (the
+# shipped default only reaches .ipk installs). The installer must default it
+# to 0 (feature OFF) when unset -- the uci stub's "get" falls through to exit 1
+# / empty output for any key with no UCI_GET_* override, which is exactly the
+# "unset" case here (no UCI_GET_amnezia_config_covert_enabled exported).
+@test "first-install defaults covert_enabled to 0 when unset" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
+}
+
+# The important half of the guard: a user's existing covert_enabled=1 must
+# survive a re-install/upgrade. Without the "unset" guard, a shared default
+# write would silently disable a user's already-enabled feature.
+@test "first-install does NOT reset an existing covert_enabled=1" {
+  _passwd="$BATS_TEST_TMPDIR/passwd-clean"
+  _group="$BATS_TEST_TMPDIR/group-clean"
+  printf 'root:x:0:0:root:/root:/bin/ash\n' > "$_passwd"
+  printf 'root:x:0:\n' > "$_group"
+  AMNEZIA_PASSWD="$_passwd" AMNEZIA_GROUP="$_group" UCI_FAKE_TUNNELS="awg1" \
+    UCI_GET_amnezia_config_covert_enabled="1" \
+    run sh "$HARNESS_DIR/../openwrt/install-amnezia-pbr.sh" --first-install
+  ! grep -q "uci set amnezia.config.covert_enabled=0" "$STUB_LOG"
+}

@@ -29,6 +29,7 @@ config amnezia 'config'
 	option installed_ts ''
 	# option master_enabled '1'    # Master kill-switch: 0 = fail-open (all VPN + DoT off, LAN -> WAN direct). Default 1.
 	option dot_enabled '0'
+	option covert_enabled '0'
 	option dns_provider 'quad9'
 	option dot_resolver ''
 	option doh_resolver ''

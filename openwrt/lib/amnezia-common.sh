@@ -28,10 +28,60 @@ export AMNEZIA_EXITIP_TTL="${AMNEZIA_EXITIP_TTL:-300}"
 # Shared state directory (single source of truth so ctl and daemon agree).
 export ST_DIR="${ST_DIR:-/tmp/amnezia-fo}"
 
+# Covert-creator (whitelist-bypass) fixed paths.
+export AMZ_COVERT_BIN=/usr/bin/amnezia-covert-creator
+export AMZ_COVERT_DIR=/etc/amnezia/covert
+export AMZ_COVERT_COOKIES="$AMZ_COVERT_DIR/vk-cookies.json"
+export AMZ_COVERT_LOG="$AMZ_COVERT_DIR/covert.log"
+export AMZ_COVERT_MANIFEST="$AMZ_COVERT_DIR/BUILD_MANIFEST"
+export AMZ_COVERT_RUN_DIR=/var/run/amnezia-covert
+# /proc mount point; overridable so bats can point at a fabricated fixture
+# (there is no /proc on the macOS dev host running the offline test suite).
+export AMZ_PROC_DIR="${AMZ_PROC_DIR:-/proc}"
+
 amz_log() { logger -t amnezia-failover "$*" 2>/dev/null; if [ -n "${AMNEZIA_DEBUG:-}" ]; then echo "amnezia: $*" >&2; fi; }
 
 # True (exit 0) unless master_enabled is explicitly set to 0. Default = enabled.
 amz_master_enabled() { [ "$(uci -q get amnezia.config.master_enabled 2>/dev/null || echo 1)" != 0 ]; }
+
+# Numeric uid of the amnezia-covert service user. Empty + rc<>0 if the user
+# does not exist. AMZ_COVERT_UID, when set, short-circuits the `id -u` lookup
+# — a test seam (that system user does not exist off-router / in bats).
+amz_covert_uid() {
+  if [ -n "${AMZ_COVERT_UID:-}" ]; then
+    printf '%s' "$AMZ_COVERT_UID"
+    return 0
+  fi
+  id -u amnezia-covert 2>/dev/null
+}
+
+# True (exit 0) iff amnezia.config.covert_enabled == '1'. MUST read via
+# `uci -q get` (unquoted) — never `uci show | grep | sed` (quoted '1' != 1).
+amz_covert_enabled() {
+  [ "$(uci -q get amnezia.config.covert_enabled 2>/dev/null)" = 1 ]
+}
+
+# Reap every process owned by amz_covert_uid via a /proc scan: pkill/pgrep -u/
+# ps -o are ABSENT on the BusyBox target. Signal defaults to TERM. Reads the
+# Uid: line's real-uid column ($2 under awk default split; $1 is the "Uid:"
+# label). 2>/dev/null on kill absorbs pid-vanish races. Always returns 0 (a
+# best-effort sweep; callers re-check emptiness themselves).
+amz_covert_reap() {
+  _sig="${1:-TERM}"
+  _cuid=$(amz_covert_uid) || return 0
+  [ -n "$_cuid" ] || return 0
+  for _statf in "$AMZ_PROC_DIR"/[0-9]*/status; do
+    [ -f "$_statf" ] || continue
+    _uline=$(awk '/^Uid:/{print; exit}' "$_statf" 2>/dev/null)
+    [ -n "$_uline" ] || continue
+    _ruid=$(printf '%s' "$_uline" | awk '{print $2}')
+    [ "$_ruid" = "$_cuid" ] || continue
+    _pid=${_statf#"$AMZ_PROC_DIR"/}
+    _pid=${_pid%/status}
+    kill -"$_sig" "$_pid" 2>/dev/null
+  done
+  return 0
+}
 
 # Active tunnel egress device for router-origin traffic that MUST be tunneled.
 # Router-origin packets are not seen by the prerouting/mangle classifier, so they

@@ -87,6 +87,26 @@ case "$1" in
       exit 1
     fi
     mv "$_cls_tmp" "${AMNEZIA_CLASSIFIER_OUT:-/etc/nftables.d/30-amnezia-classify.nft}"
+    # P2: keep the covert-uid classify chain in step with the LAN mode so a
+    # mode switch WHILE covert is running re-classifies the creator's egress
+    # too -- folded into this same fw4 reload (no extra reload). If covert is
+    # off, ensure the fragment is absent. Best-effort: a failed emit removes
+    # the fragment (covert egress falls back to direct), never aborts the
+    # mode change.
+    _covert_cls="${AMZ_COVERT_CLASSIFY_FRAGMENT:-/etc/nftables.d/41-amnezia-covert-classify.nft}"
+    if amz_covert_enabled 2>/dev/null; then
+      _cov_uid=$(amz_covert_uid 2>/dev/null || echo "")
+      _cov_tmp=$(mktemp /tmp/amnezia-covert-cls-XXXXXX)
+      if [ -n "$_cov_uid" ] && routing_emit_covert_classifier "$2" "$LAN_DEV" "$_cov_uid" > "$_cov_tmp" 2>/dev/null && [ -s "$_cov_tmp" ]; then
+        chmod 0644 "$_cov_tmp" 2>/dev/null || :
+        mv "$_cov_tmp" "$_covert_cls"
+      else
+        rm -f "$_cov_tmp" "$_covert_cls"
+        amz_log "ctl: covert classify re-emit failed for mode '$2' -- covert egress stays direct"
+      fi
+    else
+      rm -f "$_covert_cls"
+    fi
     # User-initiated routing-mode change: flush the set so stale entries from
     # the prior mode are evicted before the new classifier and fw4 reload.
     ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush
