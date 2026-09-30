@@ -244,9 +244,24 @@ _probe_curl() {
   [ -z "$_probe_size" ]  && _probe_size="0"
 }
 
+# _is_geo_blocked <direct_code> <tunnel_code>: direct refused (403/451) but the
+# tunnel got through (2xx/3xx). Both refused (403/403) is NOT geo-blocked.
+_is_geo_blocked() {
+  case "$1" in 403|451) ;; *) return 1 ;; esac
+  case "$2" in 2??|3??) return 0 ;; esac
+  return 1
+}
+
+# _wants_tunnel <verdict>: verdicts that get the domain added to the force list.
+_wants_tunnel() {
+  case "$1" in throttled|geo-blocked) return 0 ;; esac
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # _do_probe_core <domain> [<sample_url>]
 # Runs the full probe sequence.
+# Verdicts: ok|throttled|geo-blocked|tunnel-down|unresolved
 # Sets: _verdict, _ip, _d_code, _d_ms, _d_exit, _d_speed, _d_size,
 #       _t_if, _t_code, _t_ms, _t_exit, _t_speed, _t_size
 # ---------------------------------------------------------------------------
@@ -309,6 +324,8 @@ _do_probe_core() {
   # 5. Verdict (checked in priority order).
   if [ "$_t_code" = "000" ]; then
     _verdict="tunnel-down"
+  elif _is_geo_blocked "$_d_code" "$_t_code"; then
+    _verdict="geo-blocked"
   elif [ "$_d_code" = "000" ]; then
     _verdict="throttled"
   elif [ "$_d_exit" = "28" ] && [ "$_d_size" -gt 0 ] && [ "$_t_exit" = "0" ]; then
@@ -529,7 +546,7 @@ cmd_add() {
       printf '{"domain":"%s",%s"result":"not-added","verdict":"unresolved"}\n' "$_domain" "$_rm_note"
       exit 0
     fi
-    # verdict == throttled: fall through to add.
+    # verdict == throttled|geo-blocked: fall through to add.
   fi
 
   # Add: read current list, dedup, append.
@@ -928,7 +945,7 @@ cmd_auto() {
     fi
     if [ -n "$_cached" ]; then
       _cached_verdict=$(printf '%s' "$_cached" | awk '{print $2}')
-      [ "$_cached_verdict" = "throttled" ] || continue
+      _wants_tunnel "$_cached_verdict" || continue
       # cached throttled: still try to add if list not capped.
     fi
 
@@ -948,7 +965,7 @@ cmd_auto() {
         done < "$STATE_DIR/verdicts"
       fi
       printf '%s%s %s\n' "$_new_verts" "$_candidate" "$_verdict" > "$STATE_DIR/verdicts"
-      [ "$_verdict" = "throttled" ] || continue
+      _wants_tunnel "$_verdict" || continue
     fi
 
     # List cap check.
@@ -985,7 +1002,7 @@ cmd_auto() {
     _ts=$(date +%s 2>/dev/null || printf '0')
     printf '%s %s\n' "$_candidate" "$_ts" >> "$ADDED_FILE"
 
-    amz_log "autotunnel auto: added $_candidate (throttled)"
+    amz_log "autotunnel auto: added $_candidate ($_verdict)"
     _tick_count=$((_tick_count + 1))
   done
 
@@ -1264,7 +1281,7 @@ _probe_page_run() {
     [ "$_pv" = "unresolved" ] && _pst="unresolved"
     # Add to force list if throttled and --add-throttled was requested.
     _padded=0
-    if [ "$_prun_add" = "1" ] && [ "$_pv" = "throttled" ]; then
+    if [ "$_prun_add" = "1" ] && _wants_tunnel "$_pv"; then
       _pp_add_host "$_ph"
       [ "$_pp_add_result" = "added" ] && _padded=1
     fi
@@ -1448,7 +1465,7 @@ _watch_run() {
     _wst="probed"
     [ "$_wv" = "unresolved" ] && _wst="unresolved"
     _wadded=0
-    if [ "$_wr_add" = "1" ] && [ "$_wv" = "throttled" ]; then
+    if [ "$_wr_add" = "1" ] && _wants_tunnel "$_wv"; then
       _pp_add_host "$_wh"
       [ "$_pp_add_result" = "added" ] && _wadded=1
     fi

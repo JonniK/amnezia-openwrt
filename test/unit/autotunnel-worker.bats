@@ -104,6 +104,25 @@ CURLSTUB
 }
 
 # ---------------------------------------------------------------------------
+# Helper: curl stub with fixed direct/tunnel HTTP codes.
+# Usage: _make_code_curl <tag> <direct_code> <tunnel_code>
+# ---------------------------------------------------------------------------
+_make_code_curl() {
+  _sd="$BATS_TEST_TMPDIR/curl-code-$1"
+  mkdir -p "$_sd"
+  cat > "$_sd/curl" <<CURLSTUB
+#!/bin/sh
+echo "curl \$*" >> "\${STUB_LOG:-/dev/null}"
+_has_iface=0
+for _a in "\$@"; do case "\$_a" in awg*) _has_iface=1; break ;; esac; done
+if [ "\$_has_iface" = "1" ]; then printf '$3 0.200 500000 1024'; else printf '$2 0.200 500000 1024'; fi
+CURLSTUB
+  chmod +x "$_sd/curl"
+  export CURL="$_sd/curl"
+  export PATH="$_sd:$PATH"
+}
+
+# ---------------------------------------------------------------------------
 # auto: disabled (autotunnel_enabled=0) -> silent exit 0
 # ---------------------------------------------------------------------------
 @test "auto: disabled -> exit 0 silently, no probe" {
@@ -758,4 +777,63 @@ FLSTUB
   # pending file must be gone after the apply.
   [ ! -f "$STATE_DIR/pending" ] \
     || { echo "STATE_DIR/pending not cleared after clock-skew coalesced apply"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# auto: geo-blocked verdict (direct 403/451, tunnel 2xx/3xx) is added
+# ---------------------------------------------------------------------------
+@test "auto: direct 403 + tunnel 200 -> geo-blocked, added and cached" {
+  _make_code_curl geo403 403 200
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _sf="$BATS_TEST_TMPDIR/failover.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+  _make_logread_stub geo403 \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] geo.example from 192.168.1.2"
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+  grep -q "geo.example" "$FORCE_DIR/force-tunnel.list"
+  grep -q "^geo.example geo-blocked$" "$STATE_DIR/verdicts"
+}
+
+@test "auto: direct 451 + tunnel 301 -> geo-blocked, added" {
+  _make_code_curl geo451 451 301
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _sf="$BATS_TEST_TMPDIR/failover.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+  _make_logread_stub geo451 \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] legal.example from 192.168.1.2"
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+  grep -q "legal.example" "$FORCE_DIR/force-tunnel.list"
+  grep -q "^legal.example geo-blocked$" "$STATE_DIR/verdicts"
+}
+
+@test "auto: direct 403 + tunnel 403 (all exits refused) -> ok, not added" {
+  _make_code_curl both403 403 403
+  export NSLOOKUP_ADDR="1.2.3.4"
+  _sf="$BATS_TEST_TMPDIR/failover.json"
+  printf '{"active_pool":"awg1","routing_mode":"direct-default"}\n' > "$_sf"
+  export STATE_FILE="$_sf"
+  _make_logread_stub both403 \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] wall.example from 192.168.1.2"
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+  ! grep -q "wall.example" "$FORCE_DIR/force-tunnel.list" 2>/dev/null
+  grep -q "^wall.example ok$" "$STATE_DIR/verdicts"
+}
+
+@test "auto: cached geo-blocked verdict is re-added like cached throttled" {
+  _make_code_curl geocache 200 200
+  export NSLOOKUP_ADDR="1.2.3.4"
+  printf 'cached.example geo-blocked\n' > "$STATE_DIR/verdicts"
+  _make_logread_stub geocache \
+    "Jul  1 12:00:01 router dnsmasq[1]: query[A] cached.example from 192.168.1.2"
+  run sh "$SCRIPT" auto
+  [ "$status" -eq 0 ]
+  grep -q "cached.example" "$FORCE_DIR/force-tunnel.list"
+  # Added from cache: no probe curl was issued.
+  run grep "^curl " "$STUB_LOG"
+  [ "$status" -ne 0 ]
 }
