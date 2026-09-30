@@ -65,7 +65,9 @@ function makeQuerySelectorResult(selector) {
   if (selector && selector.indexOf('app-add-method') >= 0) { n.value = 'as'; }
   return n;
 }
-const documentStub = { getElementById:function(id){ return makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
+// Persistent node for the probe-page results container so the probe-page pass can read what was painted.
+const ppContainer = makeRecordingNode('amz-pp-results');
+const documentStub = { getElementById:function(id){ return id === 'amz-pp-results' ? ppContainer : makeRecordingNode(id); }, activeElement:null, querySelectorAll:()=>[], querySelector:function(sel){ return makeQuerySelectorResult(sel); }, createElement:()=>E('div') };
 // DATA: 14 elements — indices 10 (DoT status), 11 (master_enabled), 12 (tunnel apps list),
 // 13 (autotunnel worker status).
 // DATA[11] is a plain string '1' (from uci.get, not fs.exec) — master_enabled default ON.
@@ -313,6 +315,61 @@ if (require.main === module) {
               ui.addNotification = origAddNotification;
               console.error('FAIL: master-repaint rejected: ' + e.message);
               process.exit(1);
+            })
+            .then(function() {
+              // ── Probe-page verdict pass ──────────────────────────────────────────
+              // Fixture in the REAL backend shape (_pp_json_host): status is probed|...,
+              // the throttled/geo-blocked signal is in `verdict`. Painted via the real
+              // routing.refresh() path; Add/Add-all must exist only for throttled+geo-blocked
+              // non-added rows.
+              const H = [
+                {host:'thr.example', status:'probed', verdict:'throttled', added:0},
+                {host:'geo.example', status:'probed', verdict:'geo-blocked', added:0},
+                {host:'ok.example', status:'probed', verdict:'ok', added:0},
+                {host:'done.example', status:'probed', verdict:'throttled', added:1}
+              ];
+              const execs = [];
+              const fsPP = { stat:()=>Promise.resolve(null),
+                read:function(f){ return Promise.resolve(f === '/tmp/amnezia-fo/watch.json' ? JSON.stringify({running:false, hosts:H}) : ''); },
+                exec:function(cmd, args){ execs.push({cmd:cmd, args:(args||[]).slice()}); return Promise.resolve({stdout:'',stderr:'',code:0}); } };
+              const dp = {};
+              dp.util = loadWith('amnezia/util.js', dp, fsPP);
+              dp.routing = loadWith('amnezia/section/routing.js', dp, fsPP);
+              const pv = Object.assign({ refresh:function(){ return dp.routing.refresh(pv); } }, dp.routing.handlers);
+              const bad2 = [];
+              return pv.handleWatch({preventDefault:function(){}}).then(function(){
+                const rows = []; let addAll = null;
+                walk(ppContainer, function(n){
+                  if (n.tag === 'tr' && n.children.length === 5 && n.children[0].tag === 'td') rows.push(n);
+                  if (n.tag === 'button' && n.attrs.class === 'btn cbi-button-positive') addAll = n;
+                });
+                if (rows.length !== 4) { bad2.push('expected 4 painted rows, got ' + rows.length); return; }
+                const want = [true, true, false, false];
+                const colors = ['#c0392b', '#c0392b', '#3c763d', '#c0392b'];
+                rows.forEach(function(r, i){
+                  const btn = (function f(n){ if(!n||typeof n!=='object') return null; if(n.tag==='button') return n; for(const c of (n.children||[])){ const x=f(c); if(x) return x; } return null; })(r.children[4]);
+                  if (!!btn !== want[i]) bad2.push(H[i].host + ': Add button ' + (btn ? 'present' : 'missing') + ', want ' + (want[i] ? 'present' : 'absent'));
+                  if (r.children[1].attrs.style.indexOf('color:' + colors[i] + ';') < 0) bad2.push(H[i].host + ': verdict colour ' + r.children[1].attrs.style + ', want ' + colors[i]);
+                  if (btn) { // wired to handleProbePageAdd with host as extra arg: exec must get host, no event
+                    const before = execs.length;
+                    btn.attrs.click(fakeEv);
+                    const c = execs.slice(before)[0];
+                    if (!c || c.args.join(' ') !== 'add ' + H[i].host + ' --force') bad2.push(H[i].host + ': Add click execs ' + JSON.stringify(c && c.args));
+                  }
+                });
+                if (!addAll) { bad2.push('Add-all button missing'); return; }
+                const label = addAll.children.join('');
+                if (label !== 'Add all blocked (2)') bad2.push('Add-all label ' + JSON.stringify(label) + ', want "Add all blocked (2)"');
+                execs.length = 0;
+                return Promise.resolve(addAll.attrs.click(fakeEv)).then(function(){
+                  const got = execs.map(function(c){ return c.args.join(' '); }).filter(function(a){ return a.indexOf('add ') === 0; }).sort();
+                  const exp = ['add geo.example --force', 'add thr.example --force'];
+                  if (JSON.stringify(got) !== JSON.stringify(exp)) bad2.push('Add-all execs ' + JSON.stringify(got) + ', want ' + JSON.stringify(exp));
+                });
+              }).then(function(){
+                if (bad2.length) { console.error('FAIL: probe-page verdict:\n  ' + bad2.join('\n  ')); process.exit(1); }
+                console.log('probe-page-verdict ok');
+              });
             });
         });
     });

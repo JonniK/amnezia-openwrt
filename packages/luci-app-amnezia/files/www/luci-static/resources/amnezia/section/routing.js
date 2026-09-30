@@ -176,6 +176,10 @@ function paintAutotunnelPanel(view, st) {
 	}
 }
 
+// Mirror of backend _wants_tunnel (amnezia-autotunnel.sh): the per-host `verdict`
+// (NOT `status`, which is probed|unresolved|forced|ru) that warrants a tunnel entry.
+function wantsTunnel(h) { return h.verdict === 'throttled' || h.verdict === 'geo-blocked'; }
+
 // ── Probe-page / watch results painter ───────────────────────────────────────
 // Called from refresh() after reading probe-page.json or watch.json.
 // Safe to use getElementById (we're in refresh/handler context, DOM exists).
@@ -196,10 +200,10 @@ function paintProbePageResults(view, data) {
 	var tbody = E('tbody', {});
 	for (var i = 0; i < data.hosts.length; i++) {
 		(function(h) {
-			// Color convention: throttled=red, ok=green, forced/ru=gray, other=gray.
+			// Color convention: throttled/geo-blocked=red, ok=green, forced/ru=gray, other=gray.
 			var statusColor = '#666';
 			if (h.verdict === 'ok') statusColor = '#3c763d';
-			else if (h.status === 'throttled') statusColor = '#c0392b';
+			else if (wantsTunnel(h)) statusColor = '#c0392b';
 
 			var verdictText = h.status || '';
 			if (h.verdict && h.verdict !== h.status) verdictText += ' / ' + h.verdict;
@@ -211,9 +215,9 @@ function paintProbePageResults(view, data) {
 				? String(h.t_ms) + 'ms' + (h.t_speed ? ' ' + String(h.t_speed) + 'KB/s' : '')
 				: '';
 
-			// "Add" button only for throttled and not yet added rows.
+			// "Add" button only for throttled/geo-blocked and not yet added rows.
 			var actionCell;
-			if (h.status === 'throttled' && !h.added) {
+			if (wantsTunnel(h) && !h.added) {
 				actionCell = E('td', { 'style': 'padding:2px 4px;' }, [
 					E('button', {
 						'class': 'btn cbi-button-action',
@@ -250,18 +254,18 @@ function paintProbePageResults(view, data) {
 		tbody
 	]));
 
-	// "Add all throttled" button when run is complete and ≥1 throttled non-added row.
+	// "Add all blocked" button when run is complete and ≥1 throttled/geo-blocked non-added row.
 	if (!data.running) {
 		var throttledCount = 0;
 		for (var j = 0; j < data.hosts.length; j++) {
-			if (data.hosts[j].status === 'throttled' && !data.hosts[j].added) throttledCount++;
+			if (wantsTunnel(data.hosts[j]) && !data.hosts[j].added) throttledCount++;
 		}
 		if (throttledCount > 0) {
 			container.appendChild(E('div', { 'style': 'margin-top:6px;' }, [
 				E('button', {
 					'class': 'btn cbi-button-positive',
 					'click': ui.createHandlerFn(view, 'handleProbePageAddAll')
-				}, _('Add all throttled (') + String(throttledCount) + ')')
+				}, _('Add all blocked (') + String(throttledCount) + ')')
 			]));
 		}
 	}
@@ -604,14 +608,14 @@ return baseclass.extend({
 			});
 		},
 
-		// handleProbePageAddAll(ev) — NO extra arg; reads throttled hosts from _ppLastResult.
+		// handleProbePageAddAll(ev) — NO extra arg; reads throttled/geo-blocked hosts from _ppLastResult.
 		// Chains sequential add calls then notifies and refreshes.
 		handleProbePageAddAll: function(ev) {
 			if (!_ppLastResult || !Array.isArray(_ppLastResult.hosts)) return Promise.resolve();
 			var hosts = [];
 			for (var i = 0; i < _ppLastResult.hosts.length; i++) {
 				var h = _ppLastResult.hosts[i];
-				if (h.status === 'throttled' && !h.added) hosts.push(h.host);
+				if (wantsTunnel(h) && !h.added) hosts.push(h.host);
 			}
 			if (!hosts.length) return Promise.resolve();
 			var self = this;
@@ -624,7 +628,7 @@ return baseclass.extend({
 				})(hosts[j]);
 			}
 			return chain.then(function() {
-				ui.addNotification(null, E('p', {}, _('Added all throttled hosts')), 'info');
+				ui.addNotification(null, E('p', {}, _('Added all blocked hosts')), 'info');
 				return self.refresh();
 			}).catch(function(err) {
 				ui.addNotification(null, E('p', {}, _('Add all failed: ') + err), 'danger');

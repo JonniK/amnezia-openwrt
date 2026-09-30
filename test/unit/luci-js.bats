@@ -445,3 +445,9 @@ alljs() { find "$AMZ/view" "$AMZ/amnezia" -name '*.js' 2>/dev/null; }
   R="$AMZ/amnezia/section/routing.js"
   grep -q "amnezia-autotunnel.*status\|status.*amnezia-autotunnel" "$R"
 }
+
+@test "probe-page table: Add + Add-all for throttled AND geo-blocked verdicts (harness, real backend shape)" {
+  run node "$HARNESS_DIR/../test/lib/luci-harness.js"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "probe-page-verdict ok"
+}
