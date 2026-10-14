@@ -50,6 +50,28 @@ COMMON="$HARNESS_DIR/../openwrt/lib/amnezia-common.sh"
   grep -q "dnsmasq restart" "$STUB_LOG"
 }
 
+@test "reload reports failure when dnsmasq restart fails" {
+  export UCI_DNSMASQ_server='127.0.0.1#5454'
+  export AMNEZIA_DHCP_CONFIG="$BATS_TEST_TMPDIR/dhcp"
+  printf 'last-good DNS config\n' > "$AMNEZIA_DHCP_CONFIG"
+  cat > "$BATS_TEST_TMPDIR/dnsmasq-init-fail" <<'EOF'
+#!/bin/sh
+if [ ! -e "$AMNEZIA_DHCP_CONFIG.failed" ]; then
+  touch "$AMNEZIA_DHCP_CONFIG.failed"
+  printf 'broken candidate\n' > "$AMNEZIA_DHCP_CONFIG"
+  exit 1
+fi
+echo 'rollback restart' >> "$STUB_LOG"
+exit 0
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/dnsmasq-init-fail"
+  export AMNEZIA_DNSMASQ_INIT="$BATS_TEST_TMPDIR/dnsmasq-init-fail"
+  run sh -c ". '$COMMON'; . '$LIB'; dns_dnsmasq_reload"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$AMNEZIA_DHCP_CONFIG")" = 'last-good DNS config' ]
+  grep -q 'rollback restart' "$STUB_LOG"
+}
+
 @test "reload gate: on test failure, candidate is NOT persisted (uci revert, no commit)" {
   # M5: uci commit dhcp must NOT happen when dnsmasq --test fails.
   export UCI_GET_dhcp__dnsmasq_0__server='not a valid server'

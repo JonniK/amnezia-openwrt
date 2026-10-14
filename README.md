@@ -376,8 +376,15 @@ loopback processes:
 - **https-dns-proxy** (DoH, `127.0.0.1:5454`) — HTTPS DNS, routes
   direct to the provider's IP.
 
-A procd watchdog monitors both listeners every 20 seconds. If both fail
-for 3 consecutive checks it adds the WAN-assigned resolver as a
+A procd watchdog monitors both listeners every 20 seconds. When DoT
+fails but DoH remains healthy, it moves DoH ahead of DoT under dnsmasq
+`strict-order`, so each uncached query avoids waiting for failed DoT.
+DoT regains priority after recovery. The selected order survives `apply`
+and service restart; the tier is committed only after dnsmasq reload
+succeeds. Healthy steady-state checks do not restart dnsmasq.
+A failed dnsmasq restart restores the previous committed configuration
+and leaves the previous tier intact.
+If both fail for 3 consecutive checks it adds the WAN-assigned resolver as a
 plaintext last-resort *behind* the encrypted listeners under dnsmasq
 `strict-order` (so encrypted is always tried first). Once encrypted
 listeners recover for 2 checks and 120 seconds have elapsed, the
