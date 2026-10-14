@@ -19,7 +19,38 @@ setup() { export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
   [ "$status" -eq 0 ]
   grep -q "set amnezia.config.dns_active_tier=doh" "$STUB_LOG"
+  _servers=$(sed -n 's/.*add_list dhcp.@dnsmasq\[0\].server=//p' "$STUB_LOG")
+  [ "$_servers" = $'127.0.0.1#5454\n127.0.0.1#5453' ]
   run grep -q "add_list dhcp.@dnsmasq\[0\].server=109.195.112.1" "$STUB_LOG"; [ "$status" -ne 0 ]
+}
+
+@test "DoH selection reload failure does not commit a healthy tier" {
+  export UCI_GET_amnezia_config_dns_active_tier=dot
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq AMNEZIA_DNSMASQ_FAIL=1 sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  run grep -q 'set amnezia.config.dns_active_tier=doh' "$STUB_LOG"
+  [ "$status" -ne 0 ]
+}
+
+@test "healthy selected DoH does not restart dnsmasq every watchdog tick" {
+  export UCI_GET_amnezia_config_dns_active_tier=doh
+  export UCI_DNSMASQ_server='127.0.0.1#5454 127.0.0.1#5453'
+  run sh -c "AMNEZIA_DNS_WD_TICKS=2 AMNEZIA_VERIFY_DOT=fail AMNEZIA_VERIFY_DOH=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  run grep -q 'dnsmasq restart' "$STUB_LOG"
+  [ "$status" -ne 0 ]
+}
+
+@test "DoT recovery restores DoT-first ordering before committing the tier" {
+  export UCI_GET_amnezia_config_dns_active_tier=doh
+  export UCI_DNSMASQ_server='127.0.0.1#5454 127.0.0.1#5453'
+  run sh -c "AMNEZIA_DNS_WD_ONCE=1 AMNEZIA_VERIFY_DOT=pass AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' watchdog"
+  [ "$status" -eq 0 ]
+  _servers=$(sed -n 's/.*add_list dhcp.@dnsmasq\[0\].server=//p' "$STUB_LOG")
+  [ "$_servers" = $'127.0.0.1#5453\n127.0.0.1#5454' ]
+  _restart=$(grep -n 'dnsmasq restart' "$STUB_LOG" | head -1 | cut -d: -f1)
+  _commit=$(grep -n 'set amnezia.config.dns_active_tier=dot' "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ "$_restart" -lt "$_commit" ]
 }
 
 @test "both down for N=1 -> enters plaintext with live-read provider IP" {

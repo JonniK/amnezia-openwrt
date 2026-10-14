@@ -1102,3 +1102,25 @@ HTML
   echo "$output" | grep -q '"verdict":"ok"' \
     || { echo "expected ok (restored original): $output"; false; }
 }
+
+# ---------------------------------------------------------------------------
+# add: geo-blocked verdict (direct 403, tunnel 200) is added, JSON carries it
+# ---------------------------------------------------------------------------
+@test "add: direct 403 + tunnel 200 -> geo-blocked, result added" {
+  _write_state awg1
+  export NSLOOKUP_ADDR="5.6.7.8"
+  _stub_dir="$BATS_TEST_TMPDIR/stubs-geo"
+  mkdir -p "$_stub_dir"
+  cat > "$_stub_dir/curl" <<'CURLSTUB'
+#!/bin/sh
+_has_iface=0
+for _a in "$@"; do case "$_a" in awg*) _has_iface=1; break ;; esac; done
+[ "$_has_iface" = "1" ] && printf '200 0.300 500000 1024' || printf '403 0.100 500000 1024'
+CURLSTUB
+  chmod +x "$_stub_dir/curl"
+  export CURL="$_stub_dir/curl"
+  run sh "$SCRIPT" add geo.example
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"verdict":"geo-blocked"'
+  echo "$output" | grep -q '"result":"added"'
+}
