@@ -6,6 +6,9 @@ local/*
 # Pulled router logs (may contain router specifics / IP addresses / secrets)
 dev/logs/
 
+# Gitignored build output (dev/build-covert-creator.sh cross-compile artifact)
+build/
+
 # OpenWrt snapshots — see openwrt-backups/.gitignore
 
 # Uncomment to keep the large JSON out of the repo
