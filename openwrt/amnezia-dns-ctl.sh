@@ -32,7 +32,7 @@ cmd_apply() {
   dns_dnsmasq_encrypted
   # HIGH leak fix: drop any plaintext servers that may be ahead of the encrypted
   # listeners (e.g. watchdog entered plaintext between applies). Then re-append
-  # them AFTER encrypted listeners so the order is always [5453, 5454, WAN...]
+  # them AFTER the preferred encrypted listener and its backup.
   # under strict-order — never plaintext-first.
   dns_dnsmasq_del_plain
   [ "$(uci -q get amnezia.config.dns_active_tier)" = plaintext ] && dns_dnsmasq_add_plain
@@ -124,6 +124,33 @@ cmd_set_provider() {
 _now() { [ -n "${AMNEZIA_NOW:-}" ] && { echo "$AMNEZIA_NOW"; return; }; date +%s 2>/dev/null || echo 0; }
 _set_tier() { uci set "amnezia.config.dns_active_tier=$1"; uci commit amnezia; }
 
+_select_encrypted() {                            # $1 = healthy preferred tier
+  _se_tier=$1
+  dnsmasq_lock
+  _se_first=""
+  for _se_server in $(uci -q get dhcp.@dnsmasq[0].server 2>/dev/null); do
+    case "$_se_server" in
+      "127.0.0.1#$DOT_PORT") _se_first="dot"; break ;;
+      "127.0.0.1#$DOH_PORT") _se_first=doh; break ;;
+    esac
+  done
+  if [ "$(uci -q get amnezia.config.dns_active_tier)" = "$_se_tier" ] &&
+     [ "$_se_first" = "$_se_tier" ]; then
+    dnsmasq_unlock
+    return 0
+  fi
+  dns_dnsmasq_del_plain
+  dns_dnsmasq_encrypted "$_se_tier"
+  if dns_dnsmasq_reload; then
+    _set_tier "$_se_tier"
+    dnsmasq_unlock
+    return 0
+  fi
+  dnsmasq_unlock
+  amz_log "dns: encrypted listener selection failed; retaining tier"
+  return 1
+}
+
 _enter_plain() {
   dnsmasq_lock
   dns_dnsmasq_add_plain
@@ -141,6 +168,7 @@ _enter_plain() {
 _exit_plain() {                                     # $1 = tier to restore (dot|doh)
   dnsmasq_lock
   dns_dnsmasq_del_plain
+  dns_dnsmasq_encrypted "$1"
   if dns_dnsmasq_reload; then
     _set_tier "$1"                                  # tier restore committed INSIDE the lock, on success only
     # M4: clear stale timestamp when leaving plaintext tier.
@@ -169,14 +197,14 @@ cmd_watchdog() {
       if [ "$_tier" = plaintext ]; then
         if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain dot; then _tier="dot"; fi; fi
       else
-        [ "$_tier" = dot ] || { _tier="dot"; _set_tier dot; }
+        if _select_encrypted dot; then _tier="dot"; fi
       fi
     elif _probe_listener "127.0.0.1#$DOH_PORT"; then
       _fail=0; _ok=$((_ok + 1))
       if [ "$_tier" = plaintext ]; then
         if [ "$_ok" -ge "$_m" ] && [ "$(( $(_now) - _entered ))" -ge "$_dwell" ]; then if _exit_plain doh; then _tier="doh"; fi; fi
       else
-        [ "$_tier" = doh ] || { _tier="doh"; _set_tier doh; }
+        if _select_encrypted doh; then _tier=doh; fi
       fi
     else
       _ok=0; _fail=$((_fail + 1))

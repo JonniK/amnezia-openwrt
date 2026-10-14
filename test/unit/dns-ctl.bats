@@ -2,6 +2,14 @@
 load '../lib/harness.bash'
 CTL="$HARNESS_DIR/../openwrt/amnezia-dns-ctl.sh"
 
+@test "apply preserves a selected DoH listener ahead of failed DoT" {
+  export UCI_GET_amnezia_config_dns_active_tier=doh
+  run sh -c "AMNEZIA_HAS_BIN=1 AMNEZIA_STUBBY_INIT=stubby AMNEZIA_DOH_INIT=https-dns-proxy AMNEZIA_DNSMASQ_INIT=dnsmasq sh '$CTL' apply"
+  [ "$status" -eq 0 ]
+  _servers=$(sed -n 's/.*add_list dhcp.@dnsmasq\[0\].server=//p' "$STUB_LOG")
+  [ "$_servers" = $'127.0.0.1#5454\n127.0.0.1#5453' ]
+}
+
 setup() {
   export AMNEZIA_LIB="$HARNESS_DIR/../openwrt/lib"
   export UCI_GET_amnezia_config_dns_provider=quad9

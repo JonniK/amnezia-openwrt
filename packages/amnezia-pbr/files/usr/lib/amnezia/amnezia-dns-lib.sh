@@ -104,12 +104,18 @@ dns_iprule_flush() {
 }
 
 dns_dnsmasq_encrypted() {
+  _dde_tier=${1:-$(uci -q get amnezia.config.dns_active_tier 2>/dev/null)}
   uci set "dhcp.@dnsmasq[0].noresolv=1"
   uci set "dhcp.@dnsmasq[0].strictorder=1"
   uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
   uci -q del_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
-  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
-  uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+  if [ "$_dde_tier" = doh ]; then
+    uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+    uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
+  else
+    uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOT_PORT"
+    uci add_list "dhcp.@dnsmasq[0].server=127.0.0.1#$DOH_PORT"
+  fi
 }
 
 # Public resolvers used when DHCP provides no nameservers (WAN without DNS).
@@ -218,9 +224,33 @@ dns_dnsmasq_reload() {
   } > "$_tf"
   if dnsmasq --test -C "$_tf" >/dev/null 2>&1; then
     rm -f "$_tf"
-    uci commit dhcp 2>/dev/null || true
-    "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
-    return 0
+    _dr_config=${AMNEZIA_DHCP_CONFIG:-/etc/config/dhcp}
+    _dr_backup=""
+    if [ -f "$_dr_config" ]; then
+      _dr_backup=$(mktemp) || return 1
+      if ! cp -p "$_dr_config" "$_dr_backup"; then rm -f "$_dr_backup"; return 1; fi
+    elif [ "${AMNEZIA_DRYRUN:-0}" != 1 ]; then
+      return 1
+    fi
+    if ! uci commit dhcp 2>/dev/null; then
+      [ -z "$_dr_backup" ] || rm -f "$_dr_backup"
+      uci revert dhcp 2>/dev/null || true
+      return 1
+    fi
+    if "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null; then
+      [ -z "$_dr_backup" ] || rm -f "$_dr_backup"
+      return 0
+    fi
+    if [ -n "$_dr_backup" ]; then
+      if cp -p "$_dr_backup" "$_dr_config"; then
+        uci revert dhcp 2>/dev/null || true
+        "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || amz_log "dns: rollback restart failed"
+      else
+        amz_log "dns: restoring previous dnsmasq configuration failed"
+      fi
+      rm -f "$_dr_backup"
+    fi
+    return 1
   fi
   rm -f "$_tf"
   uci revert dhcp 2>/dev/null || true
