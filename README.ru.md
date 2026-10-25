@@ -59,7 +59,7 @@
   (банки, госуслуги, mail.ru не туннелируются). Актуально только в режиме
   `tunnel-default`.
 - **Allowlist (force-tunnel список)** для режима `direct-default`:
-  - Curated-источники обновляются ежедневно в 03:15, кешируются в
+  - Curated-источники обновляются ежедневно в 06:30, кешируются в
     `/etc/amnezia/force.d/`. Включены по умолчанию: `itdoginfo_inside`
     (RKN-блокированные домены) и `itdoginfo_services` (geoblock-RU:
     OpenAI, Anthropic, Spotify-аналоги). Переключаемые: `refilter_domains`,
@@ -334,7 +334,7 @@ boot-init (`/etc/init.d/amnezia-force-load`, START=96) автоматическ�
 | `antifilter` | выкл | antifilter.download список доменов |
 
 Переключать через `amnezia-failover-ctl set-source <name> 0|1` или чекбоксы LuCI.
-Авто-обновление запускается ежедневно в **03:15** через cron (`/etc/crontabs/root`).
+Авто-обновление запускается ежедневно в **06:30** через cron (`/etc/crontabs/root`).
 Для ручного запуска:
 
 ```sh

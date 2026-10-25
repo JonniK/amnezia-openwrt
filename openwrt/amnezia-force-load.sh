@@ -165,8 +165,26 @@ fi
 
   # Load IPs/CIDRs into amnezia_force4 (batch like amnezia-ru-cidr).
   # Flush only when --flush was requested; see comment at top for rationale.
+  # Flush + re-add run as ONE nft transaction so the set is never observed
+  # empty; if it fails the kernel rolls back and we fall back to add-only.
+  _flushed=0
   if [ "$_do_flush" = 1 ]; then
-    nft flush set inet fw4 "$SET_FORCE4" 2>/dev/null || true
+    _tmp_nft="$_tmp_ips.nft"
+    {
+      printf 'flush set inet fw4 %s\n' "$SET_FORCE4"
+      awk -v set="$SET_FORCE4" '
+        NF { buf = buf (n ? ", " : "") $0; n++
+             if (n >= 256) { print "add element inet fw4 " set " { " buf " }"; buf = ""; n = 0 } }
+        END { if (n) print "add element inet fw4 " set " { " buf " }" }
+      ' "$_tmp_ips"
+    } > "$_tmp_nft"
+    if nft -f "$_tmp_nft" 2>/dev/null; then
+      _flushed=1
+      : > "$_tmp_ips"
+    else
+      amz_log "force-load: atomic flush+reload failed; keeping current set, add-only"
+    fi
+    rm -f "$_tmp_nft"
   fi
   _n=0; _buf=""
   while IFS= read -r _c; do
@@ -234,6 +252,11 @@ fi
     # deterministic behaviour in tests and on-router.
     "$AMNEZIA_DNSMASQ_INIT" restart 2>/dev/null || true
     command -v dnsmasq_unlock >/dev/null 2>&1 && dnsmasq_unlock
+  elif [ "$_flushed" = 1 ]; then
+    # The flush evicted dnsmasq-learned IPs, and dnsmasq fills nftsets only on
+    # upstream replies (never on cache hits): drop its cache so the next
+    # queries refill the set.  SIGHUP clears the cache without a restart.
+    killall -HUP dnsmasq 2>/dev/null || true
   fi
   rm -f "$_tmp_domains"
 )

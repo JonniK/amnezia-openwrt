@@ -652,9 +652,9 @@ _amz_wire_force_engine() {
   mkdir -p /etc/crontabs 2>/dev/null || true
   touch "$_afe_cron" 2>/dev/null || true
   sed -i '/# amnezia-force-update/d' "$_afe_cron" 2>/dev/null || true
-  echo '15 3 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
+  echo '30 6 * * * /usr/bin/amnezia-force-update >/dev/null 2>&1 # amnezia-force-update' \
     >> "$_afe_cron" 2>/dev/null || true
-  amz_log "amnezia-force-update cron installed (daily 03:15)"
+  amz_log "amnezia-force-update cron installed (daily 06:30)"
 
   # Install the every-2-min force-warm cron entry (dedup, idempotent).
   sed -i '/# amnezia-force-warm/d' "$_afe_cron" 2>/dev/null || true
