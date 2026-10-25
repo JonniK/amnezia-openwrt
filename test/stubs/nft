@@ -1,5 +1,13 @@
 #!/bin/sh
 echo "nft $*" >> "${STUB_LOG:-/dev/null}"
+# nft -f <file>: one atomic transaction (real nft prints nothing on success).
+# Log each script line as "nft <line>" so greps work for both call styles;
+# NFT_FAIL_F=1 simulates a rejected transaction (kernel rolls back).
+if [ "$1" = "-f" ]; then
+  [ "${NFT_FAIL_F:-0}" = 1 ] && exit 1
+  sed 's/^/nft /' "$2" >> "${STUB_LOG:-/dev/null}"
+  exit 0
+fi
 # get element: return exit 1 by default (element not found) so auto-worker
 # candidates are not silently dropped as "in RU set".
 # NFT_RU4_MEMBER can be set to a specific IP to simulate membership.

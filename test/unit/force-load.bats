@@ -239,3 +239,57 @@ setup() {
     || { echo "domain from manual content not in conf"; false; }
 }
 
+
+# ---------------------------------------------------------------------------
+# --flush is atomic and refreshes the dnsmasq cache (nightly 03:15 outage fix)
+# ---------------------------------------------------------------------------
+
+@test "--flush swaps the set in ONE nft -f transaction (no standalone flush)" {
+  printf '5.5.5.5\n6.6.6.0/24\n' > "$FORCE_DIR/force-tunnel.list"
+  run sh "$SCRIPT" --flush
+  [ "$status" -eq 0 ]
+  grep -q '^nft -f ' "$STUB_LOG" || { echo "expected nft -f"; cat "$STUB_LOG"; false; }
+  # Only the in-transaction flush: a standalone `nft flush set` call would
+  # leave the set empty between commands.
+  _standalone=$(grep -c "^nft flush set inet fw4 amnezia_force4" "$STUB_LOG")
+  [ "$_standalone" -eq 1 ] || { echo "flush logged $_standalone times"; cat "$STUB_LOG"; false; }
+  # Flush precedes the adds inside the transaction; both IPs are in it.
+  _f=$(grep -n 'nft flush set inet fw4 amnezia_force4' "$STUB_LOG" | head -1 | cut -d: -f1)
+  _a=$(grep -n 'nft add element inet fw4 amnezia_force4 .*5\.5\.5\.5.*6\.6\.6\.0/24' "$STUB_LOG" | head -1 | cut -d: -f1)
+  [ -n "$_a" ] && [ "$_f" -lt "$_a" ] || { echo "flush/add order wrong"; cat "$STUB_LOG"; false; }
+  # No separate batch add after the transaction (it already loaded everything).
+  _adds=$(grep -c 'nft add element inet fw4 amnezia_force4' "$STUB_LOG")
+  [ "$_adds" -eq 1 ] || { echo "expected 1 add (inside -f), got $_adds"; cat "$STUB_LOG"; false; }
+}
+
+@test "--flush: failed transaction keeps the set and falls back to add-only" {
+  printf '5.5.5.5\n' > "$FORCE_DIR/force-tunnel.list"
+  NFT_FAIL_F=1 run sh "$SCRIPT" --flush
+  [ "$status" -eq 0 ]
+  run grep -q 'nft flush set' "$STUB_LOG"
+  [ "$status" -ne 0 ] || { echo "flush applied despite failed transaction"; false; }
+  grep -q '^nft add element inet fw4 amnezia_force4 { 5.5.5.5 }' "$STUB_LOG" \
+    || { echo "add-only fallback missing"; cat "$STUB_LOG"; false; }
+  run grep -q 'killall -HUP dnsmasq' "$STUB_LOG"
+  [ "$status" -ne 0 ] || { echo "cache cleared although nothing was flushed"; false; }
+}
+
+@test "--flush with unchanged domains clears the dnsmasq cache (SIGHUP, no restart)" {
+  printf '5.5.5.5\nexample.org\n' > "$FORCE_DIR/force-tunnel.list"
+  sh "$SCRIPT"          # first run writes the domain hash
+  : > "$STUB_LOG"
+  run sh "$SCRIPT" --flush
+  [ "$status" -eq 0 ]
+  grep -q 'killall -HUP dnsmasq' "$STUB_LOG" || { echo "no SIGHUP after flush"; cat "$STUB_LOG"; false; }
+  run grep -q 'dnsmasq restart' "$STUB_LOG"
+  [ "$status" -ne 0 ] || { echo "unexpected dnsmasq restart"; false; }
+}
+
+@test "default invocation never clears the dnsmasq cache" {
+  printf '5.5.5.5\nexample.org\n' > "$FORCE_DIR/force-tunnel.list"
+  sh "$SCRIPT"; : > "$STUB_LOG"
+  run sh "$SCRIPT"
+  [ "$status" -eq 0 ]
+  run grep -q 'killall' "$STUB_LOG"
+  [ "$status" -ne 0 ] || { echo "SIGHUP on add-only run"; false; }
+}

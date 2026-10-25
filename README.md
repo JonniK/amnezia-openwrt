@@ -60,7 +60,7 @@ What you get on the router:
   via WAN (banks, госуслуги, mail.ru etc. don't tunnel). Only relevant
   in `tunnel-default` mode.
 - **Allowlist (force-tunnel list)** for `direct-default` mode:
-  - Curated sources fetched daily at 03:15 and cached in
+  - Curated sources fetched daily at 06:30 and cached in
     `/etc/amnezia/force.d/`. Default-on: `itdoginfo_inside` (RKN-blocked
     domains) and `itdoginfo_services` (geoblock-RU: OpenAI, Anthropic,
     Spotify equivalents). Toggleable: `refilter_domains`, `refilter_ip`,
@@ -352,7 +352,7 @@ Sources and their defaults:
 | `antifilter` | off | antifilter.download domain list |
 
 Toggle via `amnezia-failover-ctl set-source <name> 0|1` or the LuCI
-checkboxes. Auto-update runs daily at **03:15** via cron
+checkboxes. Auto-update runs daily at **06:30** via cron
 (`/etc/crontabs/root`). To trigger an immediate fetch:
 
 ```sh
