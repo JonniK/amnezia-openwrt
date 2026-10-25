@@ -4,7 +4,8 @@
 # Commands: set-mode <failover|balance>, set-sticky <awgN>, set-weight <awgN> <w>, toggle <awgN>,
 #           set-routing-mode <tunnel-default|direct-default>, set-source <name> <0|1>,
 #           make-default <awgN>, force-pin <awgN>, force-unpin,
-#           restart <awgN>, master on|off
+#           restart <awgN>, master on|off,
+#           direct-add <domain>, direct-remove <domain>, direct-list
 # shellcheck source=lib/amnezia-common.sh
 AMNEZIA_LIB=${AMNEZIA_LIB:-/usr/lib/amnezia}
 if [ -f "$AMNEZIA_LIB/amnezia-common.sh" ]; then
@@ -28,6 +29,46 @@ _dns_lib="${AMNEZIA_LIB}/amnezia-dns-lib.sh"
 
 _restart_monitor() {
   ( sleep 1 && /etc/init.d/amnezia-failover restart ) &
+}
+
+# Direct-override list (see docs/superpowers/specs/2026-07-22-direct-override-set-design.md).
+FORCE_DIR="${FORCE_DIR:-/etc/amnezia}"
+
+# True when $1 is a plausible domain or IPv4/CIDR token: non-empty, no
+# whitespace/shell-metacharacters, no leading '-' or '/' (rejects flag-like
+# input such as "-x" that would otherwise reach `nslookup -x` or emit a
+# malformed nftset=/-x/... directive — force-load's dnsmasq restart has no
+# health-check/rollback, so a bad directive is a DNS-outage vector), and
+# shaped like either a domain (at least one '.', dot-separated labels of
+# [A-Za-z0-9-] with no leading/trailing '-' per label) or an IPv4/CIDR
+# (dotted-quad, optional /prefix — amnezia-force-load re-validates octets and
+# prefix numerically; this is just a coarse shape gate).
+_ctl_direct_valid() {
+  case "$1" in
+    '') return 1 ;;
+    -*|/*) return 1 ;;
+    *[!A-Za-z0-9.:/_-]*) return 1 ;;
+  esac
+  case "$1" in
+    *.*) ;;
+    *) return 1 ;;
+  esac
+  _cdv_rest="$1"
+  while [ -n "$_cdv_rest" ]; do
+    _cdv_label="${_cdv_rest%%.*}"
+    case "$_cdv_rest" in
+      *.*) _cdv_rest="${_cdv_rest#*.}" ;;
+      *) _cdv_rest="" ;;
+    esac
+    # A label may itself carry a trailing "/prefix" (last label of a CIDR);
+    # strip it before checking dash placement.
+    _cdv_label="${_cdv_label%%/*}"
+    case "$_cdv_label" in
+      '') return 1 ;;
+      -*|*-) return 1 ;;
+    esac
+  done
+  return 0
 }
 
 # True when uci reports a section of type 'tunnel' for the given name.
@@ -238,8 +279,62 @@ case "$1" in
       *) amz_log "ctl: master requires on|off"; exit 1 ;;
     esac
     ;;
+  direct-add)
+    _dom="$2"
+    _ctl_direct_valid "$_dom" || { amz_log "ctl: direct-add invalid domain '$_dom'"; exit 1; }
+    mkdir -p "$FORCE_DIR" 2>/dev/null || true
+    _dtl="$FORCE_DIR/direct-tunnel.list"
+    touch "$_dtl" 2>/dev/null || true
+    if grep -qxF "$_dom" "$_dtl" 2>/dev/null; then
+      _result=already-present
+    else
+      printf '%s\n' "$_dom" >> "$_dtl"
+      _result=added
+    fi
+    if [ "$_result" = added ]; then
+      # Only run force-load (+ the one-shot resolve) when something actually
+      # changed; the hash is unchanged on already-present so force-load would
+      # be wasted work.
+      ${AMNEZIA_FORCE_LOAD:-amnezia-force-load}
+      # Resolve once so the domain's current IPs land in amnezia_direct4 immediately.
+      timeout 5 nslookup "$_dom" 127.0.0.1 >/dev/null 2>&1 || true
+    fi
+    printf '{"domain":"%s","result":"%s"}\n' "$_dom" "$_result"
+    ;;
+  direct-remove)
+    _dom="$2"
+    _ctl_direct_valid "$_dom" || { amz_log "ctl: direct-remove invalid domain '$_dom'"; exit 1; }
+    _dtl="$FORCE_DIR/direct-tunnel.list"
+    if [ -f "$_dtl" ] && grep -qxF "$_dom" "$_dtl" 2>/dev/null; then
+      _dtl_tmp=$(mktemp "$FORCE_DIR/.amz-direct-rm.XXXXXX" 2>/dev/null || echo "$FORCE_DIR/.amz-direct-rm.$$")
+      grep -vxF "$_dom" "$_dtl" > "$_dtl_tmp" 2>/dev/null || true
+      mv "$_dtl_tmp" "$_dtl"
+      _result=removed
+      # --flush-direct so the removal takes effect (SET-SCOPED: flushes ONLY
+      # amnezia_direct4, never amnezia_force4 — see H1 fix in
+      # amnezia-force-load.sh; the old global --flush evicted runtime-resolved
+      # force4 CDN IPs and stripped the fwmark from ESTABLISHED flows to
+      # RU-blocked hosts on every direct-remove call).
+      ${AMNEZIA_FORCE_LOAD:-amnezia-force-load} --flush-direct
+    else
+      # Not-found is a pure no-op: nothing changed, so don't even invoke
+      # force-load (no wasted work, no incidental flush of anything).
+      _result=not-found
+    fi
+    printf '{"domain":"%s","result":"%s"}\n' "$_dom" "$_result"
+    ;;
+  direct-list)
+    _dtl="$FORCE_DIR/direct-tunnel.list"
+    if [ -f "$_dtl" ]; then
+      while IFS= read -r _dl_line; do
+        _dl_line=$(printf '%s' "$_dl_line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        case "$_dl_line" in ''|\#*) continue ;; esac
+        printf '%s\n' "$_dl_line"
+      done < "$_dtl"
+    fi
+    ;;
   *)
-    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|set-failback|restart|master} [args]" >&2
+    echo "Usage: $0 {set-mode|set-sticky|set-weight|toggle|set-routing-mode|set-source|make-default|force-pin|force-unpin|set-failback|restart|master|direct-add|direct-remove|direct-list} [args]" >&2
     exit 1
     ;;
 esac

@@ -3,10 +3,14 @@ set amnezia_ru4      { type ipv4_addr; flags interval; auto-merge; }
 set amnezia_ru_tld4  { type ipv4_addr; flags interval; auto-merge; }
 set amnezia_sticky4  { type ipv4_addr; flags interval; auto-merge; }
 set amnezia_force4   { type ipv4_addr; flags interval; auto-merge; }
+set amnezia_direct4  { type ipv4_addr; flags interval; auto-merge; }
 
 chain amnezia_classify {
 	type filter hook prerouting priority mangle; policy accept;
 	iifname != "@@LAN_IFNAME@@" return
+	# Direct-override: always WAN, wins over force/sticky (e.g. chat.google.com
+	# must not be dragged into the tunnel by the whole-Google-AS force rule).
+	ip daddr @amnezia_direct4 return
 	# Allowlist mode: tunnel ONLY the force list (and sticky); everything else direct.
 	ip daddr @amnezia_sticky4 meta mark set 0x0a0000 return
 	ip daddr @amnezia_force4  meta mark set 0x0b0000 return
