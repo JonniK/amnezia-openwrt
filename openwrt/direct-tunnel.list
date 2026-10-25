@@ -1,0 +1,4 @@
+# Direct-override domains: always routed via WAN, winning over force/sticky.
+# Empty by default. Google hosts share GFE anycast IPs, so a Google domain
+# here also drags sibling services (Meet, Chat APIs) direct and splits one
+# session across two exits. Add entries with: amnezia-failover-ctl direct-add
